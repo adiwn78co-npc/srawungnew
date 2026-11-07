@@ -1,10 +1,10 @@
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { db } from './src/server/db.js';
-import {
+import { db } from './src/server/db.ts';
+import type {
   User,
   UserAccountStatus,
   Program,
@@ -32,30 +32,6 @@ import {
   ParticipantProgramInvolvement,
   GroupMemberCompositionMatrix,
   GroupCompositionRowKey,
-} from './src/types/index.js';
-import {
-  generateProgramCode,
-  getRomanMonth,
-  formatTorNumber,
-  getTorDraftPreview,
-  computeHierarchyCode,
-} from './src/lib/torNumberGenerator.js';
-import {
-  syncApprovalHubData,
-  executeApprovalHubAction,
-  resolveUserApprovalAccess,
-  filterApprovalItemsForUser,
-} from './src/server/approvalHubService.js';
-import {
-  ensureAttendanceSystemInitialized,
-  calculateDistanceMeters,
-  calculateWorkHoursBetween,
-  enumerateDatesBetween,
-  calculateWorkingDaysBetween,
-  resolveAttendanceWorkflowType,
-  isAttendanceArrangementActiveOnCalendar,
-} from './src/server/attendanceService.js';
-import {
   WijnaWorkCategory,
   TimesheetWorkItem,
   DailyAttendanceTimesheetRecord,
@@ -68,7 +44,29 @@ import {
   EmployeeTrainingRecord,
   EmployeeTrainingApprovalStatus,
   AttendanceAuditTrailEntry,
-} from './src/types/index.js';
+} from './src/types/index.ts';
+import {
+  generateProgramCode,
+  getRomanMonth,
+  formatTorNumber,
+  getTorDraftPreview,
+  computeHierarchyCode,
+} from './src/lib/torNumberGenerator.ts';
+import {
+  syncApprovalHubData,
+  executeApprovalHubAction,
+  resolveUserApprovalAccess,
+  filterApprovalItemsForUser,
+} from './src/server/approvalHubService.ts';
+import {
+  ensureAttendanceSystemInitialized,
+  calculateDistanceMeters,
+  calculateWorkHoursBetween,
+  enumerateDatesBetween,
+  calculateWorkingDaysBetween,
+  resolveAttendanceWorkflowType,
+  isAttendanceArrangementActiveOnCalendar,
+} from './src/server/attendanceService.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

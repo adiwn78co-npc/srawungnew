@@ -86,7 +86,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onBackToMobileQuickMode,
 }) => {
   const { currentUser, isAdmin } = useAuth();
-  const { sidebarBrandName } = useOrganizationSettings();
+  const { sidebarBrandName, sidebarSubtitle } = useOrganizationSettings();
 
   const [attendanceBundle, setAttendanceBundle] = useState<AttendanceSystemBundle | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -221,6 +221,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             {sidebarBrandName}
           </h1>
+          {sidebarSubtitle && (
+            <p
+              className="text-[11px] font-medium text-[#787774] truncate mt-0.5"
+              title={sidebarSubtitle}
+            >
+              {sidebarSubtitle}
+            </p>
+          )}
         </div>
         {onCloseMobileDrawer && (
           <button
@@ -253,9 +261,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Navigation Links */}
       <nav className="flex-1 px-2.5 py-3 space-y-0.5">
-        <div className="px-2 py-1 text-[11px] font-semibold text-[#787774] uppercase tracking-wider">
-          Menu Utama
-        </div>
         {navItems
           .filter((item) => item.show)
           .map((item) => {

@@ -1,9 +1,9 @@
-import {
+import type {
   AttendanceSystemBundle,
   AttendanceWorkflowType,
   WijnaLocationConfig,
   LeaveCategoryPolicy,
-} from '../types/index.js';
+} from '../types/index.ts';
 
 /**
  * Menentukan alur kerja kehadiran (WFA, Cuti, Izin, Flextime, Kehadiran) berdasarkan peran pengguna:

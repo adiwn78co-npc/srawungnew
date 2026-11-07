@@ -1,7 +1,7 @@
-import {
+import type {
   DatabaseSchema,
-} from './db.js';
-import {
+} from './db.ts';
+import type {
   ApprovalAccessProfile,
   ApprovalCategoryCode,
   ApprovalCategoryWorkflowConfig,
@@ -17,7 +17,7 @@ import {
   MonitoringReportItem,
   Tor,
   User,
-} from '../types/index.js';
+} from '../types/index.ts';
 
 const ALL_CATEGORIES: ApprovalCategoryCode[] = [
   'tor',

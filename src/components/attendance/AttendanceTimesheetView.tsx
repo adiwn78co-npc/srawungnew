@@ -746,6 +746,35 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     );
   }, [bundle, currentUser, lockedTodayDate]);
 
+  const [userCoordLat, setUserCoordLat] = useState<number>(-6.2297);
+  const [userCoordLon, setUserCoordLon] = useState<number>(106.8532);
+  const [customCoordTouched, setCustomCoordTouched] = useState<boolean>(false);
+  const [detectingGps, setDetectingGps] = useState<boolean>(false);
+  const [clockInVerificationResult, setClockInVerificationResult] = useState<{
+    matched: boolean;
+    distanceMeters: number;
+    userLat: number;
+    userLon: number;
+    officeLat: number;
+    officeLon: number;
+    radiusMeters: number;
+    message: string;
+    checkedAt: string;
+  } | null>(null);
+
+  // Sinkronkan titik koordinat default staf dengan titik kantor saat bundle dimuat (jika belum diubah manual)
+  useEffect(() => {
+    if (bundle?.locationConfig && !customCoordTouched && !isWorkingOutsideArea) {
+      setUserCoordLat(bundle.locationConfig.latitude);
+      setUserCoordLon(bundle.locationConfig.longitude);
+    }
+  }, [
+    bundle?.locationConfig?.latitude,
+    bundle?.locationConfig?.longitude,
+    customCoordTouched,
+    isWorkingOutsideArea,
+  ]);
+
   // Sinkronkan maksimal 2 kontribusi pekerjaan harian saat staf berubah atau record dimuat
   useEffect(() => {
     if (myTodayRecord && myTodayRecord.timesheetItems.length > 0) {
@@ -759,6 +788,10 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       );
       setIsWorkingOutsideArea(Boolean(myTodayRecord.isOutsideWorkLocation));
       setOutsideReasonInput(myTodayRecord.outsideLocationReason || '');
+      if (myTodayRecord.clockInLocation) {
+        setUserCoordLat(myTodayRecord.clockInLocation.latitude);
+        setUserCoordLon(myTodayRecord.clockInLocation.longitude);
+      }
     } else {
       setContributions([
         {
@@ -768,18 +801,81 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       ]);
       setIsWorkingOutsideArea(false);
       setOutsideReasonInput('');
+      setCustomCoordTouched(false);
+      if (bundle?.locationConfig) {
+        setUserCoordLat(bundle.locationConfig.latitude);
+        setUserCoordLon(bundle.locationConfig.longitude);
+      }
     }
+    setClockInVerificationResult(null);
   }, [myTodayRecord?.id, lockedTodayDate, currentUser?.id]);
 
-  // Koordinat otomatis mengacu pada area WIJNA (radius 5m yang ditentukan Finance/HR)
+  // Hitung jarak Haversine (meter) antara posisi pengguna dan titik koordinat kantor
+  const calculateClientDistanceMeters = useCallback(
+    (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+      const R = 6371000;
+      const toRad = (deg: number) => (deg * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) *
+          Math.cos(toRad(lat2)) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return Math.round(R * c);
+    },
+    []
+  );
+
+  // Koordinat aktif yang akan dicek bersamaan saat tombol Clock In ditekan
   const resolvedCoords = useMemo(() => {
     const officeLat = bundle?.locationConfig?.latitude ?? -6.2297;
     const officeLon = bundle?.locationConfig?.longitude ?? 106.8532;
+    if (customCoordTouched) {
+      return {
+        lat: Number.isFinite(userCoordLat) ? userCoordLat : officeLat,
+        lon: Number.isFinite(userCoordLon) ? userCoordLon : officeLon,
+      };
+    }
     if (isWorkingOutsideArea) {
       return { lat: -6.8586, lon: 107.9204 };
     }
     return { lat: officeLat, lon: officeLon };
-  }, [bundle?.locationConfig, isWorkingOutsideArea]);
+  }, [bundle?.locationConfig, isWorkingOutsideArea, customCoordTouched, userCoordLat, userCoordLon]);
+
+  // Ambil koordinat GPS perangkat secara langsung bila diinginkan pengguna
+  const handleDetectDeviceGps = () => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setErrorMsg('Browser tidak mendukung fitur Geolocation GPS.');
+      return;
+    }
+    setDetectingGps(true);
+    setErrorMsg(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = Number(pos.coords.latitude.toFixed(6));
+        const lon = Number(pos.coords.longitude.toFixed(6));
+        const officeLat = bundle?.locationConfig?.latitude ?? -6.2297;
+        const officeLon = bundle?.locationConfig?.longitude ?? 106.8532;
+        const allowedRadius = bundle?.locationConfig?.radiusMeters || 5;
+        const dist = calculateClientDistanceMeters(officeLat, officeLon, lat, lon);
+        setUserCoordLat(lat);
+        setUserCoordLon(lon);
+        setCustomCoordTouched(true);
+        setIsWorkingOutsideArea(dist > allowedRadius);
+        setClockInVerificationResult(null);
+        setDetectingGps(false);
+        showToast(`Koordinat GPS terdeteksi: ${lat.toFixed(4)}, ${lon.toFixed(4)} (Jarak ${dist}m dari kantor).`);
+      },
+      () => {
+        setDetectingGps(false);
+        setErrorMsg('Gagal mendapatkan lokasi GPS perangkat. Pastikan izin lokasi diaktifkan atau pilih koordinat secara manual.');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
 
   // Simpan otomatis saat mengubah kontribusi di tengah jam kerja atau saat WFA
   const syncActiveContributions = async (nextList: ContributionDraft[]) => {
@@ -830,28 +926,42 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     );
   };
 
-  // TOMBOL 1: CLOCK IN (Hanya dapat dilakukan di dalam titik koordinat WIJNA yang ditentukan Direktur)
+  // TOMBOL 1: CLOCK IN + CEK KOORDINAT KANTOR SECARA BERSAMAAN SAAT DIKLIK
   const handleClockIn = async () => {
     setErrorMsg(null);
-    if (isWorkingOutsideArea) {
-      setErrorMsg(
-        `Tidak dapat melakukan Clock In karena posisi Anda berada di luar titik koordinat WIJNA (Radius ${
-          bundle?.locationConfig?.radiusMeters || 5
-        }m) yang ditentukan oleh Direktur.`
-      );
-      return;
-    }
+    setClockInVerificationResult(null);
+
     if (contributions.length === 0) {
       setErrorMsg('Pilih minimal 1 fokus kontribusi sebelum melakukan Clock In.');
       return;
     }
 
+    const officeLat = bundle?.locationConfig?.latitude ?? -6.2297;
+    const officeLon = bundle?.locationConfig?.longitude ?? 106.8532;
+    const allowedRadius = bundle?.locationConfig?.radiusMeters || 5;
+    const targetLat = resolvedCoords.lat;
+    const targetLon = resolvedCoords.lon;
+    const distanceMeters = calculateClientDistanceMeters(
+      officeLat,
+      officeLon,
+      targetLat,
+      targetLon
+    );
+    const isMatchedWithOffice = distanceMeters <= allowedRadius;
+    const checkedAtTime = new Date().toLocaleTimeString('id-ID', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+
     setSubmittingAction(true);
     try {
+      // Mengecek kecocokan koordinat dan mengeksekusi Clock In secara bersamaan
       const res = await api.clockInAttendance({
         date: lockedTodayDate,
-        latitude: resolvedCoords.lat,
-        longitude: resolvedCoords.lon,
+        latitude: targetLat,
+        longitude: targetLon,
         workItems: contributions.slice(0, 2).map((c) => ({
           category: c.category,
           shortDescription: c.shortDescription.trim() || c.category,
@@ -859,9 +969,38 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       });
       setBundle(res.bundle);
       setNowMs(Date.now());
-      showToast('Clock In berhasil! Durasi kerja berjalan otomatis & kontribusi tercatat.');
+      window.dispatchEvent(
+        new CustomEvent('wijna-attendance-bundle-updated', { detail: res.bundle })
+      );
+      const successMsg = `Verifikasi Koordinat Cocok (${targetLat.toFixed(4)}, ${targetLon.toFixed(4)} • Jarak ${distanceMeters}m ≤ Radius ${allowedRadius}m) — Clock In Berhasil!`;
+      setClockInVerificationResult({
+        matched: true,
+        distanceMeters,
+        userLat: targetLat,
+        userLon: targetLon,
+        officeLat,
+        officeLon,
+        radiusMeters: allowedRadius,
+        message: successMsg,
+        checkedAt: checkedAtTime,
+      });
+      showToast(successMsg);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Gagal melakukan Clock In.');
+      const failMsg = !isMatchedWithOffice
+        ? `Verifikasi Koordinat Gagal: Posisi Anda (${targetLat.toFixed(4)}, ${targetLon.toFixed(4)}) berjarak ${distanceMeters}m dari titik kantor (${officeLat.toFixed(4)}, ${officeLon.toFixed(4)} • batas radius ≤ ${allowedRadius}m). Clock In ditolak.`
+        : err.message || 'Gagal melakukan Clock In.';
+      setClockInVerificationResult({
+        matched: false,
+        distanceMeters,
+        userLat: targetLat,
+        userLon: targetLon,
+        officeLat,
+        officeLon,
+        radiusMeters: allowedRadius,
+        message: failMsg,
+        checkedAt: checkedAtTime,
+      });
+      setErrorMsg(failMsg);
     } finally {
       setSubmittingAction(false);
     }
@@ -2168,40 +2307,195 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                 </p>
               </div>
 
-              {/* Info Tanggal & Lokasi yang Tenang (Tidak Mengintimidasi) */}
+              {/* Info Tanggal & Titik Koordinat Referensi Kantor */}
               <div className="flex flex-wrap items-center gap-2 text-xs shrink-0">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FAF9F6] text-[#475569] border border-[#E6E5E0] font-medium">
                   <Calendar className="w-3.5 h-3.5 text-[#64748B]" />
                   <span>{formatDateIndonesianLocked(lockedTodayDate)}</span>
                 </span>
 
-                {!isWorkingOutsideArea ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F0FAF6] text-[#16654E] border border-[#C2EBD9] font-medium"
-                    title={`Area Kantor WIJNA (Radius ≤ ${radiusMeters}m)`}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
-                    <span>Area WIJNA</span>
+                <span
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F0FAF6] text-[#16654E] border border-[#C2EBD9] font-medium"
+                  title={`Titik Koordinat Kantor: ${(bundle?.locationConfig?.latitude ?? -6.2297).toFixed(4)}, ${(bundle?.locationConfig?.longitude ?? 106.8532).toFixed(4)} (Radius ≤ ${radiusMeters}m)`}
+                >
+                  <MapPin className="w-3.5 h-3.5 text-[#0F7B6C]" />
+                  <span>
+                    Titik Kantor: {(bundle?.locationConfig?.latitude ?? -6.2297).toFixed(4)},{' '}
+                    {(bundle?.locationConfig?.longitude ?? 106.8532).toFixed(4)} (≤ {radiusMeters}m)
                   </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 font-medium">
-                    <span>Tugas Luar Kantor</span>
-                  </span>
-                )}
-
-                {!hasClockedIn && (
-                  <label className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] text-[#64748B] hover:bg-[#FAF9F6] cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={isWorkingOutsideArea}
-                      onChange={(e) => setIsWorkingOutsideArea(e.target.checked)}
-                      className="rounded border-[#CBD5E1]"
-                    />
-                    <span>Di luar kantor?</span>
-                  </label>
-                )}
+                </span>
               </div>
             </div>
+
+            {/* Panel Koordinat Lokasi Saat Ini (Dicek Bersamaan Saat Klik Clock In) */}
+            {!isWfaDay && (
+              <div className="p-3 rounded-xl bg-[#FAF9F6] border border-[#E6E5E0] space-y-2.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-[#1E293B]">
+                      <MapPin className="w-3.5 h-3.5 text-[#1F7A63] shrink-0" />
+                      <span>
+                        Verifikasi Koordinat &amp; Clock In Simultan ({officeName})
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#64748B]">
+                      Saat tombol <strong>Clock In</strong> ditekan, sistem langsung mengecek kecocokan koordinat Anda dengan titik koordinat kantor secara bersamaan. Jika cocok akan berhasil Clock In, dan jika di luar koordinat kantor akan ditolak.
+                    </p>
+                  </div>
+
+                  {!hasClockedIn && (
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const oLat = bundle?.locationConfig?.latitude ?? -6.2297;
+                          const oLon = bundle?.locationConfig?.longitude ?? 106.8532;
+                          setIsWorkingOutsideArea(false);
+                          setCustomCoordTouched(true);
+                          setUserCoordLat(oLat);
+                          setUserCoordLon(oLon);
+                          setClockInVerificationResult(null);
+                          setErrorMsg(null);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
+                          !isWorkingOutsideArea &&
+                          Math.abs(resolvedCoords.lat - (bundle?.locationConfig?.latitude ?? -6.2297)) < 0.0001 &&
+                          Math.abs(resolvedCoords.lon - (bundle?.locationConfig?.longitude ?? 106.8532)) < 0.0001
+                            ? 'bg-[#1F7A63] text-white border-[#1F7A63]'
+                            : 'bg-white text-[#334155] border-[#D8D6CE] hover:bg-[#F3F2EE]'
+                        }`}
+                      >
+                        Sesuai Koordinat Kantor
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsWorkingOutsideArea(true);
+                          setCustomCoordTouched(true);
+                          setUserCoordLat(-6.8586);
+                          setUserCoordLon(107.9204);
+                          setClockInVerificationResult(null);
+                          setErrorMsg(null);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
+                          isWorkingOutsideArea
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-white text-[#334155] border-[#D8D6CE] hover:bg-[#F3F2EE]'
+                        }`}
+                      >
+                        Di Luar Area Kantor
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={detectingGps}
+                        onClick={handleDetectDeviceGps}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-semibold border border-[#BCE3DC] bg-[#F0F7F4] hover:bg-[#E2F2EB] text-[#16654E] transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {detectingGps ? 'Mendeteksi GPS...' : 'Deteksi GPS Perangkat'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Baris Input Koordinat Pengguna & Info Referensi Kantor */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1.5 border-t border-[#ECEAE2] text-xs">
+                  <div className="flex items-center gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-[#E2E0D8]">
+                    <span className="text-[11px] font-medium text-[#64748B] shrink-0">
+                      Latitude Anda:
+                    </span>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      disabled={hasClockedIn}
+                      value={resolvedCoords.lat}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setCustomCoordTouched(true);
+                        setUserCoordLat(Number.isFinite(val) ? val : 0);
+                        const oLat = bundle?.locationConfig?.latitude ?? -6.2297;
+                        const oLon = bundle?.locationConfig?.longitude ?? 106.8532;
+                        const dist = calculateClientDistanceMeters(
+                          oLat,
+                          oLon,
+                          Number.isFinite(val) ? val : 0,
+                          resolvedCoords.lon
+                        );
+                        setIsWorkingOutsideArea(dist > (bundle?.locationConfig?.radiusMeters || 5));
+                        setClockInVerificationResult(null);
+                      }}
+                      className="w-full font-mono font-semibold text-[#1E293B] bg-transparent focus:outline-none disabled:text-[#64748B]"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-[#E2E0D8]">
+                    <span className="text-[11px] font-medium text-[#64748B] shrink-0">
+                      Longitude Anda:
+                    </span>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      disabled={hasClockedIn}
+                      value={resolvedCoords.lon}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setCustomCoordTouched(true);
+                        setUserCoordLon(Number.isFinite(val) ? val : 0);
+                        const oLat = bundle?.locationConfig?.latitude ?? -6.2297;
+                        const oLon = bundle?.locationConfig?.longitude ?? 106.8532;
+                        const dist = calculateClientDistanceMeters(
+                          oLat,
+                          oLon,
+                          resolvedCoords.lat,
+                          Number.isFinite(val) ? val : 0
+                        );
+                        setIsWorkingOutsideArea(dist > (bundle?.locationConfig?.radiusMeters || 5));
+                        setClockInVerificationResult(null);
+                      }}
+                      className="w-full font-mono font-semibold text-[#1E293B] bg-transparent focus:outline-none disabled:text-[#64748B]"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded-lg border border-[#E2E0D8]">
+                    <span className="text-[11px] font-medium text-[#64748B]">
+                      Target Kantor:
+                    </span>
+                    <span className="font-mono font-semibold text-[#0F7B6C] text-[11px]">
+                      {(bundle?.locationConfig?.latitude ?? -6.2297).toFixed(4)},{' '}
+                      {(bundle?.locationConfig?.longitude ?? 106.8532).toFixed(4)} (≤ {radiusMeters}m)
+                    </span>
+                  </div>
+                </div>
+
+                {/* Hasil Pengecekan Koordinat & Clock In Simultan */}
+                {clockInVerificationResult && (
+                  <div
+                    className={`p-2.5 rounded-lg border flex items-start gap-2 text-xs ${
+                      clockInVerificationResult.matched
+                        ? 'bg-[#F0FAF6] border-[#A7F3D0] text-[#065F46]'
+                        : 'bg-red-50 border-red-200 text-red-800'
+                    }`}
+                  >
+                    {clockInVerificationResult.matched ? (
+                      <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="space-y-0.5">
+                      <div className="font-semibold">
+                        {clockInVerificationResult.matched
+                          ? `Pengecekan Koordinat & Clock In Berhasil (${clockInVerificationResult.checkedAt})`
+                          : `Pengecekan Koordinat & Clock In Ditolak (${clockInVerificationResult.checkedAt})`}
+                      </div>
+                      <div className="text-[11px] leading-relaxed">
+                        {clockInVerificationResult.message}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Pilihan 6 Fokus Aktivitas (Kata Fokus di Baris Atas Sendiri, Tidak Menghimpit Judul) */}
             <div className="space-y-2">
@@ -2307,15 +2601,6 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
               </div>
             </div>
 
-            {isWorkingOutsideArea && !hasClockedIn && (
-              <div className="p-3 rounded-lg bg-amber-50/90 border border-amber-200 flex items-center gap-2 text-xs text-amber-900">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>
-                  Presensi Clock In dilakukan saat berada di area kantor WIJNA ({officeName}).
-                </span>
-              </div>
-            )}
-
             {/* Baris Bawah: Status Kehadiran yang Tenang & Tombol Clock In / Clock Out Besar */}
             {isWfaDay ? (
               <div className="p-3.5 rounded-xl bg-[#F0FAF6] border border-[#C2EBD9] flex items-center justify-between gap-2 text-xs text-[#16654E]">
@@ -2374,17 +2659,15 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                   </div>
                 </div>
 
-                {/* Tombol Besar Clock In & Clock Out yang Ramah & Nyaman */}
+                {/* Tombol Besar Clock In (Cek Koordinat & Clock In Bersamaan) & Clock Out */}
                 <div className="grid grid-cols-2 gap-2.5 lg:w-[420px]">
                   <button
                     type="button"
-                    disabled={submittingAction || hasClockedIn || isWorkingOutsideArea}
+                    disabled={submittingAction || hasClockedIn}
                     onClick={handleClockIn}
                     className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
                       hasClockedIn
                         ? 'bg-[#F0FAF6] text-[#16654E] border border-[#B8E6D4] cursor-default'
-                        : isWorkingOutsideArea
-                        ? 'bg-[#F4F3EF] text-[#9B9A97] border border-[#E5E4DE] cursor-not-allowed'
                         : 'bg-[#1F7A63] hover:bg-[#17614E] text-white shadow-xs cursor-pointer'
                     }`}
                   >
@@ -2392,8 +2675,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                     <span>
                       {hasClockedIn
                         ? 'Sudah Clock In'
-                        : isWorkingOutsideArea
-                        ? 'Di Luar Area'
+                        : submittingAction
+                        ? 'Mengecek & Clock In...'
                         : 'Clock In'}
                     </span>
                   </button>
@@ -5245,28 +5528,55 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                   className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-medium text-[#37352F] mb-1">Latitude</label>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    required
-                    value={cfgLat}
-                    onChange={(e) => setCfgLat(parseFloat(e.target.value) || 0)}
-                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded font-mono"
-                  />
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-[#37352F]">Titik Koordinat Kantor</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition(
+                          (pos) => {
+                            setCfgLat(Number(pos.coords.latitude.toFixed(6)));
+                            setCfgLon(Number(pos.coords.longitude.toFixed(6)));
+                            showToast('Titik GPS lokasi saat ini berhasil dimasukkan ke form koordinat kantor.');
+                          },
+                          () => {
+                            setErrorMsg('Gagal membaca GPS perangkat. Pastikan izin lokasi browser aktif.');
+                          },
+                          { enableHighAccuracy: true, timeout: 8000 }
+                        );
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#F0F7F4] hover:bg-[#E2F2EB] text-[#16654E] border border-[#BCE3DC] text-[11px] font-semibold cursor-pointer"
+                  >
+                    <MapPin className="w-3 h-3" />
+                    <span>Gunakan GPS Saat Ini</span>
+                  </button>
                 </div>
-                <div>
-                  <label className="block font-medium text-[#37352F] mb-1">Longitude</label>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    required
-                    value={cfgLon}
-                    onChange={(e) => setCfgLon(parseFloat(e.target.value) || 0)}
-                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded font-mono"
-                  />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-medium text-[#37352F] mb-1">Latitude</label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      required
+                      value={cfgLat}
+                      onChange={(e) => setCfgLat(parseFloat(e.target.value) || 0)}
+                      className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-[#37352F] mb-1">Longitude</label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      required
+                      value={cfgLon}
+                      onChange={(e) => setCfgLon(parseFloat(e.target.value) || 0)}
+                      className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded font-mono"
+                    />
+                  </div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2">

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import {
+import type {
   User,
   Program,
   Outcome,
@@ -21,7 +21,7 @@ import {
   ApprovalNotificationItem,
   MasterParticipantRecord,
   AttendanceSystemBundle,
-} from '../types/index.js';
+} from '../types/index.ts';
 
 export interface DatabaseSchema {
   users: User[];
