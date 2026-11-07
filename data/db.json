@@ -1,0 +1,331 @@
+{
+  "users": [
+    {
+      "id": "user-admin",
+      "name": "Bambang Sudiro",
+      "email": "admin@ngo-harmoni.org",
+      "role": "admin",
+      "roleTitle": "System Administrator",
+      "department": "Teknologi & Tata Kelola Sistem",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": false,
+        "canCreateTor": false,
+        "canApproveTor": false,
+        "canManageUsers": true,
+        "canViewAllTors": true
+      },
+      "createdAt": "2026-01-10T08:00:00Z",
+      "username": "admin",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-01-10T08:00:00Z",
+      "mustChangePassword": true,
+      "lastLoginAt": "2026-11-06T14:43:04.259Z"
+    },
+    {
+      "id": "user-director",
+      "name": "Dr. Hendra Wijaya",
+      "email": "director@ngo-harmoni.org",
+      "role": "director",
+      "roleTitle": "Executive Director",
+      "department": "Direktorat Eksekutif",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": true,
+        "canCreateTor": true,
+        "canApproveTor": true,
+        "canManageUsers": false,
+        "canViewAllTors": true
+      },
+      "createdAt": "2026-01-10T08:00:00Z",
+      "username": "director",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-01-10T08:00:00Z",
+      "mustChangePassword": true
+    },
+    {
+      "id": "user-finance",
+      "name": "Ratna Kusuma, S.E.",
+      "email": "finance@ngo-harmoni.org",
+      "role": "finance",
+      "roleTitle": "Finance & HR Manager",
+      "department": "Keuangan, HR & Kepatuhan",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": false,
+        "canCreateTor": true,
+        "canApproveTor": true,
+        "canManageUsers": false,
+        "canViewAllTors": true
+      },
+      "createdAt": "2026-01-12T08:00:00Z",
+      "username": "finance",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-01-12T08:00:00Z",
+      "mustChangePassword": true
+    },
+    {
+      "id": "user-pm",
+      "name": "Dimas Pratama, M.Sc.",
+      "email": "pm@ngo-harmoni.org",
+      "role": "program_manager",
+      "roleTitle": "Program Manager",
+      "department": "Divisi Manajemen Program",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": true,
+        "canCreateTor": true,
+        "canApproveTor": false,
+        "canManageUsers": false,
+        "canViewAllTors": true
+      },
+      "createdAt": "2026-01-15T08:00:00Z",
+      "username": "pm",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-01-15T08:00:00Z",
+      "mustChangePassword": true
+    },
+    {
+      "id": "user-meal",
+      "name": "Maya Safitri, S.Sos.",
+      "email": "meal@ngo-harmoni.org",
+      "role": "meal",
+      "roleTitle": "MEAL Coordinator",
+      "department": "Monitoring, Evaluation, Accountability & Learning",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": false,
+        "canCreateTor": true,
+        "canApproveTor": false,
+        "canManageUsers": false,
+        "canViewAllTors": true
+      },
+      "createdAt": "2026-01-18T08:00:00Z",
+      "username": "meal",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-01-18T08:00:00Z",
+      "mustChangePassword": true
+    },
+    {
+      "id": "user-staff-1",
+      "name": "Budi Santoso",
+      "email": "budi.santoso@ngo-harmoni.org",
+      "role": "staff",
+      "roleTitle": "Senior Field Officer",
+      "department": "Operasional Lapangan",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": false,
+        "canCreateTor": true,
+        "canApproveTor": false,
+        "canManageUsers": false,
+        "canViewAllTors": false
+      },
+      "createdAt": "2026-02-01T08:00:00Z",
+      "username": "budi.santoso",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-02-01T08:00:00Z",
+      "mustChangePassword": true
+    },
+    {
+      "id": "user-staff-2",
+      "name": "Siti Rahmawati",
+      "email": "siti.rahmawati@ngo-harmoni.org",
+      "role": "staff",
+      "roleTitle": "Community Facilitator",
+      "department": "Pemberdayaan Masyarakat",
+      "isActive": true,
+      "permissions": {
+        "canManagePrograms": false,
+        "canCreateTor": true,
+        "canApproveTor": false,
+        "canManageUsers": false,
+        "canViewAllTors": false
+      },
+      "createdAt": "2026-02-05T08:00:00Z",
+      "username": "siti.rahmawati",
+      "accountStatus": "Aktif",
+      "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
+      "passwordUpdatedAt": "2026-02-05T08:00:00Z",
+      "mustChangePassword": true
+    }
+  ],
+  "currentUserId": "user-admin",
+  "programs": [],
+  "outcomes": [],
+  "outputs": [],
+  "activities": [],
+  "subActivities": [],
+  "tors": [],
+  "approvalRecords": [],
+  "auditLogs": [
+    {
+      "id": "log-logout-1793976222937",
+      "actorId": "user-admin",
+      "actorName": "Bambang Sudiro",
+      "actorRole": "System Administrator",
+      "action": "Logout Sistem",
+      "entityType": "USER",
+      "entityId": "user-admin",
+      "details": "Pengguna Bambang Sudiro (System Administrator) keluar dari sesi sistem.",
+      "timestamp": "2026-11-06T14:43:42.937Z"
+    },
+    {
+      "id": "log-login-ok-1793976184286",
+      "actorId": "user-admin",
+      "actorName": "Bambang Sudiro",
+      "actorRole": "System Administrator",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-admin",
+      "details": "Pengguna Bambang Sudiro (System Administrator · Teknologi & Tata Kelola Sistem) berhasil login ke sistem.",
+      "timestamp": "2026-11-06T14:43:04.259Z"
+    }
+  ],
+  "cashAdvances": [],
+  "meetingMinutes": [],
+  "activityDocumentations": {},
+  "activityDocumentationList": [],
+  "outputRaciRecords": {},
+  "activityMonitoringRecords": {},
+  "monitoringReports": {},
+  "approvalWorkflowConfigs": {
+    "tor": {
+      "categoryCode": "tor",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    },
+    "notulen": {
+      "categoryCode": "notulen",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    },
+    "dokumentasi": {
+      "categoryCode": "dokumentasi",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    },
+    "executive_summary": {
+      "categoryCode": "executive_summary",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    },
+    "cash_advance": {
+      "categoryCode": "cash_advance",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    },
+    "laporan_keuangan_akhir": {
+      "categoryCode": "laporan_keuangan_akhir",
+      "mechanism": "SEQUENTIAL",
+      "parallelRule": "PRIMARY_WITH_CONSULTATION",
+      "updatedAt": "2026-11-01T14:29:22.484Z",
+      "updatedByName": "Sistem Default WIJNA"
+    }
+  },
+  "approvalHubItems": {},
+  "approvalNotifications": [],
+  "participantDatabase": [],
+  "attendanceSystem": {
+    "locationConfig": {
+      "officeName": "Kantor Pusat Yayasan WIJNA",
+      "address": "Jl. Tebet Timur Dalam Raya No. 42, Jakarta Selatan",
+      "latitude": -6.2297,
+      "longitude": 106.8532,
+      "radiusMeters": 5,
+      "standardDailyHours": 8,
+      "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    "records": [],
+    "flextimeAssignments": [],
+    "leavePolicies": [
+      {
+        "id": "leave-pol-sick-1",
+        "code": "CS-RJ",
+        "name": "Cuti Sakit Rawat Jalan",
+        "group": "CUTI_SAKIT",
+        "allocationDaysPerYear": 12,
+        "requiresAttachmentOrNote": true,
+        "termsAndProvisions": "Maksimal 2 hari berturut-turut cukup dengan keterangan staf; >2 hari wajib melampirkan surat keterangan dokter.",
+        "isActive": true,
+        "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+        "updatedAt": "2026-01-10T08:00:00Z"
+      },
+      {
+        "id": "leave-pol-sick-2",
+        "code": "CS-RI",
+        "name": "Cuti Sakit Rawat Inap / Pemulihan Medis",
+        "group": "CUTI_SAKIT",
+        "allocationDaysPerYear": 30,
+        "requiresAttachmentOrNote": true,
+        "termsAndProvisions": "Berdasarkan surat rujukan rumah sakit/dokter dan diketahui oleh Finance/HR serta disetujui Director.",
+        "isActive": true,
+        "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+        "updatedAt": "2026-01-10T08:00:00Z"
+      },
+      {
+        "id": "leave-pol-spec-1",
+        "code": "CK-KLG",
+        "name": "Cuti Khusus Pernikahan / Kelahiran / Kedukaan",
+        "group": "CUTI_KHUSUS",
+        "allocationDaysPerYear": 5,
+        "requiresAttachmentOrNote": true,
+        "termsAndProvisions": "Cuti khusus di luar kuota cuti tahunan untuk pernikahan staf (3 hari), pendampingan persalinan (5 hari), atau kedukaan keluarga inti (3 hari).",
+        "isActive": true,
+        "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+        "updatedAt": "2026-01-10T08:00:00Z"
+      },
+      {
+        "id": "leave-pol-oth-1",
+        "code": "CT-REG",
+        "name": "Cuti Tahunan Reguler",
+        "group": "CUTI_LAINNYA",
+        "allocationDaysPerYear": 12,
+        "requiresAttachmentOrNote": false,
+        "termsAndProvisions": "Diajukan minimal H-3 sebelum tanggal cuti, direview oleh Finance/HR dan disetujui secara manual oleh Director.",
+        "isActive": true,
+        "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+        "updatedAt": "2026-01-10T08:00:00Z"
+      },
+      {
+        "id": "leave-pol-oth-2",
+        "code": "IZ-MDS",
+        "name": "Izin Keperluan Mendesak",
+        "group": "CUTI_LAINNYA",
+        "allocationDaysPerYear": 3,
+        "requiresAttachmentOrNote": true,
+        "termsAndProvisions": "Izin keperluan keluarga atau urusan mendesak dengan persetujuan Finance/HR & pengakuan Director.",
+        "isActive": true,
+        "updatedByName": "Ratna Kusuma, S.E. (Finance & HR)",
+        "updatedAt": "2026-01-10T08:00:00Z"
+      }
+    ],
+    "leaveRequests": [],
+    "wfaRequests": [],
+    "holidayRequests": [],
+    "employeeTrainings": [],
+    "employeeProfileLinks": {},
+    "auditTrail": [],
+    "workRecapVerifications": {}
+  },
+  "cashAdvanceSummaries": {},
+  "cashAdvanceAuditLogs": {},
+  "programBudgets": {}
+}
