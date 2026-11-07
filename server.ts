@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import { createServer as createViteServer } from 'vite';
+import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
@@ -9316,10 +9317,15 @@ async function startServer() {
   });
 
   // --- VITE MIDDLEWARE / STATIC FILES ---
-  if (process.env.NODE_ENV === 'production') {
+  const distIndexHtml = path.join(__dirname, 'dist', 'index.html');
+  const isRunningCompiledServerJs = import.meta.url.endsWith('/server.js');
+  if (
+    process.env.NODE_ENV === 'production' ||
+    (isRunningCompiledServerJs && fs.existsSync(distIndexHtml))
+  ) {
     app.use(express.static(path.join(__dirname, 'dist')));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+      res.sendFile(distIndexHtml);
     });
   } else {
     const vite = await createViteServer({
