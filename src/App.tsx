@@ -400,16 +400,16 @@ function MainAppContent() {
   const activeSelectedTor =
     selectedTorData?.tor || (selectedTorId ? tors.find((t) => t.id === selectedTorId) : undefined);
 
-  // Automatic mobile & tablet screen detection (< 1280px / < xl) — tablet treated identically to mobile
+  // Only treat small phone screens (< 640px) as mobile; PC and desktop windows always use Web View
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth < 1280 : false
+    typeof window !== 'undefined' ? window.innerWidth < 640 : false
   );
   const [forceFullWebVersion, setForceFullWebVersion] = useState<boolean>(true);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState<boolean>(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const mql = window.matchMedia('(max-width: 1279px)');
+    const mql = window.matchMedia('(max-width: 639px)');
     const handleChange = (e: MediaQueryListEvent | MediaQueryList) => {
       setIsMobileViewport(e.matches);
       if (!e.matches) {
@@ -421,19 +421,25 @@ function MainAppContent() {
       mql.addEventListener('change', handleChange);
       return () => mql.removeEventListener('change', handleChange);
     } else {
-      window.addEventListener('resize', () => setIsMobileViewport(window.innerWidth < 1280));
+      window.addEventListener('resize', () => setIsMobileViewport(window.innerWidth < 640));
       return () =>
-        window.removeEventListener('resize', () => setIsMobileViewport(window.innerWidth < 1280));
+        window.removeEventListener('resize', () => setIsMobileViewport(window.innerWidth < 640));
     }
   }, []);
 
-  // Default to Full Web Version; user can still switch to Mobile Quick-Access Mode if desired
+  // Default to Full Web Version; user can still switch to Mobile Quick-Access Mode if desired on phone
   const isMobileQuickMode = isMobileViewport && !forceFullWebVersion;
 
   const currentPageTitle =
     selectedTorId && activeSelectedTor
       ? `Detail Dokumen: ${activeSelectedTor.torNumber || 'TOR'}`
       : pageTitles[activeTab];
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title = 'WIJNA - Srawung';
+    }
+  }, [currentPageTitle, isAuthenticated]);
 
   if (!isAuthenticated) {
     return (

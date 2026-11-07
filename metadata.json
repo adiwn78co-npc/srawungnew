@@ -1,6 +1,6 @@
 {
-  "name": "WIJNA SRAWUNG — Sistem Manajemen Program & SDM",
-  "description": "WIJNA SRAWUNG — Sistem tata kelola program, keuangan, SDM, persetujuan dokumen berjenjang, dan pemantauan terstruktur.",
+  "name": "WIJNA - Srawung",
+  "description": "WIJNA - Srawung — Sistem tata kelola program, keuangan, SDM, persetujuan dokumen berjenjang, dan pemantauan terstruktur.",
   "requestFramePermissions": ["geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

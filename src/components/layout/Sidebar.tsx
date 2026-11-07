@@ -211,7 +211,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const isAttendanceActive = activeTab === 'attendance';
 
   const sidebarContent = (
-    <aside className="w-64 xl:w-60 shrink-0 bg-[#F7F7F5] text-[#37352F] h-full xl:h-screen overflow-y-auto flex flex-col border-r border-[#EAEAEA] select-none print:hidden">
+    <aside className="w-60 shrink-0 bg-[#F7F7F5] text-[#37352F] h-full sm:h-screen overflow-y-auto flex flex-col border-r border-[#EAEAEA] select-none print:hidden">
       {/* Brand & Organization Header - Centralized via System Organisator */}
       <div className="p-4 border-b border-[#EAEAEA] flex items-center justify-between gap-2">
         <div className="overflow-hidden min-w-0">
@@ -234,7 +234,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={onCloseMobileDrawer}
-            className="xl:hidden p-1.5 rounded-md text-[#787774] hover:text-[#252525] hover:bg-[#EAEAE8] cursor-pointer"
+            className="sm:hidden p-1.5 rounded-md text-[#787774] hover:text-[#252525] hover:bg-[#EAEAE8] cursor-pointer"
             title="Tutup Menu"
           >
             <X className="w-4 h-4" />
@@ -242,9 +242,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Quick Switch back to Simplified Mobile View when in Full Web Version on Mobile/Tablet */}
+      {/* Quick Switch back to Simplified Mobile View when in Full Web Version on Mobile */}
       {showBackToMobileQuickMode && onBackToMobileQuickMode && (
-        <div className="px-2.5 pt-2.5 xl:hidden">
+        <div className="px-2.5 pt-2.5 sm:hidden">
           <button
             type="button"
             onClick={() => {
@@ -273,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   onSelectTab(item.id);
                   if (onCloseMobileDrawer) onCloseMobileDrawer();
                 }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 xl:py-2 min-h-[44px] xl:min-h-0 rounded-md text-[14px] font-medium transition-colors cursor-pointer ${
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-[14px] font-medium transition-colors cursor-pointer ${
                   isActive
                     ? 'bg-[#EAEAE8] text-[#252525] font-semibold'
                     : 'text-[#5A5A58] hover:text-[#252525] hover:bg-[#EFEFEA]'
@@ -353,7 +353,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onSelectTab('attendance');
             if (onCloseMobileDrawer) onCloseMobileDrawer();
           }}
-          className={`w-full flex items-center justify-between px-3 py-2.5 xl:py-2 min-h-[44px] xl:min-h-0 rounded-md text-[14px] font-medium transition-colors cursor-pointer ${
+          className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-[14px] font-medium transition-colors cursor-pointer ${
             isAttendanceActive
               ? 'bg-[#EAEAE8] text-[#252525] font-semibold'
               : 'text-[#5A5A58] hover:text-[#252525] hover:bg-[#EFEFEA]'
@@ -377,14 +377,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
-      {/* Persistent Sidebar on Desktop only (xl and up) */}
-      <div className="hidden xl:block sticky top-0 h-screen shrink-0">
+      {/* Persistent Sidebar on PC / Desktop Web (sm and up) */}
+      <div className="hidden sm:block sticky top-0 h-screen shrink-0">
         {sidebarContent}
       </div>
 
-      {/* Responsive Slide-Over Drawer on Mobile & Tablet (< xl) when Full Web Version is opened */}
+      {/* Responsive Slide-Over Drawer on Small Phone Screens (< sm) */}
       {isMobileDrawerOpen && (
-        <div className="fixed inset-0 z-50 xl:hidden flex">
+        <div className="fixed inset-0 z-50 sm:hidden flex">
           <div
             className="fixed inset-0 bg-black/40 backdrop-blur-[1px]"
             onClick={onCloseMobileDrawer}

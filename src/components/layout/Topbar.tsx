@@ -114,14 +114,14 @@ export const Topbar: React.FC<TopbarProps> = ({
 
   return (
     <>
-      <header className="h-14 bg-white/95 backdrop-blur-md border-b border-[#EAEAEA] px-3 xl:px-6 flex items-center justify-between gap-2 shrink-0 sticky top-0 z-20">
-        {/* Left Zone: Menu Drawer (Desktop/Full Web) & Page Title */}
+      <header className="h-14 bg-white/95 backdrop-blur-md border-b border-[#EAEAEA] px-3 sm:px-6 flex items-center justify-between gap-2 shrink-0 sticky top-0 z-20">
+        {/* Left Zone: Menu Drawer (Phone only) & Page Title */}
         <div className="flex items-center gap-2 min-w-0">
           {!isMobileQuickMode && onOpenMobileDrawer && (
             <button
               type="button"
               onClick={onOpenMobileDrawer}
-              className="xl:hidden p-2 -ml-1 rounded-lg text-[#37352F] hover:bg-[#F3F3F1] transition-colors cursor-pointer shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center"
+              className="sm:hidden p-2 -ml-1 rounded-lg text-[#37352F] hover:bg-[#F3F3F1] transition-colors cursor-pointer shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center"
               title="Buka Menu Navigasi"
             >
               <Menu className="w-5 h-5" />
@@ -129,14 +129,14 @@ export const Topbar: React.FC<TopbarProps> = ({
           )}
 
           <div className="min-w-0">
-            <h2 className="text-sm xl:text-lg font-bold text-[#252525] tracking-tight truncate">
+            <h2 className="text-sm sm:text-lg font-bold text-[#252525] tracking-tight truncate">
               {pageTitle}
             </h2>
           </div>
         </div>
 
         {/* Right Zone: Password Reminder, Notifications, Refresh, and User Controls */}
-        <div className="flex items-center gap-1.5 xl:gap-2.5 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
           {currentUser?.mustChangePassword && (
             <button
               type="button"
@@ -145,8 +145,8 @@ export const Topbar: React.FC<TopbarProps> = ({
               title="Anda masih menggunakan password default. Klik untuk segera mengganti password."
             >
               <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              <span className="hidden xl:inline">Ganti Password Default</span>
-              <span className="xl:hidden">Ganti Sandi</span>
+              <span className="hidden sm:inline">Ganti Password Default</span>
+              <span className="sm:hidden">Ganti Sandi</span>
             </button>
           )}
 
@@ -154,7 +154,7 @@ export const Topbar: React.FC<TopbarProps> = ({
             <button
               onClick={onRefreshData}
               title="Muat Ulang Data"
-              className="hidden xl:inline-flex p-1.5 text-[#787774] hover:text-[#252525] hover:bg-[#F3F3F1] rounded-md transition-colors cursor-pointer"
+              className="hidden sm:inline-flex p-1.5 text-[#787774] hover:text-[#252525] hover:bg-[#F3F3F1] rounded-md transition-colors cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
@@ -186,10 +186,10 @@ export const Topbar: React.FC<TopbarProps> = ({
             {showNotifDropdown && (
               <>
                 <div
-                  className="fixed inset-0 z-30 bg-black/10 xl:bg-transparent"
+                  className="fixed inset-0 z-30 bg-black/10 sm:bg-transparent"
                   onClick={() => setShowNotifDropdown(false)}
                 />
-                <div className="fixed left-2.5 right-2.5 top-[58px] w-auto xl:absolute xl:left-auto xl:right-0 xl:top-full xl:mt-1.5 xl:w-96 xl:max-w-[92vw] bg-white border border-[#EAEAEA] rounded-xl shadow-xl z-40 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                <div className="fixed left-2.5 right-2.5 top-[58px] w-auto sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-1.5 sm:w-96 sm:max-w-[92vw] bg-white border border-[#EAEAEA] rounded-xl shadow-xl z-40 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                   <div className="px-3.5 py-2.5 bg-[#FAF9F6] border-b border-[#EAEAEA] flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-bold text-[#2F3437] leading-snug">
@@ -217,7 +217,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                       <button
                         type="button"
                         onClick={() => setShowNotifDropdown(false)}
-                        className="xl:hidden p-1 rounded-md text-[#787774] hover:text-[#252525] hover:bg-[#EFEFED] cursor-pointer"
+                        className="sm:hidden p-1 rounded-md text-[#787774] hover:text-[#252525] hover:bg-[#EFEFED] cursor-pointer"
                         title="Tutup Notifikasi"
                       >
                         <X className="w-4 h-4" />
@@ -225,7 +225,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                     </div>
                   </div>
 
-                  <div className="max-h-[68vh] xl:max-h-80 overflow-y-auto divide-y divide-[#EAEAEA]">
+                  <div className="max-h-[68vh] sm:max-h-80 overflow-y-auto divide-y divide-[#EAEAEA]">
                     {notifications.length === 0 ? (
                       <div className="py-8 px-4 text-center text-xs text-[#787774] leading-relaxed">
                         Belum ada notifikasi persetujuan atau tindak lanjut.
@@ -369,7 +369,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                   <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border-2 border-white absolute -top-0.5 -right-0.5" />
                 )}
               </div>
-              <div className="hidden xl:block text-left pr-0.5">
+              <div className="hidden sm:block text-left pr-0.5">
                 <div className="text-[13px] font-semibold text-[#252525] leading-tight">
                   {currentUser?.name || 'Pengguna'}
                 </div>
@@ -383,10 +383,10 @@ export const Topbar: React.FC<TopbarProps> = ({
             {showUserDropdown && (
               <>
                 <div
-                  className="fixed inset-0 z-30 bg-black/10 xl:bg-transparent"
+                  className="fixed inset-0 z-30 bg-black/10 sm:bg-transparent"
                   onClick={() => setShowUserDropdown(false)}
                 />
-                <div className="fixed left-2.5 right-2.5 top-[58px] w-auto xl:absolute xl:left-auto xl:right-0 xl:top-full xl:mt-1.5 xl:w-80 bg-white border border-[#EAEAEA] rounded-xl shadow-xl z-40 py-2 divide-y divide-[#EAEAEA] animate-in fade-in zoom-in-95 duration-100">
+                <div className="fixed left-2.5 right-2.5 top-[58px] w-auto sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-1.5 sm:w-80 bg-white border border-[#EAEAEA] rounded-xl shadow-xl z-40 py-2 divide-y divide-[#EAEAEA] animate-in fade-in zoom-in-95 duration-100">
                   {/* Active User Info Header */}
                   <div className="px-4 py-2.5 bg-[#FAFAF9]">
                     <div className="text-xs font-bold text-[#252525]">{currentUser?.name}</div>
@@ -458,7 +458,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                           setShowUserDropdown(false);
                           onOpenFullWebVersion();
                         }}
-                        className="w-full px-3 py-2 rounded-md bg-[#FAF9F6] hover:bg-[#EFECE6] border border-[#E5E3DC] text-left flex items-center justify-between text-xs font-semibold text-[#252525] transition-colors cursor-pointer xl:hidden"
+                        className="w-full px-3 py-2 rounded-md bg-[#FAF9F6] hover:bg-[#EFECE6] border border-[#E5E3DC] text-left flex items-center justify-between text-xs font-semibold text-[#252525] transition-colors cursor-pointer sm:hidden"
                       >
                         <span className="inline-flex items-center gap-2">
                           <Monitor className="w-4 h-4 text-[#3867F5]" />
@@ -476,7 +476,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                           setShowUserDropdown(false);
                           onBackToMobileQuickMode();
                         }}
-                        className="w-full px-3 py-2 rounded-md bg-[#F0FAF6] hover:bg-[#E2F2EB] border border-[#BCE3DC] text-left flex items-center justify-between text-xs font-semibold text-[#0F7B6C] transition-colors cursor-pointer xl:hidden"
+                        className="w-full px-3 py-2 rounded-md bg-[#F0FAF6] hover:bg-[#E2F2EB] border border-[#BCE3DC] text-left flex items-center justify-between text-xs font-semibold text-[#0F7B6C] transition-colors cursor-pointer sm:hidden"
                       >
                         <span className="inline-flex items-center gap-2">
                           <Smartphone className="w-4 h-4 text-[#0F7B6C]" />

@@ -1,1 +1,67 @@
 @import "tailwindcss";
+
+@layer base {
+  html {
+    font-size: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+    color: #252525;
+    background-color: #FAFAF9;
+  }
+  body {
+    min-height: 100vh;
+    overflow-x: hidden;
+    background-color: #FAFAF9;
+    color: #252525;
+  }
+}
+
+@keyframes statusDotPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(1.18);
+  }
+}
+
+.status-dot-pulse {
+  animation: statusDotPulse 2.1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot-pulse {
+    animation: none !important;
+  }
+}
+
+@media print {
+  aside,
+  header,
+  nav,
+  .no-print,
+  button {
+    display: none !important;
+  }
+  body,
+  html {
+    background: white !important;
+    color: black !important;
+    font-size: 11pt !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  .printable-doc,
+  .tor-formal-print-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    font-family: "Times New Roman", Times, Georgia, serif !important;
+    color: #000000 !important;
+    background: #ffffff !important;
+  }
+}

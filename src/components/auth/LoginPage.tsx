@@ -56,7 +56,7 @@ const GotongRoyongOfficeDoodle: React.FC = () => {
         viewBox="0 0 660 500"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="w-full h-auto max-h-[24dvh] xl:max-h-none mx-auto drop-shadow-xs"
+        className="w-full h-auto max-h-[24dvh] md:max-h-none mx-auto drop-shadow-xs"
         role="img"
         aria-label="Ilustrasi Doodle Gotong Royong Orang Bekerja di Kantor WIJNA SRAWUNG"
       >
@@ -615,36 +615,36 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   return (
     <div
       style={{ fontFamily: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif" }}
-      className="h-[100dvh] max-h-[100dvh] w-full bg-gradient-to-br from-[#FFFDF9] via-[#F3FAF6] to-[#FEF5E7] text-[#252525] flex items-center justify-center px-4 py-3 sm:px-6 sm:py-4 xl:p-12 antialiased relative overflow-hidden"
+      className="h-[100dvh] max-h-[100dvh] w-full bg-gradient-to-br from-[#FFFDF9] via-[#F3FAF6] to-[#FEF5E7] text-[#252525] flex items-center justify-center px-4 py-3 sm:px-6 sm:py-4 md:p-8 lg:p-12 antialiased relative overflow-hidden"
     >
       {/* Ornamen Cerita Warna Lembut di Latar Belakang */}
       <div className="pointer-events-none absolute -top-28 -left-28 w-[28rem] h-[28rem] rounded-full bg-[#A7F3D0]/40 blur-3xl" />
       <div className="pointer-events-none absolute top-1/4 -right-28 w-[26rem] h-[26rem] rounded-full bg-[#FDE68A]/45 blur-3xl" />
       <div className="pointer-events-none absolute -bottom-28 left-1/3 w-[26rem] h-[26rem] rounded-full bg-[#BAE6FD]/35 blur-3xl" />
 
-      {/* Kontainer Utama Full-Page Proporsional (Tanpa Scroll di Mobile & Tablet) */}
-      <div className="relative z-10 w-full max-w-6xl mx-auto flex flex-col xl:grid xl:grid-cols-12 gap-3 sm:gap-4 xl:gap-12 items-center justify-center max-h-full">
-        {/* SISI KIRI / ATAS: Ilustrasi Doodle Animasi Ringan Gotong Royong Orang Bekerja di Kantor */}
-        <div className="xl:col-span-7 w-full flex flex-col items-center justify-center shrink-0">
-          <div className="w-full max-w-[260px] sm:max-w-[300px] xl:max-w-2xl mx-auto">
+      {/* Kontainer Utama Full-Page Proporsional (Tampilan Web 2 Kolom di PC) */}
+      <div className="relative z-10 w-full max-w-6xl mx-auto flex flex-col md:grid md:grid-cols-12 gap-3 sm:gap-4 md:gap-8 lg:gap-12 items-center justify-center max-h-full">
+        {/* SISI KIRI: Ilustrasi Doodle Animasi Ringan Gotong Royong Orang Bekerja di Kantor */}
+        <div className="md:col-span-7 w-full flex flex-col items-center justify-center shrink-0">
+          <div className="w-full max-w-[260px] sm:max-w-[300px] md:max-w-2xl mx-auto">
             <GotongRoyongOfficeDoodle />
           </div>
         </div>
 
-        {/* SISI KANAN / BAWAH: Box Login Luwes & Hangat dengan WIJNA SRAWUNG di Dalam Box */}
-        <div className="xl:col-span-5 w-full max-w-[400px] xl:max-w-[440px] mx-auto shrink-0">
+        {/* SISI KANAN: Box Login Luwes & Hangat dengan WIJNA SRAWUNG di Dalam Box */}
+        <div className="md:col-span-5 w-full max-w-[400px] md:max-w-[440px] mx-auto shrink-0">
           {/* KARTU UTAMA LOGIN (Judul WIJNA SRAWUNG berada tepat di dalam Box) */}
-          <div className="relative bg-white/95 backdrop-blur-xl rounded-[24px] xl:rounded-[28px] border border-[#E8E2D5] shadow-[0_20px_50px_-15px_rgba(15,43,92,0.08)] overflow-hidden transition-all">
+          <div className="relative bg-white/95 backdrop-blur-xl rounded-[24px] md:rounded-[28px] border border-[#E8E2D5] shadow-[0_20px_50px_-15px_rgba(15,43,92,0.08)] overflow-hidden transition-all">
             {/* Dekorasi Cahaya Lembut di Dalam Box */}
             <div className="pointer-events-none absolute -top-16 -right-16 w-36 h-36 rounded-full bg-[#FEF3C7]/60 blur-2xl" />
             <div className="pointer-events-none absolute -bottom-16 -left-16 w-36 h-36 rounded-full bg-[#D1FAE5]/50 blur-2xl" />
 
-            <div className="relative p-5 sm:p-6 xl:p-8 space-y-4 xl:space-y-6">
+            <div className="relative p-5 sm:p-6 md:p-8 space-y-4 md:space-y-6">
               {/* Header Judul WIJNA SRAWUNG di Dalam Box dengan Tipografi Karakter Hangat & Elegan */}
               <div className="text-center pb-2 border-b border-[#F1EDE4]">
                 <h1
                   style={{ fontFamily: "'Fraunces', 'Outfit', Georgia, serif" }}
-                  className="text-xl sm:text-2xl xl:text-[30px] font-bold tracking-tight bg-gradient-to-r from-[#0F2B5C] via-[#0F7B6C] to-[#B45309] bg-clip-text text-transparent"
+                  className="text-xl sm:text-2xl md:text-[30px] font-bold tracking-tight bg-gradient-to-r from-[#0F2B5C] via-[#0F7B6C] to-[#B45309] bg-clip-text text-transparent"
                 >
                   WIJNA SRAWUNG
                 </h1>
@@ -662,7 +662,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               )}
 
               {/* Login Input Form */}
-              <form onSubmit={handleSubmit} className="space-y-3.5 xl:space-y-4">
+              <form onSubmit={handleSubmit} className="space-y-3.5 md:space-y-4">
                 <div className="space-y-1.5">
                   <label
                     htmlFor="login-identifier"
@@ -680,7 +680,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                       onChange={(e) => setIdentifier(e.target.value)}
                       disabled={submitting}
                       placeholder="Enter your username"
-                      className="w-full pl-11 pr-4 py-2.5 xl:py-3 text-xs sm:text-sm border border-[#E4DFD3] rounded-2xl bg-[#FCFBF9] hover:bg-white focus:bg-white text-[#252525] placeholder:text-[#A39E93] focus:outline-none focus:border-[#1A73E8] focus:ring-4 focus:ring-[#1A73E8]/15 transition-all disabled:bg-[#F7F7F5]"
+                      className="w-full pl-11 pr-4 py-2.5 md:py-3 text-xs sm:text-sm border border-[#E4DFD3] rounded-2xl bg-[#FCFBF9] hover:bg-white focus:bg-white text-[#252525] placeholder:text-[#A39E93] focus:outline-none focus:border-[#1A73E8] focus:ring-4 focus:ring-[#1A73E8]/15 transition-all disabled:bg-[#F7F7F5]"
                     />
                   </div>
                 </div>
@@ -702,7 +702,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                       onChange={(e) => setPassword(e.target.value)}
                       disabled={submitting}
                       placeholder="Enter your password"
-                      className="w-full pl-11 pr-11 py-2.5 xl:py-3 text-xs sm:text-sm border border-[#E4DFD3] rounded-2xl bg-[#FCFBF9] hover:bg-white focus:bg-white text-[#252525] placeholder:text-[#A39E93] focus:outline-none focus:border-[#1A73E8] focus:ring-4 focus:ring-[#1A73E8]/15 transition-all disabled:bg-[#F7F7F5]"
+                      className="w-full pl-11 pr-11 py-2.5 md:py-3 text-xs sm:text-sm border border-[#E4DFD3] rounded-2xl bg-[#FCFBF9] hover:bg-white focus:bg-white text-[#252525] placeholder:text-[#A39E93] focus:outline-none focus:border-[#1A73E8] focus:ring-4 focus:ring-[#1A73E8]/15 transition-all disabled:bg-[#F7F7F5]"
                     />
                     <button
                       type="button"
@@ -720,11 +720,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                   </div>
                 </div>
 
-                <div className="pt-0.5 xl:pt-1">
+                <div className="pt-0.5 md:pt-1">
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="w-full py-2.5 xl:py-3 px-5 rounded-2xl bg-[#1A73E8] hover:bg-[#1557B0] active:bg-[#174EA6] text-white text-xs sm:text-sm font-semibold shadow-[0_10px_24px_-8px_rgba(26,115,232,0.45)] hover:shadow-[0_14px_28px_-8px_rgba(26,115,232,0.55)] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                    className="w-full py-2.5 md:py-3 px-5 rounded-2xl bg-[#1A73E8] hover:bg-[#1557B0] active:bg-[#174EA6] text-white text-xs sm:text-sm font-semibold shadow-[0_10px_24px_-8px_rgba(26,115,232,0.45)] hover:shadow-[0_14px_28px_-8px_rgba(26,115,232,0.55)] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
                   >
                     {submitting ? (
                       <>
