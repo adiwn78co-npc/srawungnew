@@ -21,13 +21,69 @@ export interface MysqlPoolLike {
 }
 
 let cachedPool: MysqlPoolLike | null = null;
+let loggedCloudRunLoopbackNotice = false;
+
+export function isCloudRunEnvironment(): boolean {
+  return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+}
+
+function isLoopbackMysqlHost(rawHost: string | undefined): boolean {
+  const host = String(rawHost || '').trim().toLowerCase();
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host === '0.0.0.0'
+  );
+}
+
+function hasPlaceholderMysqlCredentials(): boolean {
+  const user = String(process.env.MYSQL_USER || '').trim();
+  const dbName = String(process.env.MYSQL_DATABASE || '').trim();
+  return user === 'your_mysql_user' || dbName === 'your_mysql_database';
+}
 
 export function isMysqlConfigured(): boolean {
-  return Boolean(
-    process.env.MYSQL_HOST &&
-      process.env.MYSQL_USER &&
-      process.env.MYSQL_DATABASE
-  );
+  const host = String(process.env.MYSQL_HOST || '').trim();
+  const user = String(process.env.MYSQL_USER || '').trim();
+  const dbName = String(process.env.MYSQL_DATABASE || '').trim();
+
+  if (!host || !user || !dbName || hasPlaceholderMysqlCredentials()) {
+    return false;
+  }
+
+  // Di container Cloud Run / AI Studio Preview tidak terdapat service MySQL lokal pada 127.0.0.1:3306.
+  // Jika MYSQL_HOST bernilai localhost/127.0.0.1 (konfigurasi untuk server produksi seperti Hostinger/cPanel),
+  // gunakan penyimpanan lokal pada mode preview agar tidak memicu ECONNREFUSED, sedangkan pada server hosting
+  // produksi (tanpa variabel K_SERVICE) koneksi MySQL localhost tetap berjalan penuh.
+  if (
+    isCloudRunEnvironment() &&
+    isLoopbackMysqlHost(host) &&
+    process.env.MYSQL_STRICT_REQUIRED !== 'true'
+  ) {
+    if (!loggedCloudRunLoopbackNotice) {
+      loggedCloudRunLoopbackNotice = true;
+      console.log(
+        `[DB] Cloud Run preview detected with local MYSQL_HOST (${host}); using local preview storage.`
+      );
+    }
+    return false;
+  }
+
+  return true;
+}
+
+export async function resetMysqlPool(): Promise<void> {
+  const existing = cachedPool;
+  cachedPool = null;
+  if (existing) {
+    try {
+      await existing.end();
+    } catch {
+      // abaikan error penutupan pool yang gagal terhubung
+    }
+  }
 }
 
 /**
@@ -47,12 +103,12 @@ export async function getMysqlPool(): Promise<MysqlPoolLike | null> {
   const mysql = mysqlModule.default || mysqlModule;
 
   cachedPool = mysql.createPool({
-    host: process.env.MYSQL_HOST,
+    host: process.env.MYSQL_HOST?.trim(),
     port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER,
+    user: process.env.MYSQL_USER?.trim(),
     password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE,
-    connectTimeout: 5000,
+    database: process.env.MYSQL_DATABASE?.trim(),
+    connectTimeout: 8000,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -165,6 +221,80 @@ export async function loadDatabaseFromMysql(
       ? rows.map((r) => safeJsonParse<T>(r.raw_json, r as T))
       : [];
 
+  const defaultPermsByRole: Record<string, any> = {
+    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false },
+  };
+
+  const hydrateMysqlUserRow = (r: any) => {
+    const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+    const colPerms = safeJsonParse<Record<string, any> | null>(r?.permissions_json, null);
+    const resolvedRole = String(r?.role || raw.role || 'staff');
+    const basePerms = defaultPermsByRole[resolvedRole] || defaultPermsByRole.staff;
+    const rawPerms =
+      raw.permissions && typeof raw.permissions === 'object'
+        ? raw.permissions
+        : colPerms && typeof colPerms === 'object'
+        ? colPerms
+        : {};
+    const mergedPerms = {
+      canManagePrograms: rawPerms.canManagePrograms ?? colPerms?.canManagePrograms ?? basePerms.canManagePrograms,
+      canCreateTor: rawPerms.canCreateTor ?? colPerms?.canCreateTor ?? basePerms.canCreateTor,
+      canApproveTor:
+        resolvedRole === 'admin'
+          ? false
+          : rawPerms.canApproveTor ?? colPerms?.canApproveTor ?? basePerms.canApproveTor,
+      canManageUsers:
+        resolvedRole === 'admin'
+          ? true
+          : rawPerms.canManageUsers ?? colPerms?.canManageUsers ?? basePerms.canManageUsers,
+      canViewAllTors: rawPerms.canViewAllTors ?? colPerms?.canViewAllTors ?? basePerms.canViewAllTors,
+    };
+
+    const resolvedPasswordHash =
+      (typeof r?.password_hash === 'string' && r.password_hash.trim()) ||
+      (typeof raw.passwordHash === 'string' && raw.passwordHash.trim()) ||
+      (typeof raw.password_hash === 'string' && raw.password_hash.trim()) ||
+      undefined;
+
+    const resolvedIsActive =
+      r?.is_active !== undefined && r?.is_active !== null
+        ? Boolean(Number(r.is_active))
+        : raw.isActive !== false;
+
+    const resolvedAccountStatus =
+      (typeof r?.account_status === 'string' && r.account_status.trim()) ||
+      raw.accountStatus ||
+      (resolvedIsActive ? 'Aktif' : 'Nonaktif');
+
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      username:
+        (typeof r?.username === 'string' && r.username.trim()) || raw.username || undefined,
+      name: (typeof r?.name === 'string' && r.name.trim()) || raw.name || '',
+      email: (typeof r?.email === 'string' && r.email.trim()) || raw.email || '',
+      passwordHash: resolvedPasswordHash,
+      role: resolvedRole,
+      roleTitle:
+        (typeof r?.role_title === 'string' && r.role_title.trim()) ||
+        raw.roleTitle ||
+        resolvedRole.toUpperCase(),
+      department:
+        (typeof r?.department === 'string' && r.department.trim()) || raw.department || '',
+      isActive: resolvedAccountStatus === 'Aktif',
+      accountStatus: resolvedAccountStatus,
+      permissions: mergedPerms,
+      lastLoginAt: r?.last_login_at || raw.lastLoginAt || undefined,
+      createdAt: r?.created_at || raw.createdAt || '2026-01-10T08:00:00Z',
+    };
+  };
+
   const attendanceSystem = kvMap['attendanceSystem'] || {
     locationConfig: {
       officeName: 'Kantor Pusat Yayasan WIJNA',
@@ -191,7 +321,7 @@ export async function loadDatabaseFromMysql(
   }
 
   return {
-    users: parseRowList(userRows),
+    users: Array.isArray(userRows) ? (userRows.map(hydrateMysqlUserRow) as any) : [],
     currentUserId: kvMap['currentUserId'] || 'user-director',
     programs: parseRowList(programRows),
     outcomes: parseRowList(outcomeRows),
@@ -247,6 +377,54 @@ export async function upsertMysqlKvEntries(
       [k, JSON.stringify(v), nowIso]
     );
   }
+}
+
+/**
+ * Menyimpan 1 baris pengguna (termasuk perubahan username, email, role, atau passwordHash)
+ * secara langsung & atomik ke tabel users MySQL agar tidak pernah tertunda atau ikut ter-rollback tabel lain.
+ */
+export async function upsertMysqlUserRow(pool: MysqlPoolLike, u: any): Promise<void> {
+  if (!u || !u.id) return;
+  await pool.query(
+    `INSERT INTO users (
+      id, username, name, email, password_hash, role, role_title, department,
+      is_active, account_status, permissions_json, last_login_at, created_at, raw_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      username = VALUES(username),
+      name = VALUES(name),
+      email = VALUES(email),
+      password_hash = VALUES(password_hash),
+      role = VALUES(role),
+      role_title = VALUES(role_title),
+      department = VALUES(department),
+      is_active = VALUES(is_active),
+      account_status = VALUES(account_status),
+      permissions_json = VALUES(permissions_json),
+      last_login_at = VALUES(last_login_at),
+      raw_json = VALUES(raw_json)`,
+    [
+      String(u.id).slice(0, 128),
+      truncStr(u.username, 128),
+      truncStr(u.name, 255) || '',
+      truncStr(u.email, 255) || '',
+      truncStr(u.passwordHash, 255),
+      truncStr(u.role, 64) || 'staff',
+      truncStr(u.roleTitle, 255),
+      truncStr(u.department, 255),
+      u.isActive === false ? 0 : 1,
+      truncStr(u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'), 64),
+      JSON.stringify(u.permissions || {}),
+      truncStr(u.lastLoginAt, 64),
+      truncStr(u.createdAt || new Date().toISOString(), 64),
+      JSON.stringify(u),
+    ]
+  );
+}
+
+export async function deleteMysqlUserRow(pool: MysqlPoolLike, userId: string): Promise<void> {
+  if (!userId) return;
+  await pool.query('DELETE FROM users WHERE id = ?', [String(userId).slice(0, 128)]);
 }
 
 async function syncTableById(

@@ -254,15 +254,22 @@ async function startServer() {
       username: safeUser.username || deriveDefaultUsername(safeUser.email, safeUser.name),
       accountStatus: resolvedStatus,
       isActive: resolvedStatus === 'Aktif',
+      permissions: normalizeRolePermissions(safeUser.role, safeUser.permissions),
       mustChangePassword: Boolean(safeUser.mustChangePassword ?? isUsingDefaultPassword),
     };
   }
 
-  // Pastikan seluruh akun yang ada memiliki username, accountStatus, dan passwordHash terenkripsi
+  // Pastikan seluruh akun yang ada memiliki username, accountStatus, permissions, dan passwordHash terenkripsi
+  // tanpa pernah menimpa passwordHash yang sudah diubah oleh pengguna.
   function ensureUserSecurityFieldsInitialized() {
     const current = db.getData();
     const needsInit = (current.users || []).some(
-      (u) => !u.passwordHash || !u.username || !u.accountStatus || u.mustChangePassword === undefined
+      (u) =>
+        (!u.passwordHash && !(u as any).password_hash) ||
+        !u.username ||
+        !u.accountStatus ||
+        !u.permissions ||
+        u.mustChangePassword === undefined
     );
     if (!needsInit) return;
 
@@ -284,6 +291,13 @@ async function startServer() {
           u.accountStatus = u.isActive === false ? 'Nonaktif' : 'Aktif';
         }
         u.isActive = u.accountStatus === 'Aktif';
+        u.permissions = normalizeRolePermissions(u.role, u.permissions);
+
+        const existingLegacyHash = (u as any).password_hash;
+        if (!u.passwordHash && typeof existingLegacyHash === 'string' && existingLegacyHash.trim()) {
+          u.passwordHash = existingLegacyHash.trim();
+        }
+
         if (!u.passwordHash) {
           u.passwordHash = defaultHash;
           u.passwordUpdatedAt = u.createdAt || new Date().toISOString();
@@ -399,6 +413,16 @@ async function startServer() {
       }
       ensureUserSecurityFieldsInitialized();
       await db.flushWrites();
+    } else {
+      void db
+        .retryMysqlIfNeeded()
+        .then((reconnected) => {
+          if (reconnected) {
+            ensureUserSecurityFieldsInitialized();
+            void db.flushWrites();
+          }
+        })
+        .catch(() => {});
     }
 
     // 1. Sliding-Window API Rate Limiting (600 requests / minute per client session or IP)
@@ -900,7 +924,7 @@ async function startServer() {
   });
 
   // Ganti Password Mandiri oleh Pengguna yang Sedang Login (Termasuk System Administrator Default)
-  app.post('/api/auth/change-password', (req: Request, res: Response) => {
+  app.post('/api/auth/change-password', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (!currentUser || currentUser.isActive === false) {
       return res.status(401).json({ error: 'Sesi pengguna tidak valid atau akun sedang nonaktif.' });
@@ -965,6 +989,8 @@ async function startServer() {
         timestamp: nowIso,
       });
     });
+
+    await db.syncUserImmediately(updatedUser);
 
     // Revoke old in-memory tokens for this user and issue a fresh HMAC token bound to the new passwordHash
     for (const [tok, sess] of activeSessions.entries()) {
@@ -1119,7 +1145,7 @@ async function startServer() {
     res.json(savedSettings);
   });
 
-  app.post('/api/users', (req: Request, res: Response) => {
+  app.post('/api/users', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
@@ -1261,10 +1287,12 @@ async function startServer() {
       });
     });
 
+    await db.syncUserImmediately(newUser);
+
     res.status(201).json(sanitizeUser(newUser));
   });
 
-  app.put('/api/users/:id', (req: Request, res: Response) => {
+  app.put('/api/users/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
@@ -1475,11 +1503,13 @@ async function startServer() {
       return res.status(404).json({ error: 'Pengguna tidak ditemukan' });
     }
 
+    await db.syncUserImmediately(updatedUser);
+
     res.json(sanitizeUser(updatedUser));
   });
 
   // Reset Password Pengguna oleh System Administrator
-  app.post('/api/users/:id/reset-password', (req: Request, res: Response) => {
+  app.post('/api/users/:id/reset-password', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
@@ -1534,13 +1564,15 @@ async function startServer() {
       });
     });
 
+    await db.syncUserImmediately(updatedUser);
+
     res.json({
       message: `Password untuk akun "${targetUser.name}" berhasil direset dan dienkripsi.`,
       user: sanitizeUser(updatedUser),
     });
   });
 
-  app.delete('/api/users/:id', (req: Request, res: Response) => {
+  app.delete('/api/users/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
@@ -1605,6 +1637,8 @@ async function startServer() {
       });
     });
 
+    await db.removeUserImmediately(id);
+
     res.json({
       message: `Akun pengguna ${targetUser.name} berhasil dihapus.`,
       id,
@@ -1627,7 +1661,7 @@ async function startServer() {
   // Programs CRUD
   app.post('/api/programs', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Program baru' });
     }
 
@@ -1686,7 +1720,7 @@ async function startServer() {
 
   app.put('/api/programs/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Program' });
     }
 
@@ -1756,7 +1790,7 @@ async function startServer() {
   app.delete('/api/programs/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
-      !currentUser.permissions.canManagePrograms &&
+      !currentUser.permissions?.canManagePrograms &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -2379,7 +2413,7 @@ async function startServer() {
     // Role-based visibility:
     // Director, PM, MEAL, Finance, Admin see all TORs.
     // User Biasa / Staff only sees TORs where they are PIC or creator.
-    if (currentUser.role === 'staff' && !currentUser.permissions.canViewAllTors) {
+    if (currentUser.role === 'staff' && !currentUser.permissions?.canViewAllTors) {
       tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
     }
 
@@ -2488,7 +2522,7 @@ async function startServer() {
   // Create TOR
   app.post('/api/tors', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canCreateTor && currentUser.role === 'admin') {
+    if (!currentUser.permissions?.canCreateTor && currentUser.role === 'admin') {
       return res.status(403).json({ error: 'Admin tidak berwenang membuat TOR' });
     }
 
@@ -4763,7 +4797,7 @@ async function startServer() {
     const data = db.getData();
     let tors = [...data.tors];
 
-    if (currentUser.role === 'staff' && !currentUser.permissions.canViewAllTors) {
+    if (currentUser.role === 'staff' && !currentUser.permissions?.canViewAllTors) {
       tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
     }
 

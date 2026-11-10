@@ -24,10 +24,14 @@ import type {
 } from '../types/index.ts';
 import {
   getMysqlPool,
+  isCloudRunEnvironment,
   isMysqlConfigured,
   loadDatabaseFromMysql,
+  resetMysqlPool,
   saveDatabaseToMysql,
   upsertMysqlKvEntries,
+  upsertMysqlUserRow,
+  deleteMysqlUserRow,
 } from './mysqlPool.ts';
 import {
   SEED_PROGRAMS,
@@ -224,9 +228,16 @@ const INITIAL_MONITORING_REPORTS: Record<string, MonitoringReportItem> = SEED_MO
 const INITIAL_PARTICIPANT_DATABASE: MasterParticipantRecord[] = SEED_PARTICIPANT_DATABASE;
 const INITIAL_PROGRAM_BUDGETS: Record<string, any> = SEED_PROGRAM_BUDGETS;
 
+function cloneInitialUsers(): User[] {
+  return INITIAL_USERS.map((u) => ({
+    ...u,
+    permissions: { ...u.permissions },
+  }));
+}
+
 function createDefaultSeed(): DatabaseSchema {
   return {
-    users: INITIAL_USERS,
+    users: cloneInitialUsers(),
     currentUserId: 'user-director',
     programs: [...INITIAL_PROGRAMS],
     outcomes: [...INITIAL_OUTCOMES],
@@ -272,16 +283,48 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
     parsed.programs = [];
   }
 
+  const defaultPermsByRole: Record<User['role'], User['permissions']> = {
+    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false },
+  };
+
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-    parsed.users = [...INITIAL_USERS];
+    parsed.users = cloneInitialUsers();
   } else {
+    parsed.users = parsed.users.map((u) => {
+      const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
+      const rawPerms = (u.permissions && typeof u.permissions === 'object' ? u.permissions : {}) as Partial<User['permissions']>;
+      return {
+        ...u,
+        permissions: {
+          canManagePrograms: rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+          canCreateTor: rawPerms.canCreateTor ?? basePerms.canCreateTor,
+          canApproveTor:
+            u.role === 'admin' ? false : rawPerms.canApproveTor ?? basePerms.canApproveTor,
+          canManageUsers:
+            u.role === 'admin' ? true : rawPerms.canManageUsers ?? basePerms.canManageUsers,
+          canViewAllTors: rawPerms.canViewAllTors ?? basePerms.canViewAllTors,
+        },
+      };
+    });
+
     const hasAdmin = parsed.users.some(
       (u) => u.role === 'admin' || u.permissions?.canManageUsers
     );
     if (!hasAdmin) {
       const defaultAdmin = INITIAL_USERS.find((u) => u.role === 'admin');
       if (defaultAdmin) {
-        parsed.users.push({ ...defaultAdmin, isActive: true, accountStatus: 'Aktif' });
+        parsed.users.push({
+          ...defaultAdmin,
+          permissions: { ...defaultAdmin.permissions },
+          isActive: true,
+          accountStatus: 'Aktif',
+        });
       }
     }
   }
@@ -429,6 +472,31 @@ class Database {
   }
 
   private isInitializing = false;
+  private lastFailedMysqlAttemptAt = 0;
+  private failedMysqlCycles = 0;
+
+  public isMysqlReady(): boolean {
+    return this.mysqlStatus === 'ready';
+  }
+
+  /**
+   * Jika MySQL dikonfigurasi namun sempat gagal saat startup (misal MySQL server baru aktif),
+   * coba hubungkan ulang secara berkala dengan exponential backoff agar aplikasi otomatis kembali ke MySQL
+   * tanpa membebani latensi API.
+   */
+  public async retryMysqlIfNeeded(): Promise<boolean> {
+    if (!isMysqlConfigured() || this.isMysqlReady() || this.isInitializing) {
+      return false;
+    }
+    const now = Date.now();
+    const backoffMs = Math.min(300_000, 30_000 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
+    if (now - this.lastFailedMysqlAttemptAt < backoffMs) {
+      return false;
+    }
+    this.initPromise = this.initializeMysqlStorage(1);
+    await this.initPromise;
+    return this.isMysqlReady();
+  }
 
   /**
    * Bernilai true apabila database siap melayani aplikasi:
@@ -451,6 +519,38 @@ class Database {
    */
   public async flushWrites(): Promise<void> {
     await this.mysqlWriteChain;
+  }
+
+  /**
+   * Menjamin perubahan akun / password pengguna langsung tersimpan atomik ke tabel users MySQL
+   * sebelum server mengembalikan respons sukses ke klien.
+   */
+  public async syncUserImmediately(user: User): Promise<void> {
+    if (isMysqlConfigured() && this.mysqlStatus === 'ready') {
+      try {
+        const pool = await getMysqlPool();
+        if (pool) {
+          await upsertMysqlUserRow(pool, user);
+        }
+      } catch (err) {
+        console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
+      }
+    }
+    await this.flushWrites();
+  }
+
+  public async removeUserImmediately(userId: string): Promise<void> {
+    if (isMysqlConfigured() && this.mysqlStatus === 'ready') {
+      try {
+        const pool = await getMysqlPool();
+        if (pool) {
+          await deleteMysqlUserRow(pool, userId);
+        }
+      } catch (err) {
+        console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
+      }
+    }
+    await this.flushWrites();
   }
 
   private ensureDirectory() {
@@ -500,14 +600,13 @@ class Database {
     return fresh;
   }
 
-  private async initializeMysqlStorage(): Promise<void> {
+  private async initializeMysqlStorage(maxAttempts = 3): Promise<void> {
     if (!isMysqlConfigured()) {
       this.mysqlStatus = 'unconfigured';
       return;
     }
 
     this.isInitializing = true;
-    const maxAttempts = 2;
     let lastError: unknown = null;
 
     try {
@@ -534,6 +633,7 @@ class Database {
 
             this.data = normalizeSchema(existingFromMysql);
             this.mysqlStatus = 'ready';
+            this.failedMysqlCycles = 0;
 
             if (Object.keys(missingFlags).length > 0) {
               await upsertMysqlKvEntries(pool, missingFlags);
@@ -549,21 +649,34 @@ class Database {
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
           this.mysqlStatus = 'ready';
+          this.failedMysqlCycles = 0;
           console.log('[DB] Initial seed saved successfully to MySQL.');
           return;
         } catch (err) {
           lastError = err;
+          await resetMysqlPool();
           if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
+            await new Promise((resolve) => setTimeout(resolve, 800));
           }
         }
       }
 
+      this.lastFailedMysqlAttemptAt = Date.now();
+      this.failedMysqlCycles += 1;
+      const wasAlreadyFailed = this.mysqlStatus === 'failed';
       this.mysqlStatus = 'failed';
-      if (process.env.MYSQL_STRICT_REQUIRED !== 'true') {
+      if (!wasAlreadyFailed && process.env.MYSQL_STRICT_REQUIRED !== 'true') {
         this.data = this.loadInitialLocalDevData();
       }
-      console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
+      if (isCloudRunEnvironment() && process.env.MYSQL_STRICT_REQUIRED !== 'true') {
+        if (!wasAlreadyFailed) {
+          console.log(
+            `[DB] MySQL unreachable from Cloud Run preview; using local preview storage (${sanitizeDbError(lastError)}).`
+          );
+        }
+      } else {
+        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
+      }
     } finally {
       this.isInitializing = false;
     }

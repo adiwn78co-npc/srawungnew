@@ -101,6 +101,26 @@ const DEFAULT_PERMISSIONS_BY_ROLE: Record<UserRole, User['permissions']> = {
   },
 };
 
+function resolveSafePermissions(
+  role?: UserRole,
+  rawPermissions?: Partial<User['permissions']> | null
+): User['permissions'] {
+  const base =
+    (role && DEFAULT_PERMISSIONS_BY_ROLE[role]) || DEFAULT_PERMISSIONS_BY_ROLE.staff;
+  const merged: User['permissions'] = {
+    canManagePrograms: rawPermissions?.canManagePrograms ?? base.canManagePrograms,
+    canCreateTor: rawPermissions?.canCreateTor ?? base.canCreateTor,
+    canApproveTor: rawPermissions?.canApproveTor ?? base.canApproveTor,
+    canManageUsers: rawPermissions?.canManageUsers ?? base.canManageUsers,
+    canViewAllTors: rawPermissions?.canViewAllTors ?? base.canViewAllTors,
+  };
+  if (role === 'admin') {
+    merged.canApproveTor = false;
+    merged.canManageUsers = true;
+  }
+  return merged;
+}
+
 interface UserManagementViewProps {
   onRefresh?: () => void;
 }
@@ -290,7 +310,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
           role: u.role,
           roleTitle: u.roleTitle,
           department: u.department || 'Divisi Program Lapangan',
-          permissions: { ...u.permissions },
+          permissions: resolveSafePermissions(u.role, u.permissions),
         });
       }
     }
@@ -431,8 +451,8 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
       if (statusFilter === 'INACTIVE' && u.isActive) return false;
       if (searchQuery.trim() !== '') {
         const q = searchQuery.toLowerCase();
-        const matchName = u.name.toLowerCase().includes(q);
-        const matchEmail = u.email.toLowerCase().includes(q);
+        const matchName = (u.name || '').toLowerCase().includes(q);
+        const matchEmail = (u.email || '').toLowerCase().includes(q);
         const matchRole = (u.roleTitle || '').toLowerCase().includes(q);
         const matchDept = (u.department || '').toLowerCase().includes(q);
         if (!matchName && !matchEmail && !matchRole && !matchDept) return false;
@@ -496,17 +516,17 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     setDepartment(sourceUser.department);
     setIsActive(true);
     setAccountStatus('Aktif');
-    setPermissions({ ...sourceUser.permissions });
+    setPermissions(resolveSafePermissions(sourceUser.role, sourceUser.permissions));
     setModalError(null);
     setShowModal(true);
   };
 
   const handleOpenEdit = (user: User) => {
     setEditingUser(user);
-    setName(user.name);
-    setEmail(user.email);
+    setName(user.name || '');
+    setEmail(user.email || '');
     setEmailManuallyEdited(true);
-    setUsername(user.username || user.email.split('@')[0] || '');
+    setUsername(user.username || (user.email || '').split('@')[0] || '');
     setUsernameManuallyEdited(true);
     const matchingTpl = roleTemplates.find(
       (t) =>
@@ -515,13 +535,13 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     );
     setSelectedTemplateId(matchingTpl?.id || '');
     setRole(user.role);
-    setRoleTitle(user.roleTitle);
-    setDepartment(user.department);
+    setRoleTitle(user.roleTitle || '');
+    setDepartment(user.department || '');
     const resolvedStatus: UserAccountStatus =
       user.accountStatus || (user.isActive === false ? 'Nonaktif' : 'Aktif');
     setAccountStatus(resolvedStatus);
     setIsActive(resolvedStatus === 'Aktif');
-    setPermissions({ ...user.permissions });
+    setPermissions(resolveSafePermissions(user.role, user.permissions));
     setModalError(null);
     setShowModal(true);
   };
@@ -567,7 +587,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
 
     const dupEmail = users.find(
       (u) =>
-        u.id !== editingUser?.id && u.email.trim().toLowerCase() === trimmedEmail
+        u.id !== editingUser?.id && (u.email || '').trim().toLowerCase() === trimmedEmail
     );
     if (dupEmail) {
       setModalError(
@@ -579,7 +599,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     const dupUsername = users.find(
       (u) =>
         u.id !== editingUser?.id &&
-        (u.username || u.email.split('@')[0]).trim().toLowerCase() === trimmedUsername
+        (u.username || (u.email || '').split('@')[0]).trim().toLowerCase() === trimmedUsername
     );
     if (dupUsername) {
       setModalError(
@@ -591,7 +611,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     const dupName = users.find(
       (u) =>
         u.id !== editingUser?.id &&
-        u.name.trim().toLowerCase() === trimmedName.toLowerCase()
+        (u.name || '').trim().toLowerCase() === trimmedName.toLowerCase()
     );
     if (dupName) {
       setModalError(
@@ -689,7 +709,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
       await api.resetUserPassword(resetPasswordUser.id, trimmedPw);
       showSuccess(
         `Password untuk akun "${resetPasswordUser.name}" (@${
-          resetPasswordUser.username || resetPasswordUser.email.split('@')[0]
+          resetPasswordUser.username || (resetPasswordUser.email || '').split('@')[0]
         }) berhasil direset oleh Administrator.`
       );
       setResetPasswordUser(null);
@@ -1174,33 +1194,38 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                       </td>
 
                       <td className="py-3.5 px-4">
-                        <div className="flex flex-wrap gap-1">
-                          {user.permissions.canManagePrograms && (
-                            <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10.5px] font-medium border border-indigo-200/60">
-                              Kelola Program &amp; RACI
-                            </span>
-                          )}
-                          {user.permissions.canCreateTor && (
-                            <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-[10.5px] font-medium border border-blue-200/60">
-                              Buat ToR &amp; Monitoring
-                            </span>
-                          )}
-                          {user.permissions.canApproveTor && (
-                            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded text-[10.5px] font-medium border border-emerald-200/60">
-                              Approval Dokumen
-                            </span>
-                          )}
-                          {user.permissions.canViewAllTors && (
-                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-[10.5px] font-medium border border-slate-200">
-                              Akses Lintas Divisi
-                            </span>
-                          )}
-                          {user.permissions.canManageUsers && (
-                            <span className="px-2 py-0.5 bg-rose-50 text-rose-700 rounded text-[10.5px] font-medium border border-rose-200/60">
-                              Kelola Pengguna
-                            </span>
-                          )}
-                        </div>
+                        {(() => {
+                          const safePerms = resolveSafePermissions(user.role, user.permissions);
+                          return (
+                            <div className="flex flex-wrap gap-1">
+                              {safePerms.canManagePrograms && (
+                                <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10.5px] font-medium border border-indigo-200/60">
+                                  Kelola Program &amp; RACI
+                                </span>
+                              )}
+                              {safePerms.canCreateTor && (
+                                <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-[10.5px] font-medium border border-blue-200/60">
+                                  Buat ToR &amp; Monitoring
+                                </span>
+                              )}
+                              {safePerms.canApproveTor && (
+                                <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded text-[10.5px] font-medium border border-emerald-200/60">
+                                  Approval Dokumen
+                                </span>
+                              )}
+                              {safePerms.canViewAllTors && (
+                                <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-[10.5px] font-medium border border-slate-200">
+                                  Akses Lintas Divisi
+                                </span>
+                              )}
+                              {safePerms.canManageUsers && (
+                                <span className="px-2 py-0.5 bg-rose-50 text-rose-700 rounded text-[10.5px] font-medium border border-rose-200/60">
+                                  Kelola Pengguna
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       <td className="py-3.5 px-4 whitespace-nowrap">
@@ -1735,7 +1760,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1">
                 <div className="font-bold text-slate-900">{resetPasswordUser.name}</div>
                 <div className="text-slate-500 font-mono text-[11px]">
-                  @{resetPasswordUser.username || resetPasswordUser.email.split('@')[0]} · {resetPasswordUser.email}
+                  @{resetPasswordUser.username || (resetPasswordUser.email || '').split('@')[0]} · {resetPasswordUser.email || '-'}
                 </div>
                 <div className="text-slate-600 text-[11px]">
                   {resetPasswordUser.roleTitle} — {resetPasswordUser.department}

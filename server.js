@@ -17,10 +17,46 @@ import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 dotenv.config();
 var cachedPool = null;
+var loggedCloudRunLoopbackNotice = false;
+function isCloudRunEnvironment() {
+  return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+}
+function isLoopbackMysqlHost(rawHost) {
+  const host = String(rawHost || "").trim().toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0";
+}
+function hasPlaceholderMysqlCredentials() {
+  const user = String(process.env.MYSQL_USER || "").trim();
+  const dbName = String(process.env.MYSQL_DATABASE || "").trim();
+  return user === "your_mysql_user" || dbName === "your_mysql_database";
+}
 function isMysqlConfigured() {
-  return Boolean(
-    process.env.MYSQL_HOST && process.env.MYSQL_USER && process.env.MYSQL_DATABASE
-  );
+  const host = String(process.env.MYSQL_HOST || "").trim();
+  const user = String(process.env.MYSQL_USER || "").trim();
+  const dbName = String(process.env.MYSQL_DATABASE || "").trim();
+  if (!host || !user || !dbName || hasPlaceholderMysqlCredentials()) {
+    return false;
+  }
+  if (isCloudRunEnvironment() && isLoopbackMysqlHost(host) && process.env.MYSQL_STRICT_REQUIRED !== "true") {
+    if (!loggedCloudRunLoopbackNotice) {
+      loggedCloudRunLoopbackNotice = true;
+      console.log(
+        `[DB] Cloud Run preview detected with local MYSQL_HOST (${host}); using local preview storage.`
+      );
+    }
+    return false;
+  }
+  return true;
+}
+async function resetMysqlPool() {
+  const existing = cachedPool;
+  cachedPool = null;
+  if (existing) {
+    try {
+      await existing.end();
+    } catch {
+    }
+  }
 }
 async function getMysqlPool() {
   if (!isMysqlConfigured()) {
@@ -36,12 +72,12 @@ async function getMysqlPool() {
   );
   const mysql = mysqlModule.default || mysqlModule;
   cachedPool = mysql.createPool({
-    host: process.env.MYSQL_HOST,
+    host: process.env.MYSQL_HOST?.trim(),
     port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER,
+    user: process.env.MYSQL_USER?.trim(),
     password: process.env.MYSQL_PASSWORD || "",
-    database: process.env.MYSQL_DATABASE,
-    connectTimeout: 5e3,
+    database: process.env.MYSQL_DATABASE?.trim(),
+    connectTimeout: 8e3,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
@@ -124,6 +160,48 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     }
   }
   const parseRowList = (rows) => Array.isArray(rows) ? rows.map((r) => safeJsonParse(r.raw_json, r)) : [];
+  const defaultPermsByRole = {
+    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false }
+  };
+  const hydrateMysqlUserRow = (r) => {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const colPerms = safeJsonParse(r?.permissions_json, null);
+    const resolvedRole = String(r?.role || raw.role || "staff");
+    const basePerms = defaultPermsByRole[resolvedRole] || defaultPermsByRole.staff;
+    const rawPerms = raw.permissions && typeof raw.permissions === "object" ? raw.permissions : colPerms && typeof colPerms === "object" ? colPerms : {};
+    const mergedPerms = {
+      canManagePrograms: rawPerms.canManagePrograms ?? colPerms?.canManagePrograms ?? basePerms.canManagePrograms,
+      canCreateTor: rawPerms.canCreateTor ?? colPerms?.canCreateTor ?? basePerms.canCreateTor,
+      canApproveTor: resolvedRole === "admin" ? false : rawPerms.canApproveTor ?? colPerms?.canApproveTor ?? basePerms.canApproveTor,
+      canManageUsers: resolvedRole === "admin" ? true : rawPerms.canManageUsers ?? colPerms?.canManageUsers ?? basePerms.canManageUsers,
+      canViewAllTors: rawPerms.canViewAllTors ?? colPerms?.canViewAllTors ?? basePerms.canViewAllTors
+    };
+    const resolvedPasswordHash = typeof r?.password_hash === "string" && r.password_hash.trim() || typeof raw.passwordHash === "string" && raw.passwordHash.trim() || typeof raw.password_hash === "string" && raw.password_hash.trim() || void 0;
+    const resolvedIsActive = r?.is_active !== void 0 && r?.is_active !== null ? Boolean(Number(r.is_active)) : raw.isActive !== false;
+    const resolvedAccountStatus = typeof r?.account_status === "string" && r.account_status.trim() || raw.accountStatus || (resolvedIsActive ? "Aktif" : "Nonaktif");
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      username: typeof r?.username === "string" && r.username.trim() || raw.username || void 0,
+      name: typeof r?.name === "string" && r.name.trim() || raw.name || "",
+      email: typeof r?.email === "string" && r.email.trim() || raw.email || "",
+      passwordHash: resolvedPasswordHash,
+      role: resolvedRole,
+      roleTitle: typeof r?.role_title === "string" && r.role_title.trim() || raw.roleTitle || resolvedRole.toUpperCase(),
+      department: typeof r?.department === "string" && r.department.trim() || raw.department || "",
+      isActive: resolvedAccountStatus === "Aktif",
+      accountStatus: resolvedAccountStatus,
+      permissions: mergedPerms,
+      lastLoginAt: r?.last_login_at || raw.lastLoginAt || void 0,
+      createdAt: r?.created_at || raw.createdAt || "2026-01-10T08:00:00Z"
+    };
+  };
   const attendanceSystem = kvMap["attendanceSystem"] || {
     locationConfig: {
       officeName: "Kantor Pusat Yayasan WIJNA",
@@ -148,7 +226,7 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     attendanceSystem.records = parseRowList(attendanceRows);
   }
   return {
-    users: parseRowList(userRows),
+    users: Array.isArray(userRows) ? userRows.map(hydrateMysqlUserRow) : [],
     currentUserId: kvMap["currentUserId"] || "user-director",
     programs: parseRowList(programRows),
     outcomes: parseRowList(outcomeRows),
@@ -191,6 +269,48 @@ async function upsertMysqlKvEntries(pool, entries) {
       [k, JSON.stringify(v), nowIso]
     );
   }
+}
+async function upsertMysqlUserRow(pool, u) {
+  if (!u || !u.id) return;
+  await pool.query(
+    `INSERT INTO users (
+      id, username, name, email, password_hash, role, role_title, department,
+      is_active, account_status, permissions_json, last_login_at, created_at, raw_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      username = VALUES(username),
+      name = VALUES(name),
+      email = VALUES(email),
+      password_hash = VALUES(password_hash),
+      role = VALUES(role),
+      role_title = VALUES(role_title),
+      department = VALUES(department),
+      is_active = VALUES(is_active),
+      account_status = VALUES(account_status),
+      permissions_json = VALUES(permissions_json),
+      last_login_at = VALUES(last_login_at),
+      raw_json = VALUES(raw_json)`,
+    [
+      String(u.id).slice(0, 128),
+      truncStr(u.username, 128),
+      truncStr(u.name, 255) || "",
+      truncStr(u.email, 255) || "",
+      truncStr(u.passwordHash, 255),
+      truncStr(u.role, 64) || "staff",
+      truncStr(u.roleTitle, 255),
+      truncStr(u.department, 255),
+      u.isActive === false ? 0 : 1,
+      truncStr(u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"), 64),
+      JSON.stringify(u.permissions || {}),
+      truncStr(u.lastLoginAt, 64),
+      truncStr(u.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
+      JSON.stringify(u)
+    ]
+  );
+}
+async function deleteMysqlUserRow(pool, userId) {
+  if (!userId) return;
+  await pool.query("DELETE FROM users WHERE id = ?", [String(userId).slice(0, 128)]);
 }
 async function syncTableById(conn, tableName, rows, insertSql, mapRowParams) {
   const safeRows = Array.isArray(rows) ? rows.filter((r) => r && r.id) : [];
@@ -1816,9 +1936,15 @@ var INITIAL_ACTIVITY_MONITORING_RECORDS = SEED_ACTIVITY_MONITORING_RECORDS;
 var INITIAL_MONITORING_REPORTS = SEED_MONITORING_REPORTS;
 var INITIAL_PARTICIPANT_DATABASE = SEED_PARTICIPANT_DATABASE;
 var INITIAL_PROGRAM_BUDGETS = SEED_PROGRAM_BUDGETS;
+function cloneInitialUsers() {
+  return INITIAL_USERS.map((u) => ({
+    ...u,
+    permissions: { ...u.permissions }
+  }));
+}
 function createDefaultSeed() {
   return {
-    users: INITIAL_USERS,
+    users: cloneInitialUsers(),
     currentUserId: "user-director",
     programs: [...INITIAL_PROGRAMS],
     outcomes: [...INITIAL_OUTCOMES],
@@ -1858,16 +1984,44 @@ function normalizeSchema(parsed) {
   if (!Array.isArray(parsed.programs)) {
     parsed.programs = [];
   }
+  const defaultPermsByRole = {
+    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false }
+  };
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-    parsed.users = [...INITIAL_USERS];
+    parsed.users = cloneInitialUsers();
   } else {
+    parsed.users = parsed.users.map((u) => {
+      const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
+      const rawPerms = u.permissions && typeof u.permissions === "object" ? u.permissions : {};
+      return {
+        ...u,
+        permissions: {
+          canManagePrograms: rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+          canCreateTor: rawPerms.canCreateTor ?? basePerms.canCreateTor,
+          canApproveTor: u.role === "admin" ? false : rawPerms.canApproveTor ?? basePerms.canApproveTor,
+          canManageUsers: u.role === "admin" ? true : rawPerms.canManageUsers ?? basePerms.canManageUsers,
+          canViewAllTors: rawPerms.canViewAllTors ?? basePerms.canViewAllTors
+        }
+      };
+    });
     const hasAdmin = parsed.users.some(
       (u) => u.role === "admin" || u.permissions?.canManageUsers
     );
     if (!hasAdmin) {
       const defaultAdmin = INITIAL_USERS.find((u) => u.role === "admin");
       if (defaultAdmin) {
-        parsed.users.push({ ...defaultAdmin, isActive: true, accountStatus: "Aktif" });
+        parsed.users.push({
+          ...defaultAdmin,
+          permissions: { ...defaultAdmin.permissions },
+          isActive: true,
+          accountStatus: "Aktif"
+        });
       }
     }
   }
@@ -1973,6 +2127,8 @@ var Database = class {
     this.initPromise = null;
     this.mysqlStatus = "unconfigured";
     this.isInitializing = false;
+    this.lastFailedMysqlAttemptAt = 0;
+    this.failedMysqlCycles = 0;
     this.ensureDirectory();
     this.data = isMysqlConfigured() ? normalizeSchema(createDefaultSeed()) : this.loadInitialLocalDevData();
     this.initPromise = this.initializeMysqlStorage();
@@ -1986,6 +2142,27 @@ var Database = class {
       this.initPromise = this.initializeMysqlStorage();
     }
     await this.initPromise;
+  }
+  isMysqlReady() {
+    return this.mysqlStatus === "ready";
+  }
+  /**
+   * Jika MySQL dikonfigurasi namun sempat gagal saat startup (misal MySQL server baru aktif),
+   * coba hubungkan ulang secara berkala dengan exponential backoff agar aplikasi otomatis kembali ke MySQL
+   * tanpa membebani latensi API.
+   */
+  async retryMysqlIfNeeded() {
+    if (!isMysqlConfigured() || this.isMysqlReady() || this.isInitializing) {
+      return false;
+    }
+    const now = Date.now();
+    const backoffMs = Math.min(3e5, 3e4 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
+    if (now - this.lastFailedMysqlAttemptAt < backoffMs) {
+      return false;
+    }
+    this.initPromise = this.initializeMysqlStorage(1);
+    await this.initPromise;
+    return this.isMysqlReady();
   }
   /**
    * Bernilai true apabila database siap melayani aplikasi:
@@ -2007,6 +2184,36 @@ var Database = class {
    */
   async flushWrites() {
     await this.mysqlWriteChain;
+  }
+  /**
+   * Menjamin perubahan akun / password pengguna langsung tersimpan atomik ke tabel users MySQL
+   * sebelum server mengembalikan respons sukses ke klien.
+   */
+  async syncUserImmediately(user) {
+    if (isMysqlConfigured() && this.mysqlStatus === "ready") {
+      try {
+        const pool = await getMysqlPool();
+        if (pool) {
+          await upsertMysqlUserRow(pool, user);
+        }
+      } catch (err) {
+        console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
+      }
+    }
+    await this.flushWrites();
+  }
+  async removeUserImmediately(userId) {
+    if (isMysqlConfigured() && this.mysqlStatus === "ready") {
+      try {
+        const pool = await getMysqlPool();
+        if (pool) {
+          await deleteMysqlUserRow(pool, userId);
+        }
+      } catch (err) {
+        console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
+      }
+    }
+    await this.flushWrites();
   }
   ensureDirectory() {
     if (!fs2.existsSync(DATA_DIR)) {
@@ -2048,13 +2255,12 @@ var Database = class {
     this.persistLocalJsonOnly(fresh);
     return fresh;
   }
-  async initializeMysqlStorage() {
+  async initializeMysqlStorage(maxAttempts = 3) {
     if (!isMysqlConfigured()) {
       this.mysqlStatus = "unconfigured";
       return;
     }
     this.isInitializing = true;
-    const maxAttempts = 2;
     let lastError = null;
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -2076,6 +2282,7 @@ var Database = class {
             }
             this.data = normalizeSchema(existingFromMysql);
             this.mysqlStatus = "ready";
+            this.failedMysqlCycles = 0;
             if (Object.keys(missingFlags).length > 0) {
               await upsertMysqlKvEntries(pool, missingFlags);
             }
@@ -2087,20 +2294,33 @@ var Database = class {
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
           this.mysqlStatus = "ready";
+          this.failedMysqlCycles = 0;
           console.log("[DB] Initial seed saved successfully to MySQL.");
           return;
         } catch (err) {
           lastError = err;
+          await resetMysqlPool();
           if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
+            await new Promise((resolve) => setTimeout(resolve, 800));
           }
         }
       }
+      this.lastFailedMysqlAttemptAt = Date.now();
+      this.failedMysqlCycles += 1;
+      const wasAlreadyFailed = this.mysqlStatus === "failed";
       this.mysqlStatus = "failed";
-      if (process.env.MYSQL_STRICT_REQUIRED !== "true") {
+      if (!wasAlreadyFailed && process.env.MYSQL_STRICT_REQUIRED !== "true") {
         this.data = this.loadInitialLocalDevData();
       }
-      console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
+      if (isCloudRunEnvironment() && process.env.MYSQL_STRICT_REQUIRED !== "true") {
+        if (!wasAlreadyFailed) {
+          console.log(
+            `[DB] MySQL unreachable from Cloud Run preview; using local preview storage (${sanitizeDbError(lastError)}).`
+          );
+        }
+      } else {
+        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
+      }
     } finally {
       this.isInitializing = false;
     }
@@ -4739,13 +4959,14 @@ async function startServer() {
       username: safeUser.username || deriveDefaultUsername(safeUser.email, safeUser.name),
       accountStatus: resolvedStatus,
       isActive: resolvedStatus === "Aktif",
+      permissions: normalizeRolePermissions(safeUser.role, safeUser.permissions),
       mustChangePassword: Boolean(safeUser.mustChangePassword ?? isUsingDefaultPassword)
     };
   }
   function ensureUserSecurityFieldsInitialized() {
     const current = db.getData();
     const needsInit = (current.users || []).some(
-      (u) => !u.passwordHash || !u.username || !u.accountStatus || u.mustChangePassword === void 0
+      (u) => !u.passwordHash && !u.password_hash || !u.username || !u.accountStatus || !u.permissions || u.mustChangePassword === void 0
     );
     if (!needsInit) return;
     const defaultHash = hashPassword(DEFAULT_TESTING_PASSWORD);
@@ -4766,6 +4987,11 @@ async function startServer() {
           u.accountStatus = u.isActive === false ? "Nonaktif" : "Aktif";
         }
         u.isActive = u.accountStatus === "Aktif";
+        u.permissions = normalizeRolePermissions(u.role, u.permissions);
+        const existingLegacyHash = u.password_hash;
+        if (!u.passwordHash && typeof existingLegacyHash === "string" && existingLegacyHash.trim()) {
+          u.passwordHash = existingLegacyHash.trim();
+        }
         if (!u.passwordHash) {
           u.passwordHash = defaultHash;
           u.passwordUpdatedAt = u.createdAt || (/* @__PURE__ */ new Date()).toISOString();
@@ -4865,6 +5091,14 @@ async function startServer() {
       }
       ensureUserSecurityFieldsInitialized();
       await db.flushWrites();
+    } else {
+      void db.retryMysqlIfNeeded().then((reconnected) => {
+        if (reconnected) {
+          ensureUserSecurityFieldsInitialized();
+          void db.flushWrites();
+        }
+      }).catch(() => {
+      });
     }
     const rawForwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
     const clientIp = rawForwarded || String(req.socket.remoteAddress || "local");
@@ -5276,7 +5510,7 @@ async function startServer() {
       token: sessionToken
     });
   });
-  app.post("/api/auth/change-password", (req, res) => {
+  app.post("/api/auth/change-password", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (!currentUser || currentUser.isActive === false) {
       return res.status(401).json({ error: "Sesi pengguna tidak valid atau akun sedang nonaktif." });
@@ -5331,6 +5565,7 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.syncUserImmediately(updatedUser);
     for (const [tok, sess] of activeSessions.entries()) {
       if (sess.userId === currentUser.id) {
         activeSessions.delete(tok);
@@ -5465,7 +5700,7 @@ async function startServer() {
     });
     res.json(savedSettings);
   });
-  app.post("/api/users", (req, res) => {
+  app.post("/api/users", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
@@ -5584,9 +5819,10 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.syncUserImmediately(newUser);
     res.status(201).json(sanitizeUser(newUser));
   });
-  app.put("/api/users/:id", (req, res) => {
+  app.put("/api/users/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
@@ -5740,9 +5976,10 @@ async function startServer() {
     if (!updatedUser) {
       return res.status(404).json({ error: "Pengguna tidak ditemukan" });
     }
+    await db.syncUserImmediately(updatedUser);
     res.json(sanitizeUser(updatedUser));
   });
-  app.post("/api/users/:id/reset-password", (req, res) => {
+  app.post("/api/users/:id/reset-password", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
@@ -5787,12 +6024,13 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.syncUserImmediately(updatedUser);
     res.json({
       message: `Password untuk akun "${targetUser.name}" berhasil direset dan dienkripsi.`,
       user: sanitizeUser(updatedUser)
     });
   });
-  app.delete("/api/users/:id", (req, res) => {
+  app.delete("/api/users/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
@@ -5838,6 +6076,7 @@ async function startServer() {
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
+    await db.removeUserImmediately(id);
     res.json({
       message: `Akun pengguna ${targetUser.name} berhasil dihapus.`,
       id
@@ -5855,7 +6094,7 @@ async function startServer() {
   });
   app.post("/api/programs", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Program baru" });
     }
     const { name, location, startDate, endDate, description, folderUrl, picId, status } = req.body;
@@ -5908,7 +6147,7 @@ async function startServer() {
   });
   app.put("/api/programs/:id", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Program" });
     }
     const { id } = req.params;
@@ -5968,7 +6207,7 @@ async function startServer() {
   });
   app.delete("/api/programs/:id", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "hr" && currentUser.role !== "admin") {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "hr" && currentUser.role !== "admin") {
       return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Program" });
     }
     const { id } = req.params;
@@ -6389,7 +6628,7 @@ async function startServer() {
       ...t,
       budgetRequested: getConnectedBudgetRequested(t, data.cashAdvances)
     }));
-    if (currentUser.role === "staff" && !currentUser.permissions.canViewAllTors) {
+    if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
       tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
     }
     const { search, picId, status, activityStatus } = req.query;
@@ -6469,7 +6708,7 @@ async function startServer() {
   });
   app.post("/api/tors", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions.canCreateTor && currentUser.role === "admin") {
+    if (!currentUser.permissions?.canCreateTor && currentUser.role === "admin") {
       return res.status(403).json({ error: "Admin tidak berwenang membuat TOR" });
     }
     const {
@@ -8310,7 +8549,7 @@ async function startServer() {
     });
     const data = db.getData();
     let tors = [...data.tors];
-    if (currentUser.role === "staff" && !currentUser.permissions.canViewAllTors) {
+    if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
       tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
     }
     const now = /* @__PURE__ */ new Date();
