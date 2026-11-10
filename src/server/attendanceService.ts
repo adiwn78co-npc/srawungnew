@@ -109,7 +109,7 @@ export function isAttendanceArrangementActiveOnCalendar(
 
 export const DEFAULT_WIJNA_LOCATION_CONFIG: WijnaLocationConfig = {
   officeName: 'Kantor Pusat Yayasan WIJNA',
-  address: 'Jl. Tebet Timur Dalam Raya No. 42, Jakarta Selatan',
+  address: 'Kantor WIJNA (-7.342604, 110.489848)',
   latitude: -7.342604,
   longitude: 110.489848,
   radiusMeters: 5,
@@ -287,11 +287,13 @@ export function ensureAttendanceSystemInitialized(draft: {
         draft.attendanceSystem.locationConfig.updatedByName = 'Dr. Hendra Wijaya (Director)';
       }
       if (
-        Math.abs((draft.attendanceSystem.locationConfig.latitude || 0) - -6.2297) < 0.001 &&
-        Math.abs((draft.attendanceSystem.locationConfig.longitude || 0) - 106.8532) < 0.001
+        Math.abs((draft.attendanceSystem.locationConfig.latitude || 0) - -6.2297) < 0.01 ||
+        Math.abs((draft.attendanceSystem.locationConfig.longitude || 0) - 106.8532) < 0.01 ||
+        draft.attendanceSystem.locationConfig.address === 'Jl. Tebet Timur Dalam Raya No. 42, Jakarta Selatan'
       ) {
         draft.attendanceSystem.locationConfig.latitude = -7.342604;
         draft.attendanceSystem.locationConfig.longitude = 110.489848;
+        draft.attendanceSystem.locationConfig.address = 'Kantor WIJNA (-7.342604, 110.489848)';
       }
     }
     if (!Array.isArray(draft.attendanceSystem.records)) {

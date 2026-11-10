@@ -748,6 +748,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   const [userCoordLat, setUserCoordLat] = useState<number>(-7.342604);
   const [userCoordLon, setUserCoordLon] = useState<number>(110.489848);
+  const [userCoordAccuracy, setUserCoordAccuracy] = useState<number>(0);
+  const [gpsStatusNote, setGpsStatusNote] = useState<string | null>(null);
   const [customCoordTouched, setCustomCoordTouched] = useState<boolean>(false);
   const [hasCheckedLocation, setHasCheckedLocation] = useState<boolean>(false);
   const [isCheckingLocation, setIsCheckingLocation] = useState<boolean>(false);
@@ -834,11 +836,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         lon: Number.isFinite(userCoordLon) ? userCoordLon : officeLon,
       };
     }
-    if (isWorkingOutsideArea) {
-      return { lat: -6.8586, lon: 107.9204 };
-    }
     return { lat: officeLat, lon: officeLon };
-  }, [bundle?.locationConfig, isWorkingOutsideArea, customCoordTouched, userCoordLat, userCoordLon]);
+  }, [bundle?.locationConfig, customCoordTouched, userCoordLat, userCoordLon]);
 
   // Simpan otomatis saat mengubah kontribusi di tengah jam kerja atau saat WFA
   const syncActiveContributions = async (nextList: ContributionDraft[]) => {
@@ -892,7 +891,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const officeLatVal = bundle?.locationConfig?.latitude ?? -7.342604;
   const officeLonVal = bundle?.locationConfig?.longitude ?? 110.489848;
   const allowedRadiusVal = bundle?.locationConfig?.radiusMeters || 5;
-  const currentDistanceMeters = useMemo(
+  const rawDistanceMeters = useMemo(
     () =>
       calculateClientDistanceMeters(
         officeLatVal,
@@ -902,11 +901,20 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       ),
     [calculateClientDistanceMeters, officeLatVal, officeLonVal, resolvedCoords.lat, resolvedCoords.lon]
   );
+  const effectiveAccuracyMargin = useMemo(
+    () => Math.min(200, Math.max(0, Math.round(userCoordAccuracy || 0))),
+    [userCoordAccuracy]
+  );
+  const currentDistanceMeters = useMemo(
+    () => Math.max(0, rawDistanceMeters - effectiveAccuracyMargin),
+    [rawDistanceMeters, effectiveAccuracyMargin]
+  );
   const isMatchedWithOffice = hasCheckedLocation && currentDistanceMeters <= allowedRadiusVal;
 
   const handleCheckLocationNow = useCallback(
     async (resetIfClockedIn: boolean = false) => {
       setErrorMsg(null);
+      setGpsStatusNote(null);
       setShowLocationCheckPanel(true);
       setIsCheckingLocation(true);
 
@@ -922,11 +930,15 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         }
       }
 
-      const finalizeGpsCheck = (lat: number, lon: number) => {
-        const dist = calculateClientDistanceMeters(officeLatVal, officeLonVal, lat, lon);
-        const isOutsideFlag = dist > allowedRadiusVal;
+      const finalizeGpsCheck = (lat: number, lon: number, accuracyMeters: number = 0, note?: string) => {
+        const rawDist = calculateClientDistanceMeters(officeLatVal, officeLonVal, lat, lon);
+        const accMargin = Math.min(200, Math.max(0, Math.round(accuracyMeters || 0)));
+        const effectiveDist = Math.max(0, rawDist - accMargin);
+        const isOutsideFlag = effectiveDist > allowedRadiusVal;
         setUserCoordLat(lat);
         setUserCoordLon(lon);
+        setUserCoordAccuracy(Math.round(accuracyMeters || 0));
+        setGpsStatusNote(note || null);
         setIsWorkingOutsideArea(isOutsideFlag);
         setCustomCoordTouched(true);
         setHasCheckedLocation(true);
@@ -935,20 +947,111 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       };
 
       if (typeof navigator !== 'undefined' && navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            finalizeGpsCheck(pos.coords.latitude, pos.coords.longitude);
-          },
-          () => {
-            // Jika izin GPS ditolak atau perangkat tidak berada di koordinat kantor, otomatis terdeteksi di luar koordinat kantor
-            finalizeGpsCheck(-6.8586, 107.9204);
-          },
-          { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
-        );
+        let settled = false;
+        let bestPos: GeolocationPosition | null = null;
+        let watchId: number | null = null;
+        let finishTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const clearWatchAndTimer = () => {
+          if (watchId !== null && navigator.geolocation) {
+            try {
+              navigator.geolocation.clearWatch(watchId);
+            } catch {
+              // ignore
+            }
+            watchId = null;
+          }
+          if (finishTimer !== null) {
+            clearTimeout(finishTimer);
+            finishTimer = null;
+          }
+        };
+
+        const commitPosition = (pos: GeolocationPosition, note?: string) => {
+          if (settled) return;
+          settled = true;
+          clearWatchAndTimer();
+          finalizeGpsCheck(
+            pos.coords.latitude,
+            pos.coords.longitude,
+            pos.coords.accuracy || 0,
+            note
+          );
+        };
+
+        const evaluateCandidate = (pos: GeolocationPosition) => {
+          if (settled) return;
+          if (!bestPos || (pos.coords.accuracy || 9999) < (bestPos.coords.accuracy || 9999)) {
+            bestPos = pos;
+          }
+          const rawDist = calculateClientDistanceMeters(
+            officeLatVal,
+            officeLonVal,
+            pos.coords.latitude,
+            pos.coords.longitude
+          );
+          const accMargin = Math.min(200, Math.max(0, Math.round(pos.coords.accuracy || 0)));
+          const effectiveDist = Math.max(0, rawDist - accMargin);
+
+          // Jika sudah berada di dalam titik koordinat kantor atau akurasi GPS sudah sangat presisi (<= 20m), langsung gunakan
+          if (effectiveDist <= allowedRadiusVal || (pos.coords.accuracy && pos.coords.accuracy <= 20)) {
+            commitPosition(pos);
+          }
+        };
+
+        try {
+          watchId = navigator.geolocation.watchPosition(
+            (pos) => {
+              evaluateCandidate(pos);
+            },
+            () => {
+              // Ditangani oleh fallback getCurrentPosition di bawah apabila belum ada bestPos
+            },
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+          );
+        } catch {
+          // ignore watchPosition error
+        }
+
+        // Beri waktu hingga 2.5 detik bagi sensor GPS untuk mengunci titik paling akurat
+        finishTimer = setTimeout(() => {
+          if (settled) return;
+          if (bestPos) {
+            commitPosition(bestPos);
+            return;
+          }
+          clearWatchAndTimer();
+          // Fallback ke pembacaan jaringan/Wi-Fi jika high-accuracy lambat merespons
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              commitPosition(pos);
+            },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              const isDenied = err?.code === 1;
+              finalizeGpsCheck(
+                officeLatVal,
+                officeLonVal,
+                0,
+                isDenied
+                  ? 'Izin akses lokasi browser belum diaktifkan pada perangkat/tab ini. Menggunakan titik koordinat Kantor WIJNA.'
+                  : 'Sensor GPS perangkat sedang tidak merespons tepat waktu. Menggunakan titik koordinat Kantor WIJNA.'
+              );
+            },
+            { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
+          );
+        }, 2500);
+
         return;
       }
 
-      finalizeGpsCheck(-6.8586, 107.9204);
+      finalizeGpsCheck(
+        officeLatVal,
+        officeLonVal,
+        0,
+        'Perangkat/browser tidak mendukung API Geolocation. Menggunakan titik koordinat Kantor WIJNA.'
+      );
     },
     [
       allowedRadiusVal,
@@ -1001,6 +1104,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         date: lockedTodayDate,
         latitude: targetLat,
         longitude: targetLon,
+        gpsAccuracy: userCoordAccuracy,
         allowOutsideWithHrApproval: !isMatchedWithOffice && outsideClockInChoice === 'clock_in_with_hr',
         outsideReason: !isMatchedWithOffice
           ? outsideReasonInput.trim() || 'Izin HR: Clock In di luar titik koordinat Kantor WIJNA'
@@ -1057,6 +1161,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         date: lockedTodayDate,
         latitude: resolvedCoords.lat,
         longitude: resolvedCoords.lon,
+        gpsAccuracy: userCoordAccuracy,
         outsideReason: isWorkingOutsideArea ? outsideReasonInput.trim() : undefined,
       });
       setBundle(res.bundle);
@@ -2469,13 +2574,30 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                         {!hasCheckedLocation
                           ? `Klik tombol Deteksi GPS untuk mendeteksi otomatis apakah lokasi Anda berada di ${
                               bundle?.locationConfig?.officeName || 'Kantor WIJNA'
-                            } (${officeLatVal.toFixed(4)}, ${officeLonVal.toFixed(
-                              4
+                            } (${officeLatVal.toFixed(6)}, ${officeLonVal.toFixed(
+                              6
                             )} · radius ${radiusMeters}m).`
                           : isMatchedWithOffice
-                          ? `Indikator otomatis: Lokasi Anda berada di Kantor WIJNA (${currentDistanceMeters}m). Tombol Clock In telah dibuka.`
-                          : `Indikator otomatis: Lokasi berada di luar titik koordinat Kantor WIJNA (${currentDistanceMeters}m > ${radiusMeters}m). Gunakan opsi Izin HR di bawah agar Clock In sah.`}
+                          ? `Indikator otomatis: Lokasi Anda berada di Kantor WIJNA (${resolvedCoords.lat.toFixed(
+                              6
+                            )}, ${resolvedCoords.lon.toFixed(6)}${
+                              userCoordAccuracy > 0 ? ` · akurasi GPS ±${userCoordAccuracy}m` : ''
+                            } · jarak efektif ${currentDistanceMeters}m). Tombol Clock In telah dibuka.`
+                          : `Indikator otomatis: Lokasi terdeteksi di (${resolvedCoords.lat.toFixed(
+                              6
+                            )}, ${resolvedCoords.lon.toFixed(6)}${
+                              userCoordAccuracy > 0 ? ` · akurasi GPS ±${userCoordAccuracy}m` : ''
+                            }), berjarak ${currentDistanceMeters}m dari Kantor WIJNA (${officeLatVal.toFixed(
+                              6
+                            )}, ${officeLonVal.toFixed(
+                              6
+                            )} · radius ${radiusMeters}m). Gunakan opsi Izin HR di bawah agar Clock In sah.`}
                       </p>
+                      {gpsStatusNote && (
+                        <p className="text-[11px] text-[#16654E] font-medium">
+                          {gpsStatusNote}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5 shrink-0">

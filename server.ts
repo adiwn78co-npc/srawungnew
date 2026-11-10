@@ -124,7 +124,7 @@ async function startServer() {
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=(), payment=()');
+    res.setHeader('Permissions-Policy', 'geolocation=*, camera=(), microphone=(), payment=()');
     res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     res.setHeader(
@@ -7451,6 +7451,7 @@ async function startServer() {
       date?: string;
       latitude: number;
       longitude: number;
+      gpsAccuracy?: number;
       outsideReason?: string;
       allowOutsideWithHrApproval?: boolean;
       workItems: { category: WijnaWorkCategory; shortDescription: string }[];
@@ -7459,6 +7460,7 @@ async function startServer() {
     const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
+    const accuracyMargin = Math.min(200, Math.max(0, Math.round(Number(req.body?.gpsAccuracy) || 0)));
     if (isNaN(lat) || isNaN(lon)) {
       return res.status(400).json({ error: 'Koordinat lokasi Clock In tidak valid.' });
     }
@@ -7492,12 +7494,13 @@ async function startServer() {
         return;
       }
 
-      const distanceMeters = calculateDistanceMeters(
+      const rawDistanceMeters = calculateDistanceMeters(
         sys.locationConfig.latitude,
         sys.locationConfig.longitude,
         lat,
         lon
       );
+      const distanceMeters = Math.max(0, rawDistanceMeters - accuracyMargin);
       const isOutside = distanceMeters > sys.locationConfig.radiusMeters;
       if (isOutside && !allowOutsideWithHrApproval) {
         errMsg = `Tidak dapat melakukan Clock In karena posisi Anda berada di luar titik koordinat WIJNA (${distanceMeters}m > radius ${sys.locationConfig.radiusMeters}m). Pilih opsi "Tetap Clock In (Sah Setelah Mendapat ACC dari HR)" jika Anda tetap ingin Clock In dari luar kantor.`;
@@ -7735,6 +7738,7 @@ async function startServer() {
     const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
+    const accuracyMargin = Math.min(200, Math.max(0, Math.round(Number(req.body?.gpsAccuracy) || 0)));
     if (isNaN(lat) || isNaN(lon)) {
       return res.status(400).json({ error: 'Koordinat lokasi Clock Out tidak valid.' });
     }
@@ -7753,12 +7757,13 @@ async function startServer() {
       }
 
       const prev = sys.records[idx];
-      const distanceMeters = calculateDistanceMeters(
+      const rawDistanceMeters = calculateDistanceMeters(
         sys.locationConfig.latitude,
         sys.locationConfig.longitude,
         lat,
         lon
       );
+      const distanceMeters = Math.max(0, rawDistanceMeters - accuracyMargin);
       const isOutside = distanceMeters > sys.locationConfig.radiusMeters;
       if (isOutside && (!outsideReason || !String(outsideReason).trim()) && !prev.outsideLocationReason) {
         errMsg = 'Clock Out dilakukan di luar area WIJNA (Outside Work Location). Mohon isi keterangan singkat.';

@@ -637,6 +637,7 @@ export const api = {
     date?: string;
     latitude: number;
     longitude: number;
+    gpsAccuracy?: number;
     outsideReason?: string;
     allowOutsideWithHrApproval?: boolean;
     workItems: { category: WijnaWorkCategory; shortDescription: string }[];
@@ -671,6 +672,7 @@ export const api = {
     date?: string;
     latitude: number;
     longitude: number;
+    gpsAccuracy?: number;
     outsideReason?: string;
   }) =>
     request<{ record: DailyAttendanceTimesheetRecord; bundle: AttendanceSystemBundle }>(

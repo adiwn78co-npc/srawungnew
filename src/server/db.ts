@@ -74,6 +74,7 @@ export interface DatabaseSchema {
   participantDatabase?: MasterParticipantRecord[];
   attendanceSystem?: AttendanceSystemBundle;
   cleanResetPrj3581V1?: boolean;
+  cleanResetPrj3581V2?: boolean;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -247,11 +248,12 @@ function createDefaultSeed(): DatabaseSchema {
     programBudgets: { ...INITIAL_PROGRAM_BUDGETS },
     participantDatabase: [...INITIAL_PARTICIPANT_DATABASE],
     cleanResetPrj3581V1: true,
+    cleanResetPrj3581V2: true,
   };
 }
 
 function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
-  if (!parsed.cleanResetPrj3581V1) {
+  if (!parsed.cleanResetPrj3581V1 || !parsed.cleanResetPrj3581V2) {
     parsed.programs = INITIAL_PROGRAMS.map((p) => ({ ...p, picId: '', picName: '' }));
     parsed.outcomes = INITIAL_OUTCOMES.map((oc) => ({ ...oc, picId: '', picName: '' }));
     parsed.outputs = INITIAL_OUTPUTS.map((op) => ({ ...op, picId: '', picName: '' }));
@@ -274,6 +276,16 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
     parsed.programBudgets = {};
     parsed.participantDatabase = [];
     if (parsed.attendanceSystem && typeof parsed.attendanceSystem === 'object') {
+      parsed.attendanceSystem.locationConfig = {
+        officeName: 'Kantor Pusat Yayasan WIJNA',
+        address: 'Kantor WIJNA (-7.342604, 110.489848)',
+        latitude: -7.342604,
+        longitude: 110.489848,
+        radiusMeters: 5,
+        standardDailyHours: 8,
+        updatedByName: 'Ratna Kusuma, S.E. (Finance & HR)',
+        updatedAt: '2026-11-01T08:00:00Z',
+      };
       parsed.attendanceSystem.records = [];
       parsed.attendanceSystem.flextimeAssignments = [];
       parsed.attendanceSystem.leaveRequests = [];
@@ -285,6 +297,7 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
       parsed.attendanceSystem.auditTrail = [];
     }
     parsed.cleanResetPrj3581V1 = true;
+    parsed.cleanResetPrj3581V2 = true;
   }
 
   if (!Array.isArray(parsed.programs) || parsed.programs.length === 0) {
@@ -445,7 +458,7 @@ class Database {
       if (sourceFile) {
         const fileContent = fs.readFileSync(sourceFile, 'utf-8');
         const rawParsed: DatabaseSchema = JSON.parse(fileContent);
-        const needsDiskSync = !rawParsed.cleanResetPrj3581V1;
+        const needsDiskSync = !rawParsed.cleanResetPrj3581V1 || !rawParsed.cleanResetPrj3581V2;
         const normalized = normalizeSchema(rawParsed);
         if (needsDiskSync) {
           this.persistToDisk(normalized);
@@ -477,7 +490,7 @@ class Database {
 
       const existingFromMysql = await loadDatabaseFromMysql(pool, this.data);
       if (existingFromMysql) {
-        const needsReset = !existingFromMysql.cleanResetPrj3581V1;
+        const needsReset = !existingFromMysql.cleanResetPrj3581V1 || !existingFromMysql.cleanResetPrj3581V2;
         this.data = normalizeSchema(existingFromMysql);
         if (needsReset) {
           await saveDatabaseToMysql(pool, this.data);
