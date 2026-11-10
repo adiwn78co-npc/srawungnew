@@ -27,6 +27,7 @@ import {
   isMysqlConfigured,
   loadDatabaseFromMysql,
   saveDatabaseToMysql,
+  upsertMysqlKvEntries,
 } from './mysqlPool.ts';
 import {
   SEED_PROGRAMS,
@@ -73,6 +74,7 @@ export interface DatabaseSchema {
   programBudgets?: Record<string, any>;
   participantDatabase?: MasterParticipantRecord[];
   attendanceSystem?: AttendanceSystemBundle;
+  organizationSettings?: Record<string, any>;
   cleanResetPrj3581V1?: boolean;
   cleanResetPrj3581V2?: boolean;
 }
@@ -253,71 +255,26 @@ function createDefaultSeed(): DatabaseSchema {
 }
 
 function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
-  if (!parsed.cleanResetPrj3581V1 || !parsed.cleanResetPrj3581V2) {
-    parsed.programs = INITIAL_PROGRAMS.map((p) => ({ ...p, picId: '', picName: '' }));
-    parsed.outcomes = INITIAL_OUTCOMES.map((oc) => ({ ...oc, picId: '', picName: '' }));
-    parsed.outputs = INITIAL_OUTPUTS.map((op) => ({ ...op, picId: '', picName: '' }));
-    parsed.activities = INITIAL_ACTIVITIES.map((act) => ({ ...act, picId: '', picName: '' }));
-    parsed.subActivities = [];
-    parsed.tors = [];
-    parsed.approvalRecords = [];
-    parsed.auditLogs = [];
-    parsed.cashAdvances = [];
-    parsed.cashAdvanceSummaries = {};
-    parsed.cashAdvanceAuditLogs = {};
-    parsed.meetingMinutes = [];
-    parsed.activityDocumentations = {};
-    parsed.activityDocumentationList = [];
-    parsed.outputRaciRecords = {};
-    parsed.activityMonitoringRecords = {};
-    parsed.monitoringReports = {};
-    parsed.approvalHubItems = {};
-    parsed.approvalNotifications = [];
-    parsed.programBudgets = {};
-    parsed.participantDatabase = [];
-    if (parsed.attendanceSystem && typeof parsed.attendanceSystem === 'object') {
-      parsed.attendanceSystem.locationConfig = {
-        officeName: 'Kantor Pusat Yayasan WIJNA',
-        address: 'Kantor WIJNA (-7.342604, 110.489848)',
-        latitude: -7.342604,
-        longitude: 110.489848,
-        radiusMeters: 5,
-        standardDailyHours: 8,
-        updatedByName: 'Ratna Kusuma, S.E. (Finance & HR)',
-        updatedAt: '2026-11-01T08:00:00Z',
-      };
-      parsed.attendanceSystem.records = [];
-      parsed.attendanceSystem.flextimeAssignments = [];
-      parsed.attendanceSystem.leaveRequests = [];
-      parsed.attendanceSystem.wfaRequests = [];
-      parsed.attendanceSystem.holidayRequests = [];
-      parsed.attendanceSystem.employeeTrainings = [];
-      parsed.attendanceSystem.employeeProfileLinks = {};
-      parsed.attendanceSystem.workRecapVerifications = {};
-      parsed.attendanceSystem.auditTrail = [];
-    }
+  // Migrasi skema bersifat murni additive & non-destructive:
+  // Ketiadaan flag migrasi tidak pernah menghapus atau menimpa data operasional yang sudah ada.
+  if (parsed.cleanResetPrj3581V1 === undefined) {
     parsed.cleanResetPrj3581V1 = true;
+  }
+  if (parsed.cleanResetPrj3581V2 === undefined) {
     parsed.cleanResetPrj3581V2 = true;
   }
 
-  if (!Array.isArray(parsed.programs) || parsed.programs.length === 0) {
+  if (!parsed.currentUserId) {
+    parsed.currentUserId = 'user-director';
+  }
+
+  if (!Array.isArray(parsed.programs)) {
     parsed.programs = [...INITIAL_PROGRAMS];
   }
 
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
     parsed.users = [...INITIAL_USERS];
   } else {
-    parsed.users = parsed.users
-      .filter((u) => u.id !== 'user-hr' && u.role !== 'hr')
-      .map((u) =>
-        u.id === 'user-finance' || u.role === 'finance'
-          ? {
-              ...u,
-              roleTitle: 'Finance & HR Manager',
-              department: 'Keuangan, HR & Kepatuhan',
-            }
-          : u
-      );
     const hasAdmin = parsed.users.some(
       (u) => u.role === 'admin' || u.permissions?.canManageUsers
     );
@@ -326,9 +283,6 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
       if (defaultAdmin) {
         parsed.users.push({ ...defaultAdmin, isActive: true, accountStatus: 'Aktif' });
       }
-    }
-    if (parsed.currentUserId === 'user-hr') {
-      parsed.currentUserId = 'user-finance';
     }
   }
 
@@ -356,6 +310,12 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   if (!Array.isArray(parsed.cashAdvances)) {
     parsed.cashAdvances = [];
   }
+  if (!parsed.cashAdvanceSummaries || typeof parsed.cashAdvanceSummaries !== 'object') {
+    parsed.cashAdvanceSummaries = {};
+  }
+  if (!parsed.cashAdvanceAuditLogs || typeof parsed.cashAdvanceAuditLogs !== 'object') {
+    parsed.cashAdvanceAuditLogs = {};
+  }
 
   if (Array.isArray(parsed.tors) && Array.isArray(parsed.cashAdvances)) {
     parsed.tors = parsed.tors.map((t) => {
@@ -375,9 +335,11 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
       );
       return {
         ...t,
-        budgetRequested: computedRequested,
+        budgetRequested:
+          approvedCas.length > 0 ? computedRequested : (t.budgetRequested ?? 0),
         budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
-        budgetActualSpent: computedActualSpent,
+        budgetActualSpent:
+          verifiedCas.length > 0 ? computedActualSpent : (t.budgetActualSpent ?? 0),
       };
     });
   }
@@ -411,6 +373,12 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   if (!parsed.monitoringReports || typeof parsed.monitoringReports !== 'object') {
     parsed.monitoringReports = {};
   }
+  if (!parsed.approvalHubItems || typeof parsed.approvalHubItems !== 'object') {
+    parsed.approvalHubItems = {};
+  }
+  if (!Array.isArray(parsed.approvalNotifications)) {
+    parsed.approvalNotifications = [];
+  }
   if (!Array.isArray(parsed.participantDatabase)) {
     parsed.participantDatabase = [];
   }
@@ -424,11 +392,24 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
 class Database {
   private data: DatabaseSchema;
   private mysqlWriteChain: Promise<void> = Promise.resolve();
+  private initPromise: Promise<void> | null = null;
+  private mysqlStatus: 'unconfigured' | 'ready' | 'failed' = 'unconfigured';
 
   constructor() {
     this.ensureDirectory();
-    this.data = this.loadInitialSeedFromBackupOrFile();
-    this.initializeMysqlStorage();
+    this.data = this.loadInitialLocalSeed();
+    this.initPromise = this.initializeMysqlStorage();
+  }
+
+  /**
+   * Menunggu hingga proses inisialisasi database (khususnya pembacaan awal dari MySQL)
+   * benar-benar selesai sebelum server menerima request atau memodifikasi data.
+   */
+  public async ready(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = this.initializeMysqlStorage();
+    }
+    await this.initPromise;
   }
 
   private ensureDirectory() {
@@ -437,88 +418,166 @@ class Database {
     }
   }
 
-  private persistToDisk(snapshot: DatabaseSchema) {
+  private persistLocalJsonOnly(snapshot: DatabaseSchema) {
     try {
       const jsonText = JSON.stringify(snapshot, null, 2);
       fs.writeFileSync(DB_FILE, jsonText, 'utf-8');
-      fs.writeFileSync(DB_BACKUP_FILE, jsonText, 'utf-8');
     } catch {
-      // abaikan jika read-only
+      // abaikan jika filesystem bersifat read-only pada environment produksi
     }
   }
 
-  private loadInitialSeedFromBackupOrFile(): DatabaseSchema {
+  private persistExplicitBackup(snapshot: DatabaseSchema) {
     try {
-      const sourceFile = fs.existsSync(DB_BACKUP_FILE)
-        ? DB_BACKUP_FILE
-        : fs.existsSync(DB_FILE)
+      const jsonText = JSON.stringify(snapshot, null, 2);
+      fs.writeFileSync(DB_BACKUP_FILE, jsonText, 'utf-8');
+    } catch {
+      // abaikan jika filesystem bersifat read-only
+    }
+  }
+
+  /**
+   * Memuat data lokal untuk:
+   * - fallback development (ketika MySQL tidak dikonfigurasi), atau
+   * - seed awal satu kali apabila database MySQL benar-benar baru/kosong.
+   * Catatan: db.json diprioritaskan di atas db.backup.json, dan tidak pernah menimpa MySQL yang sudah berisi data.
+   */
+  private loadInitialLocalSeed(): DatabaseSchema {
+    try {
+      const sourceFile = fs.existsSync(DB_FILE)
         ? DB_FILE
+        : fs.existsSync(DB_BACKUP_FILE)
+        ? DB_BACKUP_FILE
         : null;
 
       if (sourceFile) {
         const fileContent = fs.readFileSync(sourceFile, 'utf-8');
         const rawParsed: DatabaseSchema = JSON.parse(fileContent);
-        const needsDiskSync = !rawParsed.cleanResetPrj3581V1 || !rawParsed.cleanResetPrj3581V2;
         const normalized = normalizeSchema(rawParsed);
-        if (needsDiskSync) {
-          this.persistToDisk(normalized);
-        } else if (fs.existsSync(DB_FILE) && !fs.existsSync(DB_BACKUP_FILE)) {
-          try {
-            fs.copyFileSync(DB_FILE, DB_BACKUP_FILE);
-          } catch {
-            // abaikan jika read-only
-          }
+        if (!isMysqlConfigured()) {
+          this.persistLocalJsonOnly(normalized);
         }
         return normalized;
       }
     } catch (err) {
-      console.error('Error reading initial seed backup, falling back to default seed:', err);
+      console.error('[Database][Local] Gagal membaca file JSON lokal, menggunakan default seed:', err);
     }
 
-    const fresh = createDefaultSeed();
-    this.persistToDisk(fresh);
+    const fresh = normalizeSchema(createDefaultSeed());
+    if (!isMysqlConfigured()) {
+      this.persistLocalJsonOnly(fresh);
+      if (!fs.existsSync(DB_BACKUP_FILE)) {
+        this.persistExplicitBackup(fresh);
+      }
+    }
     return fresh;
   }
 
-  private async initializeMysqlStorage() {
+  private async initializeMysqlStorage(): Promise<void> {
     if (!isMysqlConfigured()) {
+      this.mysqlStatus = 'unconfigured';
+      console.log(
+        '[Database][Local] Konfigurasi MySQL tidak ditemukan — menggunakan penyimpanan file lokal (data/db.json).'
+      );
       return;
     }
-    try {
-      const pool = await getMysqlPool();
-      if (!pool) return;
 
-      const existingFromMysql = await loadDatabaseFromMysql(pool, this.data);
-      if (existingFromMysql) {
-        const needsReset = !existingFromMysql.cleanResetPrj3581V1 || !existingFromMysql.cleanResetPrj3581V2;
-        this.data = normalizeSchema(existingFromMysql);
-        if (needsReset) {
-          await saveDatabaseToMysql(pool, this.data);
+    const maxAttempts = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const pool = await getMysqlPool();
+        if (!pool) {
+          throw new Error('Pool koneksi MySQL bernilai null meskipun konfigurasi environment tersedia.');
         }
-        console.log('[MySQL] Berhasil memuat seluruh data dari tabel-tabel MySQL.');
-      } else {
-        console.log('[MySQL] Tabel MySQL masih kosong — menjalankan migrasi otomatis dari backup db.json...');
+
+        const existingFromMysql = await loadDatabaseFromMysql(pool, this.data);
+        if (existingFromMysql) {
+          const missingFlags: Record<string, boolean> = {};
+          if (existingFromMysql.cleanResetPrj3581V1 === undefined) {
+            missingFlags.cleanResetPrj3581V1 = true;
+          }
+          if (existingFromMysql.cleanResetPrj3581V2 === undefined) {
+            missingFlags.cleanResetPrj3581V2 = true;
+          }
+
+          this.data = normalizeSchema(existingFromMysql);
+          this.mysqlStatus = 'ready';
+
+          if (Object.keys(missingFlags).length > 0) {
+            await upsertMysqlKvEntries(pool, missingFlags);
+          }
+
+          // Sinkronkan salinan cache lokal dari MySQL (MySQL adalah sumber kebenaran utama)
+          this.persistLocalJsonOnly(this.data);
+
+          console.log(
+            `[Database][MySQL] Berhasil memuat data operasional dari MySQL (users: ${
+              this.data.users.length
+            }, programs: ${this.data.programs.length}, tors: ${
+              this.data.tors.length
+            }, cashAdvances: ${(this.data.cashAdvances || []).length}, participants: ${
+              (this.data.participantDatabase || []).length
+            }).`
+          );
+          return;
+        }
+
+        // Database MySQL benar-benar baru / kosong: lakukan seed awal satu kali saja
+        this.data = normalizeSchema(this.data);
         await saveDatabaseToMysql(pool, this.data);
-        console.log('[MySQL] Migrasi otomatis dari db.json ke MySQL selesai.');
+        this.mysqlStatus = 'ready';
+        this.persistLocalJsonOnly(this.data);
+
+        console.log(
+          `[Database][MySQL] Database MySQL masih kosong — seed awal berhasil diinisialisasi satu kali ke MySQL (users: ${this.data.users.length}, programs: ${this.data.programs.length}).`
+        );
+        return;
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < maxAttempts) {
+          console.warn(
+            `[Database][MySQL] Percobaan koneksi/muat ke-${attempt}/${maxAttempts} belum berhasil (${
+              err?.message || err
+            }). Mencoba ulang dalam 1 detik...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
       }
-    } catch (err: any) {
-      console.error('[MySQL] Gagal menghubungkan atau memuat data dari MySQL:', err?.message || err);
     }
+
+    this.mysqlStatus = 'failed';
+    console.error(
+      '[Database][MySQL] Gagal terhubung atau memuat data dari MySQL setelah seluruh percobaan. Penulisan otomatis ke MySQL ditangguhkan guna mencegah penimpaan data produksi:',
+      lastError?.message || lastError
+    );
   }
 
   private persistToMysql(snapshot: DatabaseSchema) {
-    this.persistToDisk(snapshot);
     if (!isMysqlConfigured()) {
+      this.persistLocalJsonOnly(snapshot);
       return;
     }
+
+    if (this.mysqlStatus !== 'ready') {
+      console.error(
+        '[Database][MySQL] Peringatan: Perubahan dibatalkan untuk ditulis ke MySQL karena koneksi/pembacaan awal MySQL belum berstatus ready (proteksi anti-overwrite data produksi).'
+      );
+      return;
+    }
+
+    this.persistLocalJsonOnly(snapshot);
+    const clonedSnapshot: DatabaseSchema = JSON.parse(JSON.stringify(snapshot));
+
     this.mysqlWriteChain = this.mysqlWriteChain
       .then(async () => {
         const pool = await getMysqlPool();
         if (!pool) return;
-        await saveDatabaseToMysql(pool, snapshot);
+        await saveDatabaseToMysql(pool, clonedSnapshot);
       })
       .catch((err) => {
-        console.error('[MySQL] Gagal menyimpan perubahan ke MySQL:', err?.message || err);
+        console.error('[Database][MySQL] Gagal menyimpan perubahan ke MySQL:', err?.message || err);
       });
   }
 
@@ -533,7 +592,8 @@ class Database {
   }
 
   public resetToSeed(): DatabaseSchema {
-    this.data = createDefaultSeed();
+    this.data = normalizeSchema(createDefaultSeed());
+    this.persistExplicitBackup(this.data);
     this.persistToMysql(this.data);
     return this.data;
   }

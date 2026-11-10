@@ -98,8 +98,20 @@ export async function loadDatabaseFromMysql(
   await ensureMysqlSchema(pool);
 
   const [userRows] = await pool.query('SELECT * FROM users ORDER BY created_at ASC');
-  if (!Array.isArray(userRows) || userRows.length === 0) {
-    return null; // Tabel MySQL masih kosong, perlu dimigrasi dari db.json
+  const hasUsers = Array.isArray(userRows) && userRows.length > 0;
+
+  if (!hasUsers) {
+    const [progCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM programs');
+    const [torCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM tors');
+    const [kvCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM system_kv_store');
+    const totalExistingRecords =
+      Number(progCountRows?.[0]?.cnt || 0) +
+      Number(torCountRows?.[0]?.cnt || 0) +
+      Number(kvCountRows?.[0]?.cnt || 0);
+
+    if (totalExistingRecords === 0) {
+      return null; // Seluruh tabel utama MySQL benar-benar kosong, aman untuk seed satu kali
+    }
   }
 
   const [programRows] = await pool.query('SELECT * FROM programs ORDER BY created_at DESC');
@@ -131,7 +143,7 @@ export async function loadDatabaseFromMysql(
   const attendanceSystem = kvMap['attendanceSystem'] || fallbackSeed.attendanceSystem || {
     locationConfig: {
       officeName: 'Kantor Pusat Yayasan WIJNA',
-      address: 'Jl. Tebet Timur Dalam Raya No. 42, Jakarta Selatan',
+      address: 'Kantor WIJNA (-7.342604, 110.489848)',
       latitude: -7.342604,
       longitude: 110.489848,
       radiusMeters: 5,
@@ -179,8 +191,37 @@ export async function loadDatabaseFromMysql(
     programBudgets: kvMap['programBudgets'] || {},
     participantDatabase: parseRowList(participantRows),
     attendanceSystem,
-    cleanResetPrj3581V1: Boolean(kvMap['cleanResetPrj3581V1']),
+    organizationSettings: kvMap['organizationSettings'] || undefined,
+    cleanResetPrj3581V1:
+      kvMap['cleanResetPrj3581V1'] !== undefined
+        ? Boolean(kvMap['cleanResetPrj3581V1'])
+        : undefined,
+    cleanResetPrj3581V2:
+      kvMap['cleanResetPrj3581V2'] !== undefined
+        ? Boolean(kvMap['cleanResetPrj3581V2'])
+        : undefined,
   };
+}
+
+/**
+ * Menyimpan entri metadata spesifik ke system_kv_store secara non-destructive (tanpa menyentuh tabel operasional)
+ */
+export async function upsertMysqlKvEntries(
+  pool: MysqlPoolLike,
+  entries: Record<string, any>
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  for (const [k, v] of Object.entries(entries)) {
+    if (v === undefined) continue;
+    await pool.query(
+      `INSERT INTO system_kv_store (store_key, store_value, updated_at)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         store_value = VALUES(store_value),
+         updated_at = VALUES(updated_at)`,
+      [k, JSON.stringify(v), nowIso]
+    );
+  }
 }
 
 async function syncTableById(
@@ -644,8 +685,12 @@ export async function saveDatabaseToMysql(
       approvalNotifications: data.approvalNotifications || [],
       programBudgets: data.programBudgets || {},
       attendanceSystem: data.attendanceSystem || {},
-      cleanResetPrj3581V1: Boolean(data.cleanResetPrj3581V1),
+      cleanResetPrj3581V1: data.cleanResetPrj3581V1 ?? true,
+      cleanResetPrj3581V2: data.cleanResetPrj3581V2 ?? true,
     };
+    if (data.organizationSettings !== undefined) {
+      kvEntries.organizationSettings = data.organizationSettings;
+    }
 
     for (const [k, v] of Object.entries(kvEntries)) {
       await conn.query(

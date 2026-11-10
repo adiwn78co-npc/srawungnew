@@ -116,6 +116,10 @@ function getNextTorSequenceForYear(data: ReturnType<typeof db.getData>, targetYe
 }
 
 async function startServer() {
+  // Pastikan proses inisialisasi database (termasuk pembacaan dari MySQL jika dikonfigurasi)
+  // telah benar-benar selesai sebelum inisialisasi akun maupun sebelum server menerima request.
+  await db.ready();
+
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
