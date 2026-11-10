@@ -127,7 +127,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   }, [currentUser?.id]);
 
   const myTodayRecord = useMemo(() => {
-    if (!attendanceBundle || !currentUser) return undefined;
+    if (!attendanceBundle || !Array.isArray(attendanceBundle.records) || !currentUser) {
+      return undefined;
+    }
     return attendanceBundle.records.find(
       (r) => r.userId === currentUser.id && r.date === lockedTodayDate
     );

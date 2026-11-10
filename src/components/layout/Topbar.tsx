@@ -371,8 +371,10 @@ export const Topbar: React.FC<TopbarProps> = ({
               className="flex items-center gap-2 py-1 px-2 rounded-md hover:bg-[#F3F3F1] transition-all text-left border border-transparent hover:border-[#EAEAEA] cursor-pointer"
             >
               <div className="w-7 h-7 rounded-full bg-[#EAEAE8] text-[#252525] font-semibold flex items-center justify-center text-xs relative">
-                {currentUser?.name
-                  .split(' ')
+                {(currentUser?.name || '')
+                  .trim()
+                  .split(/\s+/)
+                  .filter(Boolean)
                   .map((n) => n[0])
                   .slice(0, 2)
                   .join('') || 'U'}

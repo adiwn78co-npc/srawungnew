@@ -299,10 +299,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       if (searchTerm.trim()) {
         const q = searchTerm.toLowerCase();
         const match =
-          t.title.toLowerCase().includes(q) ||
-          t.torNumber.toLowerCase().includes(q) ||
-          t.picName.toLowerCase().includes(q) ||
-          t.activityName.toLowerCase().includes(q);
+          (t.title || '').toLowerCase().includes(q) ||
+          (t.torNumber || '').toLowerCase().includes(q) ||
+          (t.picName || '').toLowerCase().includes(q) ||
+          (t.activityName || '').toLowerCase().includes(q);
         if (!match) return false;
       }
 
@@ -312,7 +312,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       // 3. Filter Status Pengajuan
       if (filterSubmissionStatus !== 'all') {
         if (filterSubmissionStatus === 'menunggu') {
-          if (!t.submissionStatus.includes('Menunggu Persetujuan')) return false;
+          if (!(t.submissionStatus || '').includes('Menunggu Persetujuan')) return false;
         } else if (t.submissionStatus !== filterSubmissionStatus) {
           return false;
         }
@@ -341,10 +341,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     // Sorting
     list.sort((a, b) => {
       if (sortBy === 'name') {
-        return a.title.localeCompare(b.title);
+        return (a.title || '').localeCompare(b.title || '');
       }
       if (sortBy === 'newest') {
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        return (new Date(b.createdAt || 0).getTime() || 0) - (new Date(a.createdAt || 0).getTime() || 0);
       }
 
       // Default: Smart Deadline Priority (TOR dengan deadline paling dekat berada paling atas)
@@ -355,10 +355,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       if (pA.subOrder !== pB.subOrder) return pA.subOrder - pB.subOrder;
 
       // Urutan sekunder: tanggal pembuatan terbaru, lalu nomor TOR
-      const dateDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      const dateDiff = (new Date(b.createdAt || 0).getTime() || 0) - (new Date(a.createdAt || 0).getTime() || 0);
       if (dateDiff !== 0) return dateDiff;
 
-      return a.torNumber.localeCompare(b.torNumber);
+      return (a.torNumber || '').localeCompare(b.torNumber || '');
     });
 
     return list;

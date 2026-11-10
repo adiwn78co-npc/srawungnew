@@ -48,7 +48,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
     try {
       setLoading(true);
-      const [current, users] = await Promise.all([api.getCurrentUser(), api.getUsers()]);
+      const [current, users] = await Promise.all([
+        api.getCurrentUser(),
+        api.getUsers().catch(() => [] as User[]),
+      ]);
       if (!current || current.isActive === false) {
         setAuthToken(null);
         setCurrentUser(null);
@@ -57,14 +60,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return;
       }
       setCurrentUser(current);
-      setAllUsers(users);
+      setAllUsers(Array.isArray(users) ? users : []);
       setActiveUser(current.id);
       setIsAuthenticated(true);
-    } catch {
-      setAuthToken(null);
-      setCurrentUser(null);
-      setAllUsers([]);
-      setIsAuthenticated(false);
+    } catch (err: any) {
+      const status = Number(err?.status || 0);
+      if (status === 401 || status === 403) {
+        setAuthToken(null);
+        setCurrentUser(null);
+        setAllUsers([]);
+        setIsAuthenticated(false);
+      } else {
+        console.warn(
+          `[AUTH] Session check encountered temporary error (status=${status || 'network'}); preserving token.`
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -81,29 +91,37 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => window.removeEventListener('wijna-auth-unauthorized', onUnauthorized);
   }, []);
 
+  useEffect(() => {
+    console.info(
+      `[AUTH] Authentication state changed: authenticated=${isAuthenticated}, loading=${loading}, role=${currentUser?.role || 'none'}`
+    );
+  }, [isAuthenticated, loading, currentUser?.id, currentUser?.role]);
+
   const handleLogin = async (identifier: string, password: string): Promise<User> => {
     const res = await api.login(identifier, password);
-    setCurrentUser(res.user);
-    setIsAuthenticated(true);
+    const users = await api.getUsers().catch(() => allUsers);
     try {
       localStorage.setItem(AUTH_SESSION_STORAGE_KEY, 'true');
     } catch {
       // ignore storage errors
     }
-    const users = await api.getUsers().catch(() => allUsers);
-    setAllUsers(users);
+    setAllUsers(Array.isArray(users) ? users : allUsers);
+    setCurrentUser(res.user);
+    setLoading(false);
+    setIsAuthenticated(true);
     return res.user;
   };
 
   const handleLoginAsTestRole = async (userId: string): Promise<User> => {
     const res = await api.switchUser(userId);
-    setCurrentUser(res.user);
-    setIsAuthenticated(true);
     try {
       localStorage.setItem(AUTH_SESSION_STORAGE_KEY, 'true');
     } catch {
       // ignore storage errors
     }
+    setCurrentUser(res.user);
+    setLoading(false);
+    setIsAuthenticated(true);
     return res.user;
   };
 

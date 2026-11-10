@@ -1087,7 +1087,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                           )}
                         </div>
                         <div className="text-[11px] text-slate-500 mt-0.5 font-mono">
-                          @{user.username || user.email.split('@')[0]} · {user.email}
+                          @{user.username || (user.email || '').split('@')[0]} · {user.email || '-'}
                         </div>
                       </td>
 

@@ -230,8 +230,22 @@ async function startServer() {
       .replace(/^\.+|\.+$/g, '');
   }
 
+  const defaultPasswordCheckCache = new Map<string, boolean>();
+
+  function isDefaultTestingPasswordHash(storedHash?: string): boolean {
+    if (!storedHash) return false;
+    const cached = defaultPasswordCheckCache.get(storedHash);
+    if (cached !== undefined) return cached;
+    const result = verifyPassword(DEFAULT_TESTING_PASSWORD, storedHash);
+    if (defaultPasswordCheckCache.size > 500) {
+      defaultPasswordCheckCache.clear();
+    }
+    defaultPasswordCheckCache.set(storedHash, result);
+    return result;
+  }
+
   function sanitizeUser(user: User): User {
-    const isUsingDefaultPassword = verifyPassword(DEFAULT_TESTING_PASSWORD, user.passwordHash);
+    const isUsingDefaultPassword = isDefaultTestingPasswordHash(user.passwordHash);
     const { passwordHash: _removed, ...safeUser } = user;
     const resolvedStatus: UserAccountStatus =
       safeUser.accountStatus || (safeUser.isActive === false ? 'Nonaktif' : 'Aktif');
@@ -387,15 +401,26 @@ async function startServer() {
       await db.flushWrites();
     }
 
-    // 1. Sliding-Window API Rate Limiting (300 requests / minute per IP)
-    const clientIp = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local');
+    // 1. Sliding-Window API Rate Limiting (600 requests / minute per client session or IP)
+    const rawForwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const clientIp = rawForwarded || String(req.socket.remoteAddress || 'local');
+    const authTokenTail =
+      typeof req.headers.authorization === 'string' && req.headers.authorization.length > 20
+        ? req.headers.authorization.slice(-16)
+        : 'anon';
+    const rateKey = `${clientIp}:${authTokenTail}`;
     const nowMs = Date.now();
-    const rateWindow = apiRateLimits.get(clientIp);
+    const rateWindow = apiRateLimits.get(rateKey);
     if (!rateWindow || nowMs - rateWindow.windowStart > 60_000) {
-      apiRateLimits.set(clientIp, { count: 1, windowStart: nowMs });
+      if (apiRateLimits.size > 2000) {
+        for (const [k, v] of apiRateLimits.entries()) {
+          if (nowMs - v.windowStart > 60_000) apiRateLimits.delete(k);
+        }
+      }
+      apiRateLimits.set(rateKey, { count: 1, windowStart: nowMs });
     } else {
       rateWindow.count += 1;
-      if (rateWindow.count > 300) {
+      if (rateWindow.count > 600) {
         return res.status(429).json({
           error: 'Terlalu banyak permintaan API dari jaringan Anda. Silakan tunggu beberapa saat.',
         });
@@ -9745,14 +9770,45 @@ async function startServer() {
   });
 
   // --- VITE MIDDLEWARE / STATIC FILES ---
-  const distIndexHtml = path.join(__dirname, 'dist', 'index.html');
-  const isRunningCompiledServerJs = import.meta.url.endsWith('/server.js');
-  if (
+  const distDir = path.join(__dirname, 'dist');
+  const distIndexHtml = path.join(distDir, 'index.html');
+  const isRunningCompiledServerJs =
+    import.meta.url.endsWith('/server.js') ||
+    (process.argv[1] || '').endsWith('/server.js') ||
+    (process.argv[1] || '').endsWith('\\server.js');
+  const isProductionRuntime =
     process.env.NODE_ENV === 'production' ||
-    (isRunningCompiledServerJs && fs.existsSync(distIndexHtml))
-  ) {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
+    Boolean(process.env.IN_PASSENGER) ||
+    Boolean(process.env.PASSENGER_APP_ENV) ||
+    (isRunningCompiledServerJs && fs.existsSync(distIndexHtml));
+
+  if (isProductionRuntime && fs.existsSync(distIndexHtml)) {
+    app.use(
+      '/assets',
+      express.static(path.join(distDir, 'assets'), {
+        immutable: true,
+        maxAge: '365d',
+        fallthrough: false,
+      })
+    );
+    app.use(
+      express.static(distDir, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          }
+        },
+      })
+    );
+    app.get('*', (req, res) => {
+      if (
+        req.path.startsWith('/assets/') ||
+        /\.(?:js|mjs|css|map|json|ico|png|jpg|jpeg|svg|webp|woff2?)$/i.test(req.path)
+      ) {
+        return res.status(404).end();
+      }
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(distIndexHtml);
     });
   } else {

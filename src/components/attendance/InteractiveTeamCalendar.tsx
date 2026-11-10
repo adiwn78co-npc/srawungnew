@@ -733,8 +733,8 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
     for (const [, list] of map.entries()) {
       list.sort((a, b) => {
         if (a.isMultiDay !== b.isMultiDay) return a.isMultiDay ? -1 : 1;
-        if (a.endDate !== b.endDate) return b.endDate.localeCompare(a.endDate);
-        return a.category.localeCompare(b.category);
+        if (a.endDate !== b.endDate) return (b.endDate || '').localeCompare(a.endDate || '');
+        return (a.category || '').localeCompare(b.category || '');
       });
     }
     return map;
@@ -756,11 +756,11 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
         if (a.isMultiDay !== b.isMultiDay) return a.isMultiDay ? -1 : 1;
         const aClampStart = a.startDate < weekStart ? weekStart : a.startDate;
         const bClampStart = b.startDate < weekStart ? weekStart : b.startDate;
-        if (aClampStart !== bClampStart) return aClampStart.localeCompare(bClampStart);
+        if (aClampStart !== bClampStart) return (aClampStart || '').localeCompare(bClampStart || '');
         const aClampEnd = a.endDate > weekEnd ? weekEnd : a.endDate;
         const bClampEnd = b.endDate > weekEnd ? weekEnd : b.endDate;
-        if (aClampEnd !== bClampEnd) return bClampEnd.localeCompare(aClampEnd);
-        return a.userName.localeCompare(b.userName);
+        if (aClampEnd !== bClampEnd) return (bClampEnd || '').localeCompare(aClampEnd || '');
+        return (a.userName || '').localeCompare(b.userName || '');
       });
 
       // Lakukan penempatan jalur (lane) bebas tabrakan untuk setiap kolom 0..6

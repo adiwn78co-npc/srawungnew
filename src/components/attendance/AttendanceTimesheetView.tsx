@@ -115,7 +115,7 @@ export function buildApprovedTorImplementationOptionsForUser(
 ): TorImplementationOption[] {
   if (!targetUser || !Array.isArray(allTors) || allTors.length === 0) return [];
 
-  const cleanUserName = targetUser.name.split(',')[0].trim().toLowerCase();
+  const cleanUserName = (targetUser.name || '').split(',')[0].trim().toLowerCase();
   const firstName = cleanUserName.split(/\s+/)[0] || cleanUserName;
 
   const isTorApproved = (t: Tor): boolean =>
@@ -618,25 +618,29 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         api.getAttendanceSystem(),
         api.getTors().catch(() => [] as Tor[]),
       ]);
-      setBundle(data);
+      if (data && typeof data === 'object') {
+        setBundle(data);
+        setErrorMsg(null);
+        if (data.locationConfig) {
+          setCfgOfficeName(data.locationConfig.officeName);
+          setCfgAddress(data.locationConfig.address);
+          setCfgLat(data.locationConfig.latitude);
+          setCfgLon(data.locationConfig.longitude);
+          setCfgRadius(data.locationConfig.radiusMeters || 5);
+          setCfgStandardHours(data.locationConfig.standardDailyHours);
+        }
+        if (Array.isArray(data.leavePolicies) && data.leavePolicies.length > 0) {
+          const firstPolId = data.leavePolicies[0].id;
+          setLeaveCategoryId((prev) => prev || firstPolId);
+        }
+      }
       setAllTors(Array.isArray(torsData) ? torsData : []);
-      if (data.locationConfig) {
-        setCfgOfficeName(data.locationConfig.officeName);
-        setCfgAddress(data.locationConfig.address);
-        setCfgLat(data.locationConfig.latitude);
-        setCfgLon(data.locationConfig.longitude);
-        setCfgRadius(data.locationConfig.radiusMeters || 5);
-        setCfgStandardHours(data.locationConfig.standardDailyHours);
-      }
-      if (data.leavePolicies?.length > 0 && !leaveCategoryId) {
-        setLeaveCategoryId(data.leavePolicies[0].id);
-      }
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal memuat sistem Attendance & Timesheet.');
     } finally {
       setLoading(false);
     }
-  }, [leaveCategoryId]);
+  }, []);
 
   useEffect(() => {
     loadAttendanceBundle();
@@ -704,14 +708,14 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   // Catatan kehadiran staf aktif pada tanggal hari ini (terkunci)
   const myTodayRecord = useMemo(() => {
-    if (!bundle || !currentUser) return undefined;
+    if (!bundle || !Array.isArray(bundle.records) || !currentUser) return undefined;
     return bundle.records.find(
       (r) => r.userId === currentUser.id && r.date === lockedTodayDate
     );
   }, [bundle, currentUser, lockedTodayDate]);
 
   const myActiveWfaToday = useMemo(() => {
-    if (!bundle || !currentUser) return undefined;
+    if (!bundle || !Array.isArray(bundle.wfaRequests) || !currentUser) return undefined;
     const activeStatuses = new Set([
       'Approved',
       'Submitted for Review',
@@ -736,7 +740,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   }, [bundle, currentUser, lockedTodayDate]);
 
   const myActiveFlextimeToday = useMemo(() => {
-    if (!bundle || !currentUser) return undefined;
+    if (!bundle || !Array.isArray(bundle.flextimeAssignments) || !currentUser) return undefined;
     return bundle.flextimeAssignments.find(
       (f) =>
         f.userId === currentUser.id &&
@@ -773,7 +777,11 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   // Sinkronkan maksimal 2 kontribusi pekerjaan harian saat staf berubah atau record dimuat
   useEffect(() => {
-    if (myTodayRecord && myTodayRecord.timesheetItems.length > 0) {
+    if (
+      myTodayRecord &&
+      Array.isArray(myTodayRecord.timesheetItems) &&
+      myTodayRecord.timesheetItems.length > 0
+    ) {
       setContributions(
         myTodayRecord.timesheetItems.slice(0, 2).map((t) => ({
           id: t.id,
@@ -1618,7 +1626,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   // Filtered daily attendance records (Khusus Finance/HR & Director)
   const filteredDailyRecords = useMemo(() => {
-    if (!bundle) return [];
+    if (!bundle || !Array.isArray(bundle.records)) return [];
     return bundle.records.filter((r) => {
       if (!canViewDetails && r.userId !== currentUser?.id) return false;
       if (filterStaffId !== 'ALL' && r.userId !== filterStaffId) return false;
@@ -2107,6 +2115,25 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     return (
       <div className="p-6 bg-white border border-[#E5E5E3] rounded-lg text-xs text-[#6B6B68]">
         Memuat Attendance & Timesheet WIJNA...
+      </div>
+    );
+  }
+
+  if (!bundle) {
+    console.info('[APP] Rendering fallback state (reason=attendance_bundle_unavailable)');
+    return (
+      <div className="p-6 bg-white border border-[#E5E5E3] rounded-lg space-y-3 text-xs text-[#57564F]">
+        <div className="font-semibold text-[#1F2937] text-sm">
+          Data Kehadiran & Kalender belum dapat dimuat
+        </div>
+        <p>{errorMsg || 'Koneksi ke server sempat tertunda saat mengambil data kehadiran.'}</p>
+        <button
+          type="button"
+          onClick={() => loadAttendanceBundle()}
+          className="px-3.5 py-1.5 rounded-lg bg-[#1F7A63] hover:bg-[#186350] text-white text-xs font-medium transition-colors cursor-pointer"
+        >
+          Muat Ulang Data
+        </button>
       </div>
     );
   }

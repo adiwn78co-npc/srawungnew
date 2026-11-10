@@ -43,12 +43,28 @@ export function getAuthToken(): string | null {
   return activeAuthToken;
 }
 
+const REQUEST_TIMEOUT_MS = 30000;
+
 async function request<T>(endpoint: string, options: RequestInit = {}, retries = 2): Promise<T> {
+  const method = (options.method || 'GET').toUpperCase();
+  const safePath = endpoint.split('?')[0];
+  const startedAt = Date.now();
+  if (retries === 2) {
+    console.info(`[API] Request started: ${method} ${safePath}`);
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(activeAuthToken ? { Authorization: `Bearer ${activeAuthToken}` } : {}),
     ...((options.headers as Record<string, string>) || {}),
   };
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => {
+        controller.abort();
+      }, REQUEST_TIMEOUT_MS)
+    : null;
 
   let response: Response;
   try {
@@ -56,16 +72,37 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
       ...options,
       headers,
       credentials: 'same-origin',
+      signal: options.signal ?? controller?.signal,
     });
-  } catch (err) {
-    if (retries > 0) {
+  } catch (err: any) {
+    if (timeoutId) clearTimeout(timeoutId);
+    const isAbort = err?.name === 'AbortError';
+    if (!isAbort && method === 'GET' && retries > 0) {
       await new Promise((resolve) => setTimeout(resolve, 400));
       return request<T>(endpoint, options, retries - 1);
     }
-    throw err;
+    const durationMs = Date.now() - startedAt;
+    console.warn(
+      `[API] Request completed: ${method} ${safePath} -> ${isAbort ? 'TIMEOUT' : 'NETWORK_ERROR'} (${durationMs}ms)`
+    );
+    throw Object.assign(
+      new Error(
+        isAbort
+          ? 'Permintaan ke server melebihi batas waktu. Silakan coba kembali.'
+          : 'Koneksi ke server terputus sementara. Silakan periksa jaringan Anda.'
+      ),
+      { status: 0, isNetworkError: true }
+    );
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 
-  const contentType = response.headers.get('content-type') || '';
+  const durationMs = Date.now() - startedAt;
+  console.info(
+    `[API] Request completed: ${method} ${safePath} -> ${response.status} (${durationMs}ms)`
+  );
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
   const isJson = contentType.includes('application/json');
   const data = isJson ? await response.json().catch(() => null) : null;
 
@@ -76,11 +113,32 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
         window.dispatchEvent(new CustomEvent('wijna-auth-unauthorized'));
       }
     }
-    throw new Error((data && data.error) || `Request failed (Status: ${response.status})`);
+    const fallbackError =
+      response.status === 502 || response.status === 503 || response.status === 504
+        ? 'Layanan server sedang sibuk atau baru aktif kembali. Silakan tunggu sesaat.'
+        : `Request failed (Status: ${response.status})`;
+    throw Object.assign(new Error((data && data.error) || fallbackError), {
+      status: response.status,
+    });
+  }
+
+  if (response.status === 204) {
+    return {} as T;
   }
 
   if (data === null) {
-    throw new Error('Invalid server response. Please reload the page.');
+    const rawText = await response.text().catch(() => '');
+    if (!rawText.trim()) {
+      return {} as T;
+    }
+    try {
+      return JSON.parse(rawText) as T;
+    } catch {
+      throw Object.assign(
+        new Error('Invalid server response. Please reload the page.'),
+        { status: response.status }
+      );
+    }
   }
 
   return data as T;

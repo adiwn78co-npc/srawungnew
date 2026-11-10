@@ -14,6 +14,7 @@ import { MonitoringToolsView } from './components/monitoring/MonitoringToolsView
 import { ParticipantDatabaseView } from './components/participants/ParticipantDatabaseView.js';
 import { AttendanceTimesheetView } from './components/attendance/AttendanceTimesheetView.js';
 import { LoginPage } from './components/auth/LoginPage.js';
+import { AppErrorBoundary } from './components/common/AppErrorBoundary.js';
 import {
   Tor,
   Program,
@@ -43,8 +44,17 @@ const CATEGORY_STAGE_MAP: Record<ApprovalCategoryCode, number> = {
 };
 
 function MainAppContent() {
-  const { currentUser, isDirector, isFinance, isAdmin, isAuthenticated, refreshUsers, allUsers } =
-    useAuth();
+  const {
+    currentUser,
+    isDirector,
+    isFinance,
+    isAdmin,
+    isAuthenticated,
+    loading: authLoading,
+    logout,
+    refreshUsers,
+    allUsers,
+  } = useAuth();
 
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [selectedTorId, setSelectedTorId] = useState<string | null>(null);
@@ -441,6 +451,19 @@ function MainAppContent() {
     }
   }, [currentPageTitle, isAuthenticated]);
 
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setSelectedTorId(null);
+      setSelectedTorData(null);
+      setSelectedTorTargetEntityId(undefined);
+      setSelectedTorFocusedSourceMode(false);
+      setSelectedTorAutoOpenEdit(false);
+      return;
+    }
+    const routeLabel = selectedTorId ? `tor:${selectedTorId}` : activeTab;
+    console.info(`[ROUTER] Route changed: ${routeLabel}`);
+  }, [isAuthenticated, activeTab, selectedTorId]);
+
   if (!isAuthenticated) {
     return (
       <LoginPage
@@ -451,6 +474,44 @@ function MainAppContent() {
           loadData();
         }}
       />
+    );
+  }
+
+  if (!currentUser) {
+    console.info(
+      `[APP] Rendering fallback state (reason=${authLoading ? 'auth_hydrating' : 'auth_user_unavailable'})`
+    );
+    return (
+      <div className="min-h-screen bg-[#FAFAF9] flex items-center justify-center p-6 font-sans text-[#252525]">
+        <div className="max-w-sm w-full bg-white border border-[#E5E5E3] rounded-xl p-5 shadow-2xs space-y-3 text-center">
+          <div className="text-sm font-semibold text-[#1F2937]">
+            {authLoading ? 'Memverifikasi sesi pengguna...' : 'Menghubungkan kembali sesi Anda'}
+          </div>
+          <p className="text-xs text-[#57564F] leading-relaxed">
+            {authLoading
+              ? 'Mohon tunggu sesaat, sistem sedang menyiapkan ruang kerja WIJNA.'
+              : 'Sesi Anda masih tersimpan, namun koneksi ke server sempat tertunda.'}
+          </p>
+          {!authLoading && (
+            <div className="flex items-center justify-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => refreshUsers()}
+                className="px-3.5 py-1.5 rounded-lg bg-[#1F7A63] hover:bg-[#186350] text-white text-xs font-medium transition-colors cursor-pointer"
+              >
+                Coba Lagi
+              </button>
+              <button
+                type="button"
+                onClick={() => logout()}
+                className="px-3.5 py-1.5 rounded-lg border border-[#DCDAD5] bg-white hover:bg-[#F3F3F1] text-[#37352F] text-xs font-medium transition-colors cursor-pointer"
+              >
+                Ke Halaman Login
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -526,6 +587,17 @@ function MainAppContent() {
 
         {/* Viewport Content Container */}
         <main className="flex-1 px-3 py-2.5 sm:px-4 sm:py-3 md:px-6 md:py-4 max-w-7xl w-full mx-auto overflow-y-auto">
+          <AppErrorBoundary
+            key={selectedTorId ? `tor-${selectedTorId}` : `tab-${activeTab}`}
+            boundaryName={selectedTorId ? `tor:${selectedTorId}` : activeTab}
+            onReset={() => {
+              if (selectedTorId) {
+                setSelectedTorId(null);
+                setSelectedTorData(null);
+              }
+              loadData();
+            }}
+          >
           {isMobileQuickMode ? (
             /* Simplified Mobile Quick-Access View: Prioritizes Your Contribution (Clock In/Out), WFA, and Cuti & Izin */
             <AttendanceTimesheetView
@@ -690,6 +762,7 @@ function MainAppContent() {
               {activeTab === 'audit' && <AuditTrailView logs={auditLogs} />}
             </>
           )}
+          </AppErrorBoundary>
         </main>
       </div>
 

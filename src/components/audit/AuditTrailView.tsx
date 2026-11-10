@@ -10,13 +10,13 @@ export const AuditTrailView: React.FC<AuditTrailViewProps> = ({ logs }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('all');
 
-  const filtered = logs.filter((log) => {
+  const filtered = (Array.isArray(logs) ? logs : []).filter((log) => {
     if (searchTerm) {
       const q = searchTerm.toLowerCase();
       const match =
-        log.actorName.toLowerCase().includes(q) ||
-        log.action.toLowerCase().includes(q) ||
-        log.details.toLowerCase().includes(q);
+        (log.actorName || '').toLowerCase().includes(q) ||
+        (log.action || '').toLowerCase().includes(q) ||
+        (log.details || '').toLowerCase().includes(q);
       if (!match) return false;
     }
     if (filterType !== 'all' && log.entityType !== filterType) return false;
