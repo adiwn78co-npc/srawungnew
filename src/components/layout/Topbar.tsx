@@ -60,7 +60,18 @@ export const Topbar: React.FC<TopbarProps> = ({
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [savingPassword, setSavingPassword] = useState(false);
 
-  const unreadCount = notifications.filter(
+  const uniqueNotifications = React.useMemo(() => {
+    const seen = new Set<string>();
+    return notifications.filter((n) => {
+      const cleanedMsg = (n.message || '').replace(/^\[[^\]]+\]\s*/, '').trim();
+      const key = `${n.approvalItemId}|${n.eventType}|${cleanedMsg}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [notifications]);
+
+  const unreadCount = uniqueNotifications.filter(
     (n) => !currentUser || !(n.isReadByUserIds || []).includes(currentUser.id)
   ).length;
 
@@ -226,12 +237,12 @@ export const Topbar: React.FC<TopbarProps> = ({
                   </div>
 
                   <div className="max-h-[68vh] sm:max-h-80 overflow-y-auto divide-y divide-[#EAEAEA]">
-                    {notifications.length === 0 ? (
+                    {uniqueNotifications.length === 0 ? (
                       <div className="py-8 px-4 text-center text-xs text-[#787774] leading-relaxed">
                         Belum ada notifikasi persetujuan atau tindak lanjut.
                       </div>
                     ) : (
-                      notifications.map((notif) => {
+                      uniqueNotifications.map((notif) => {
                         const isUnread =
                           !currentUser ||
                           !(notif.isReadByUserIds || []).includes(currentUser.id);

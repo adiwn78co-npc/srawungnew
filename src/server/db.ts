@@ -28,6 +28,24 @@ import {
   loadDatabaseFromMysql,
   saveDatabaseToMysql,
 } from './mysqlPool.ts';
+import {
+  SEED_PROGRAMS,
+  SEED_OUTCOMES,
+  SEED_OUTPUTS,
+  SEED_ACTIVITIES,
+  SEED_SUB_ACTIVITIES,
+  SEED_TORS,
+  SEED_APPROVAL_RECORDS,
+  SEED_CASH_ADVANCES,
+  SEED_MEETING_MINUTES,
+  SEED_ACTIVITY_DOCUMENTATIONS,
+  SEED_ACTIVITY_DOCUMENTATION_LIST,
+  SEED_OUTPUT_RACI_RECORDS,
+  SEED_ACTIVITY_MONITORING_RECORDS,
+  SEED_MONITORING_REPORTS,
+  SEED_PARTICIPANT_DATABASE,
+  SEED_PROGRAM_BUDGETS,
+} from './integratedSeedData.ts';
 
 export interface DatabaseSchema {
   users: User[];
@@ -55,13 +73,14 @@ export interface DatabaseSchema {
   programBudgets?: Record<string, any>;
   participantDatabase?: MasterParticipantRecord[];
   attendanceSystem?: AttendanceSystemBundle;
+  cleanResetPrj3581V1?: boolean;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.resolve(DATA_DIR, 'db.json');
 const DB_BACKUP_FILE = path.resolve(DATA_DIR, 'db.backup.json');
 
-const INITIAL_PROGRAMS: Program[] = [];
+const INITIAL_PROGRAMS: Program[] = SEED_PROGRAMS;
 
 const INITIAL_USERS: User[] = [
   {
@@ -185,52 +204,91 @@ const INITIAL_USERS: User[] = [
   },
 ];
 
-const INITIAL_OUTCOMES: Outcome[] = [];
-const INITIAL_OUTPUTS: Output[] = [];
-const INITIAL_ACTIVITIES: Activity[] = [];
-const INITIAL_SUB_ACTIVITIES: SubActivity[] = [];
-const INITIAL_TORS: Tor[] = [];
-const INITIAL_APPROVAL_RECORDS: TorApprovalRecord[] = [];
+const INITIAL_OUTCOMES: Outcome[] = SEED_OUTCOMES;
+const INITIAL_OUTPUTS: Output[] = SEED_OUTPUTS;
+const INITIAL_ACTIVITIES: Activity[] = SEED_ACTIVITIES;
+const INITIAL_SUB_ACTIVITIES: SubActivity[] = SEED_SUB_ACTIVITIES;
+const INITIAL_TORS: Tor[] = SEED_TORS;
+const INITIAL_APPROVAL_RECORDS: TorApprovalRecord[] = SEED_APPROVAL_RECORDS;
 const INITIAL_AUDIT_LOGS: AuditLog[] = [];
-export const INITIAL_CASH_ADVANCES: CashAdvanceRecord[] = [];
-const INITIAL_ACTIVITY_DOCUMENTATIONS: Record<string, ActivityDocumentationRecord> = {};
-const INITIAL_ACTIVITY_DOCUMENTATION_LIST: ActivityDocumentationRecord[] = [];
-const INITIAL_MEETING_MINUTES: MeetingMinutesRecord[] = [];
-const INITIAL_OUTPUT_RACI_RECORDS: Record<string, OutputRaciRecord> = {};
-const INITIAL_ACTIVITY_MONITORING_RECORDS: Record<string, ActivityMonitoringRecord> = {};
-const INITIAL_MONITORING_REPORTS: Record<string, MonitoringReportItem> = {};
+export const INITIAL_CASH_ADVANCES: CashAdvanceRecord[] = SEED_CASH_ADVANCES;
+const INITIAL_ACTIVITY_DOCUMENTATIONS: Record<string, ActivityDocumentationRecord> = SEED_ACTIVITY_DOCUMENTATIONS;
+const INITIAL_ACTIVITY_DOCUMENTATION_LIST: ActivityDocumentationRecord[] = SEED_ACTIVITY_DOCUMENTATION_LIST;
+const INITIAL_MEETING_MINUTES: MeetingMinutesRecord[] = SEED_MEETING_MINUTES;
+const INITIAL_OUTPUT_RACI_RECORDS: Record<string, OutputRaciRecord> = SEED_OUTPUT_RACI_RECORDS;
+const INITIAL_ACTIVITY_MONITORING_RECORDS: Record<string, ActivityMonitoringRecord> = SEED_ACTIVITY_MONITORING_RECORDS;
+const INITIAL_MONITORING_REPORTS: Record<string, MonitoringReportItem> = SEED_MONITORING_REPORTS;
+const INITIAL_PARTICIPANT_DATABASE: MasterParticipantRecord[] = SEED_PARTICIPANT_DATABASE;
+const INITIAL_PROGRAM_BUDGETS: Record<string, any> = SEED_PROGRAM_BUDGETS;
 
 function createDefaultSeed(): DatabaseSchema {
   return {
     users: INITIAL_USERS,
     currentUserId: 'user-director',
-    programs: INITIAL_PROGRAMS,
-    outcomes: INITIAL_OUTCOMES,
-    outputs: INITIAL_OUTPUTS,
-    activities: INITIAL_ACTIVITIES,
-    subActivities: INITIAL_SUB_ACTIVITIES,
-    tors: INITIAL_TORS,
-    approvalRecords: INITIAL_APPROVAL_RECORDS,
-    auditLogs: INITIAL_AUDIT_LOGS,
-    cashAdvances: INITIAL_CASH_ADVANCES,
+    programs: [...INITIAL_PROGRAMS],
+    outcomes: [...INITIAL_OUTCOMES],
+    outputs: [...INITIAL_OUTPUTS],
+    activities: [...INITIAL_ACTIVITIES],
+    subActivities: [...INITIAL_SUB_ACTIVITIES],
+    tors: [...INITIAL_TORS],
+    approvalRecords: [...INITIAL_APPROVAL_RECORDS],
+    auditLogs: [...INITIAL_AUDIT_LOGS],
+    cashAdvances: [...INITIAL_CASH_ADVANCES],
     cashAdvanceSummaries: {},
     cashAdvanceAuditLogs: {},
-    meetingMinutes: INITIAL_MEETING_MINUTES,
-    activityDocumentations: INITIAL_ACTIVITY_DOCUMENTATIONS,
-    activityDocumentationList: INITIAL_ACTIVITY_DOCUMENTATION_LIST,
+    meetingMinutes: [...INITIAL_MEETING_MINUTES],
+    activityDocumentations: { ...INITIAL_ACTIVITY_DOCUMENTATIONS },
+    activityDocumentationList: [...INITIAL_ACTIVITY_DOCUMENTATION_LIST],
     outputRaciRecords: { ...INITIAL_OUTPUT_RACI_RECORDS },
     activityMonitoringRecords: { ...INITIAL_ACTIVITY_MONITORING_RECORDS },
     monitoringReports: { ...INITIAL_MONITORING_REPORTS },
     approvalHubItems: {},
     approvalNotifications: [],
-    programBudgets: {},
-    participantDatabase: [],
+    programBudgets: { ...INITIAL_PROGRAM_BUDGETS },
+    participantDatabase: [...INITIAL_PARTICIPANT_DATABASE],
+    cleanResetPrj3581V1: true,
   };
 }
 
 function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
-  if (!Array.isArray(parsed.programs)) {
-    parsed.programs = INITIAL_PROGRAMS;
+  if (!parsed.cleanResetPrj3581V1) {
+    parsed.programs = INITIAL_PROGRAMS.map((p) => ({ ...p, picId: '', picName: '' }));
+    parsed.outcomes = INITIAL_OUTCOMES.map((oc) => ({ ...oc, picId: '', picName: '' }));
+    parsed.outputs = INITIAL_OUTPUTS.map((op) => ({ ...op, picId: '', picName: '' }));
+    parsed.activities = INITIAL_ACTIVITIES.map((act) => ({ ...act, picId: '', picName: '' }));
+    parsed.subActivities = [];
+    parsed.tors = [];
+    parsed.approvalRecords = [];
+    parsed.auditLogs = [];
+    parsed.cashAdvances = [];
+    parsed.cashAdvanceSummaries = {};
+    parsed.cashAdvanceAuditLogs = {};
+    parsed.meetingMinutes = [];
+    parsed.activityDocumentations = {};
+    parsed.activityDocumentationList = [];
+    parsed.outputRaciRecords = {};
+    parsed.activityMonitoringRecords = {};
+    parsed.monitoringReports = {};
+    parsed.approvalHubItems = {};
+    parsed.approvalNotifications = [];
+    parsed.programBudgets = {};
+    parsed.participantDatabase = [];
+    if (parsed.attendanceSystem && typeof parsed.attendanceSystem === 'object') {
+      parsed.attendanceSystem.records = [];
+      parsed.attendanceSystem.flextimeAssignments = [];
+      parsed.attendanceSystem.leaveRequests = [];
+      parsed.attendanceSystem.wfaRequests = [];
+      parsed.attendanceSystem.holidayRequests = [];
+      parsed.attendanceSystem.employeeTrainings = [];
+      parsed.attendanceSystem.employeeProfileLinks = {};
+      parsed.attendanceSystem.workRecapVerifications = {};
+      parsed.attendanceSystem.auditTrail = [];
+    }
+    parsed.cleanResetPrj3581V1 = true;
+  }
+
+  if (!Array.isArray(parsed.programs) || parsed.programs.length === 0) {
+    parsed.programs = [...INITIAL_PROGRAMS];
   }
 
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
@@ -261,27 +319,43 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
     }
   }
 
-  if (!Array.isArray(parsed.outcomes)) parsed.outcomes = INITIAL_OUTCOMES;
-  if (!Array.isArray(parsed.outputs)) parsed.outputs = INITIAL_OUTPUTS;
-  if (!Array.isArray(parsed.activities)) parsed.activities = INITIAL_ACTIVITIES;
-  if (!Array.isArray(parsed.subActivities)) parsed.subActivities = INITIAL_SUB_ACTIVITIES;
-  if (!Array.isArray(parsed.tors)) parsed.tors = INITIAL_TORS;
-  if (!Array.isArray(parsed.approvalRecords)) parsed.approvalRecords = INITIAL_APPROVAL_RECORDS;
-  if (!Array.isArray(parsed.auditLogs)) parsed.auditLogs = INITIAL_AUDIT_LOGS;
-  if (!Array.isArray(parsed.cashAdvances)) parsed.cashAdvances = INITIAL_CASH_ADVANCES;
+  if (!Array.isArray(parsed.outcomes)) {
+    parsed.outcomes = [...INITIAL_OUTCOMES];
+  }
+  if (!Array.isArray(parsed.outputs)) {
+    parsed.outputs = [...INITIAL_OUTPUTS];
+  }
+  if (!Array.isArray(parsed.activities)) {
+    parsed.activities = [...INITIAL_ACTIVITIES];
+  }
+  if (!Array.isArray(parsed.subActivities)) {
+    parsed.subActivities = [];
+  }
+  if (!Array.isArray(parsed.tors)) {
+    parsed.tors = [];
+  }
+  if (!Array.isArray(parsed.approvalRecords)) {
+    parsed.approvalRecords = [];
+  }
+  if (!Array.isArray(parsed.auditLogs)) {
+    parsed.auditLogs = [];
+  }
+  if (!Array.isArray(parsed.cashAdvances)) {
+    parsed.cashAdvances = [];
+  }
 
   if (Array.isArray(parsed.tors) && Array.isArray(parsed.cashAdvances)) {
     parsed.tors = parsed.tors.map((t) => {
-      const torCas = parsed.cashAdvances!.filter(
-        (ca) => ca.torId === t.id && ca.status !== 'Ditolak' && ca.status !== 'Draft'
+      const approvedCas = parsed.cashAdvances!.filter(
+        (ca) => ca.torId === t.id && (ca.status === 'Disetujui' || ca.status === 'Dicairkan')
       );
-      const verifiedCas = torCas.filter(
+      const verifiedCas = approvedCas.filter(
         (ca) => ca.isReported && ca.reportApprovalStatus === 'Telah Disetujui'
       );
-      const computedRequested =
-        torCas.length > 0
-          ? torCas.reduce((sum, ca) => sum + (Number(ca.totalAmount) || 0), 0)
-          : t.budgetRequested ?? null;
+      const computedRequested = approvedCas.reduce(
+        (sum, ca) => sum + (Number(ca.totalAmount) || 0),
+        0
+      );
       const computedActualSpent = verifiedCas.reduce(
         (sum, ca) => sum + (Number(ca.realizedAmount ?? ca.totalAmount) || 0),
         0
@@ -289,17 +363,20 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
       return {
         ...t,
         budgetRequested: computedRequested,
+        budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
         budgetActualSpent: computedActualSpent,
       };
     });
   }
 
-  if (!Array.isArray(parsed.meetingMinutes)) parsed.meetingMinutes = INITIAL_MEETING_MINUTES;
+  if (!Array.isArray(parsed.meetingMinutes)) {
+    parsed.meetingMinutes = [];
+  }
   if (!parsed.activityDocumentations || typeof parsed.activityDocumentations !== 'object') {
-    parsed.activityDocumentations = INITIAL_ACTIVITY_DOCUMENTATIONS;
+    parsed.activityDocumentations = {};
   }
   if (!Array.isArray(parsed.activityDocumentationList)) {
-    parsed.activityDocumentationList = [...INITIAL_ACTIVITY_DOCUMENTATION_LIST];
+    parsed.activityDocumentationList = [];
   }
 
   if (Array.isArray(parsed.tors)) {
@@ -313,16 +390,19 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   }
 
   if (!parsed.outputRaciRecords || typeof parsed.outputRaciRecords !== 'object') {
-    parsed.outputRaciRecords = { ...INITIAL_OUTPUT_RACI_RECORDS };
+    parsed.outputRaciRecords = {};
   }
   if (!parsed.activityMonitoringRecords || typeof parsed.activityMonitoringRecords !== 'object') {
-    parsed.activityMonitoringRecords = { ...INITIAL_ACTIVITY_MONITORING_RECORDS };
+    parsed.activityMonitoringRecords = {};
   }
   if (!parsed.monitoringReports || typeof parsed.monitoringReports !== 'object') {
-    parsed.monitoringReports = { ...INITIAL_MONITORING_REPORTS };
+    parsed.monitoringReports = {};
   }
   if (!Array.isArray(parsed.participantDatabase)) {
     parsed.participantDatabase = [];
+  }
+  if (!parsed.programBudgets || typeof parsed.programBudgets !== 'object') {
+    parsed.programBudgets = {};
   }
 
   return parsed;
@@ -344,10 +424,16 @@ class Database {
     }
   }
 
-  /**
-   * Membaca seed awal dari backup JSON (hanya sebagai sumber migrasi awal sebelum MySQL aktif).
-   * Penulisan ke db.json dihentikan agar seluruh penyimpanan berjalan melalui MySQL.
-   */
+  private persistToDisk(snapshot: DatabaseSchema) {
+    try {
+      const jsonText = JSON.stringify(snapshot, null, 2);
+      fs.writeFileSync(DB_FILE, jsonText, 'utf-8');
+      fs.writeFileSync(DB_BACKUP_FILE, jsonText, 'utf-8');
+    } catch {
+      // abaikan jika read-only
+    }
+  }
+
   private loadInitialSeedFromBackupOrFile(): DatabaseSchema {
     try {
       const sourceFile = fs.existsSync(DB_BACKUP_FILE)
@@ -358,27 +444,29 @@ class Database {
 
       if (sourceFile) {
         const fileContent = fs.readFileSync(sourceFile, 'utf-8');
-        const parsed: DatabaseSchema = JSON.parse(fileContent);
-        // Buat salinan backup satu kali dari db.json ke db.backup.json bila belum ada
-        if (fs.existsSync(DB_FILE) && !fs.existsSync(DB_BACKUP_FILE)) {
+        const rawParsed: DatabaseSchema = JSON.parse(fileContent);
+        const needsDiskSync = !rawParsed.cleanResetPrj3581V1;
+        const normalized = normalizeSchema(rawParsed);
+        if (needsDiskSync) {
+          this.persistToDisk(normalized);
+        } else if (fs.existsSync(DB_FILE) && !fs.existsSync(DB_BACKUP_FILE)) {
           try {
             fs.copyFileSync(DB_FILE, DB_BACKUP_FILE);
           } catch {
             // abaikan jika read-only
           }
         }
-        return normalizeSchema(parsed);
+        return normalized;
       }
     } catch (err) {
       console.error('Error reading initial seed backup, falling back to default seed:', err);
     }
 
-    return createDefaultSeed();
+    const fresh = createDefaultSeed();
+    this.persistToDisk(fresh);
+    return fresh;
   }
 
-  /**
-   * Inisialisasi koneksi MySQL (SELECT dari tabel MySQL, atau migrasi otomatis dari seed jika tabel MySQL kosong)
-   */
   private async initializeMysqlStorage() {
     if (!isMysqlConfigured()) {
       return;
@@ -389,7 +477,11 @@ class Database {
 
       const existingFromMysql = await loadDatabaseFromMysql(pool, this.data);
       if (existingFromMysql) {
+        const needsReset = !existingFromMysql.cleanResetPrj3581V1;
         this.data = normalizeSchema(existingFromMysql);
+        if (needsReset) {
+          await saveDatabaseToMysql(pool, this.data);
+        }
         console.log('[MySQL] Berhasil memuat seluruh data dari tabel-tabel MySQL.');
       } else {
         console.log('[MySQL] Tabel MySQL masih kosong — menjalankan migrasi otomatis dari backup db.json...');
@@ -401,11 +493,8 @@ class Database {
     }
   }
 
-  /**
-   * Menyimpan perubahan ke MySQL menggunakan query INSERT / UPDATE / DELETE.
-   * Penulisan ke file db.json telah dihentikan.
-   */
   private persistToMysql(snapshot: DatabaseSchema) {
+    this.persistToDisk(snapshot);
     if (!isMysqlConfigured()) {
       return;
     }

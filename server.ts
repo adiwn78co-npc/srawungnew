@@ -440,33 +440,31 @@ async function startServer() {
     return false;
   }
 
-  // Helper: compute total funds requested from active Cash Advances for a TOR
+  // Helper: compute total funds requested from ACC'd Cash Advances (Disetujui / Dicairkan) for a TOR
   function getConnectedBudgetRequested(
     tor: Tor,
     cashAdvances: CashAdvanceRecord[] = []
   ): number | null {
-    const activeCas = (cashAdvances || []).filter(
-      (ca) => ca.torId === tor.id && ca.status !== 'Ditolak'
+    const approvedCas = (cashAdvances || []).filter(
+      (ca) => ca.torId === tor.id && (ca.status === 'Disetujui' || ca.status === 'Dicairkan')
     );
-    if (activeCas.length > 0) {
-      return activeCas.reduce((sum, ca) => sum + (Number(ca.totalAmount) || 0), 0);
+    if (approvedCas.length > 0) {
+      return approvedCas.reduce((sum, ca) => sum + (Number(ca.totalAmount) || 0), 0);
     }
-    return tor.budgetRequested ?? null;
+    return 0;
   }
 
   function syncTorBudgetInDraft(draft: ReturnType<typeof db.getData>, torId: string) {
     const torIdx = (draft.tors || []).findIndex((t) => t.id === torId);
     if (torIdx === -1) return;
-    const activeCas = (draft.cashAdvances || []).filter(
-      (ca) => ca.torId === torId && ca.status !== 'Ditolak' && ca.status !== 'Draft'
+    const approvedCas = (draft.cashAdvances || []).filter(
+      (ca) => ca.torId === torId && (ca.status === 'Disetujui' || ca.status === 'Dicairkan')
     );
-    if (activeCas.length > 0) {
-      draft.tors[torIdx].budgetRequested = activeCas.reduce(
-        (sum, ca) => sum + (Number(ca.totalAmount) || 0),
-        0
-      );
-    }
-    const verifiedReportCas = activeCas.filter(
+    draft.tors[torIdx].budgetRequested = approvedCas.reduce(
+      (sum, ca) => sum + (Number(ca.totalAmount) || 0),
+      0
+    );
+    const verifiedReportCas = approvedCas.filter(
       (ca) => ca.isReported && ca.reportApprovalStatus === 'Telah Disetujui'
     );
     draft.tors[torIdx].budgetActualSpent = verifiedReportCas.reduce(
@@ -1789,13 +1787,27 @@ async function startServer() {
   // Outcomes
   app.post('/api/outcomes', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
-      return res.status(403).json({ error: 'Hanya Director dan Program Manager yang berwenang membuat Outcome' });
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
+      return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Outcome' });
     }
 
-    const { programId, name, description, picId, indicators, status } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Nama Outcome wajib diisi' });
+    const { programId, outcomeNumber, name, description, picId, indicators, status } = req.body;
+    const cleanNumber = String(outcomeNumber || '').trim();
+    const cleanDesc = String(description || '').trim();
+    const cleanName =
+      String(name || '').trim() ||
+      (cleanNumber && cleanDesc
+        ? `${cleanNumber}: ${cleanDesc}`
+        : cleanDesc || cleanNumber);
+
+    if (!cleanName) {
+      return res.status(400).json({ error: 'Nomor Outcome atau Description Outcome wajib diisi' });
     }
     if (!programId) {
       return res.status(400).json({ error: 'Program induk wajib dipilih' });
@@ -1810,16 +1822,17 @@ async function startServer() {
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
 
     const newOutcome: Outcome = {
-      id: `out-${Date.now()}`,
+      id: `out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       programId: program.id,
       programName: program.name,
-      name: name.trim(),
-      description: description || '',
+      outcomeNumber: cleanNumber || undefined,
+      name: cleanName,
+      description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
       projectName: program.name,
       status: status || 'Belum Dimulai',
-      indicators: indicators || [],
+      indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: new Date().toISOString(),
     };
 
@@ -1843,12 +1856,18 @@ async function startServer() {
 
   app.put('/api/outcomes/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Outcome' });
     }
 
     const { id } = req.params;
-    const { name, description, picId, projectName, indicators, status } = req.body;
+    const { outcomeNumber, name, description, picId, projectName, indicators, status } = req.body;
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
 
@@ -1856,10 +1875,26 @@ async function startServer() {
     db.update((d) => {
       const idx = d.outcomes.findIndex((o) => o.id === id);
       if (idx !== -1) {
+        const nextNum =
+          outcomeNumber !== undefined
+            ? String(outcomeNumber).trim()
+            : d.outcomes[idx].outcomeNumber;
+        const nextDesc =
+          description !== undefined
+            ? String(description).trim()
+            : d.outcomes[idx].description;
+        const nextName =
+          name !== undefined && String(name).trim()
+            ? String(name).trim()
+            : nextNum && nextDesc
+            ? `${nextNum}: ${nextDesc}`
+            : d.outcomes[idx].name;
+
         d.outcomes[idx] = {
           ...d.outcomes[idx],
-          name: name ?? d.outcomes[idx].name,
-          description: description ?? d.outcomes[idx].description,
+          outcomeNumber: nextNum || undefined,
+          name: nextName,
+          description: nextDesc ?? d.outcomes[idx].description,
           picId: picUser ? picUser.id : d.outcomes[idx].picId,
           picName: picUser ? picUser.name : d.outcomes[idx].picName,
           projectName: projectName ?? d.outcomes[idx].projectName,
@@ -1876,7 +1911,13 @@ async function startServer() {
 
   app.delete('/api/outcomes/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Outcome' });
     }
 
@@ -1910,13 +1951,27 @@ async function startServer() {
   // Outputs
   app.post('/api/outputs', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
-      return res.status(403).json({ error: 'Hanya Director dan Program Manager yang berwenang membuat Output' });
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
+      return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Output' });
     }
 
-    const { outcomeId, name, description, picId, indicators, status } = req.body;
-    if (!outcomeId || !name) {
-      return res.status(400).json({ error: 'Outcome dan Nama Output wajib diisi' });
+    const { outcomeId, outputNumber, name, description, picId, indicators, status } = req.body;
+    const cleanNumber = String(outputNumber || '').trim();
+    const cleanDesc = String(description || '').trim();
+    const cleanName =
+      String(name || '').trim() ||
+      (cleanNumber && cleanDesc
+        ? `${cleanNumber}: ${cleanDesc}`
+        : cleanDesc || cleanNumber);
+
+    if (!outcomeId || !cleanName) {
+      return res.status(400).json({ error: 'Outcome dan Nomor/Deskripsi Output wajib diisi' });
     }
 
     const data = db.getData();
@@ -1928,14 +1983,15 @@ async function startServer() {
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
 
     const newOutput: Output = {
-      id: `outp-${Date.now()}`,
+      id: `outp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       outcomeId,
-      name,
-      description: description || '',
+      outputNumber: cleanNumber || undefined,
+      name: cleanName,
+      description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
       status: status || 'Belum Dimulai',
-      indicators: indicators || [],
+      indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: new Date().toISOString(),
     };
 
@@ -1948,12 +2004,18 @@ async function startServer() {
 
   app.put('/api/outputs/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Output' });
     }
 
     const { id } = req.params;
-    const { name, description, picId, indicators, status, outcomeId } = req.body;
+    const { outputNumber, name, description, picId, indicators, status, outcomeId } = req.body;
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
 
@@ -1961,11 +2023,27 @@ async function startServer() {
     db.update((d) => {
       const idx = d.outputs.findIndex((o) => o.id === id);
       if (idx !== -1) {
+        const nextNum =
+          outputNumber !== undefined
+            ? String(outputNumber).trim()
+            : d.outputs[idx].outputNumber;
+        const nextDesc =
+          description !== undefined
+            ? String(description).trim()
+            : d.outputs[idx].description;
+        const nextName =
+          name !== undefined && String(name).trim()
+            ? String(name).trim()
+            : nextNum && nextDesc
+            ? `${nextNum}: ${nextDesc}`
+            : d.outputs[idx].name;
+
         d.outputs[idx] = {
           ...d.outputs[idx],
           outcomeId: outcomeId ?? d.outputs[idx].outcomeId,
-          name: name ?? d.outputs[idx].name,
-          description: description ?? d.outputs[idx].description,
+          outputNumber: nextNum || undefined,
+          name: nextName,
+          description: nextDesc ?? d.outputs[idx].description,
           picId: picUser ? picUser.id : d.outputs[idx].picId,
           picName: picUser ? picUser.name : d.outputs[idx].picName,
           indicators: indicators ?? d.outputs[idx].indicators,
@@ -1981,7 +2059,13 @@ async function startServer() {
 
   app.delete('/api/outputs/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Output' });
     }
 
@@ -2008,12 +2092,25 @@ async function startServer() {
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
       !currentUser.permissions?.canManagePrograms
     ) {
-      return res.status(403).json({ error: 'Hanya Director, Program Manager, dan Finance yang berwenang membuat Activity' });
+      return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Activity' });
     }
 
-    const { outputId, name, code, description, picId, startDate, endDate, status } = req.body;
+    const {
+      outputId,
+      activityNumber,
+      name,
+      code,
+      description,
+      anticipatedInputs,
+      plannedParticipantsBreakdown,
+      picId,
+      startDate,
+      endDate,
+      status,
+    } = req.body;
     if (!outputId || !name) {
       return res.status(400).json({ error: 'Output dan Nama Activity wajib diisi' });
     }
@@ -2027,11 +2124,21 @@ async function startServer() {
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
 
     const newActivity: Activity = {
-      id: `act-${Date.now()}`,
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       outputId,
+      activityNumber:
+        typeof activityNumber === 'string' && activityNumber.trim()
+          ? activityNumber.trim()
+          : undefined,
       name,
       code: typeof code === 'string' && code.trim() ? code.trim() : undefined,
       description: description || '',
+      anticipatedInputs:
+        typeof anticipatedInputs === 'string' ? anticipatedInputs.trim() : undefined,
+      plannedParticipantsBreakdown:
+        typeof plannedParticipantsBreakdown === 'string'
+          ? plannedParticipantsBreakdown.trim()
+          : undefined,
       picId: picUser.id,
       picName: picUser.name,
       startDate: startDate || new Date().toISOString().slice(0, 10),
@@ -2053,13 +2160,26 @@ async function startServer() {
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
       !currentUser.permissions?.canManagePrograms
     ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Activity' });
     }
 
     const { id } = req.params;
-    const { name, code, description, picId, startDate, endDate, status, outputId } = req.body;
+    const {
+      activityNumber,
+      name,
+      code,
+      description,
+      anticipatedInputs,
+      plannedParticipantsBreakdown,
+      picId,
+      startDate,
+      endDate,
+      status,
+      outputId,
+    } = req.body;
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
 
@@ -2076,9 +2196,27 @@ async function startServer() {
         d.activities[idx] = {
           ...d.activities[idx],
           outputId: outputId ?? d.activities[idx].outputId,
+          activityNumber:
+            activityNumber !== undefined
+              ? typeof activityNumber === 'string' && activityNumber.trim()
+                ? activityNumber.trim()
+                : undefined
+              : d.activities[idx].activityNumber,
           name: name ?? d.activities[idx].name,
           code: nextCode,
           description: description ?? d.activities[idx].description,
+          anticipatedInputs:
+            anticipatedInputs !== undefined
+              ? typeof anticipatedInputs === 'string'
+                ? anticipatedInputs.trim()
+                : ''
+              : d.activities[idx].anticipatedInputs,
+          plannedParticipantsBreakdown:
+            plannedParticipantsBreakdown !== undefined
+              ? typeof plannedParticipantsBreakdown === 'string'
+                ? plannedParticipantsBreakdown.trim()
+                : ''
+              : d.activities[idx].plannedParticipantsBreakdown,
           picId: picUser ? picUser.id : d.activities[idx].picId,
           picName: picUser ? picUser.name : d.activities[idx].picName,
           startDate: startDate ?? d.activities[idx].startDate,
@@ -2104,7 +2242,13 @@ async function startServer() {
 
   app.delete('/api/activities/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Activity' });
     }
 
@@ -2128,7 +2272,13 @@ async function startServer() {
   // Sub-Activities (optional)
   app.post('/api/sub-activities', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Sub-Activity' });
     }
 
@@ -2529,6 +2679,28 @@ async function startServer() {
       budgetActualSpent: req.body.budgetActualSpent !== undefined ? Number(req.body.budgetActualSpent) : null,
       budgetCurrency: req.body.budgetCurrency || 'IDR',
       budgetNotes: req.body.budgetNotes || '',
+      budgetApprovalStatus: req.body.budgetApprovalStatus || 'Menunggu ACC Direktur',
+      budgetDeterminedByFinanceName:
+        req.body.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
+      budgetDeterminedByFinanceAt:
+        req.body.budgetDeterminedByFinanceAt || new Date().toISOString(),
+      budgetUpdatedByA2Name: req.body.budgetUpdatedByA2Name || undefined,
+      budgetUpdatedByA2At: req.body.budgetUpdatedByA2At || undefined,
+      budgetApprovedByDirectorName: req.body.budgetApprovedByDirectorName || undefined,
+      budgetApprovedByDirectorAt: req.body.budgetApprovedByDirectorAt || undefined,
+      budgetAuditLogs: Array.isArray(req.body.budgetAuditLogs)
+        ? req.body.budgetAuditLogs
+        : [
+            {
+              id: `bgt-log-${Date.now()}`,
+              timestamp: new Date().toISOString(),
+              actorName: req.body.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
+              actorRole: 'Finance / A2',
+              actionLabel: 'Penentuan Estimasi Budget Awal ToR oleh Finance',
+              amount: req.body.budgetRequested !== undefined ? Number(req.body.budgetRequested) : 0,
+              status: req.body.budgetApprovalStatus || 'Menunggu ACC Direktur',
+            },
+          ],
       createdById: currentUser.id,
       createdByName: currentUser.name,
       createdByRole: currentUser.role,
@@ -2573,6 +2745,9 @@ async function startServer() {
           });
 
           if (!d.approvalNotifications) d.approvalNotifications = [];
+          d.approvalNotifications = d.approvalNotifications.filter(
+            (n) => n.id !== `notif-init-${hubItem.id}` && n.approvalItemId !== hubItem.id
+          );
           d.approvalNotifications.unshift({
             id: `notif-tor-init-${Date.now()}`,
             approvalItemId: hubItem.id,
@@ -2622,6 +2797,10 @@ async function startServer() {
     // - R (Responsible) dan A1 (Accountable Program) dapat mengedit saat status Draft / Perlu Perbaikan, atau setelah meminta izin edit (Request Edit) dan di-ACC Direktur.
     const outputRaci = data.outputRaciRecords?.[existing.outputId];
     const isDirectorUser = currentUser.role === 'director';
+    const isA2OrFinanceUser =
+      currentUser.role === 'finance' ||
+      (currentUser.roleTitle || '').toLowerCase().includes('finance') ||
+      outputRaci?.accountableFinanceUserId === currentUser.id;
     const isRUser =
       currentUser.role !== 'admin' &&
       (outputRaci?.responsibleUserId === currentUser.id ||
@@ -2636,17 +2815,17 @@ async function startServer() {
     const isRevisionOrDraft =
       existing.submissionStatus === 'Draft' || existing.submissionStatus === 'Perlu Perbaikan';
 
-    if (!isDirectorUser && !isRUser && !isA1User) {
+    if (!isDirectorUser && !isA2OrFinanceUser && !isRUser && !isA1User) {
       return res.status(403).json({
         error:
-          'Hanya Direktur (edit langsung) serta R dan A1 pada Output ini (melalui izin Request Edit) yang berwenang mengedit dokumen ToR.',
+          'Hanya Direktur (edit langsung), A2 / Finance (update estimasi budget), serta R dan A1 pada Output ini (melalui izin Request Edit) yang berwenang memperbarui dokumen ToR.',
       });
     }
 
-    if (!isDirectorUser && !hasApprovedEditRequest && !isRevisionOrDraft) {
+    if (!isDirectorUser && !isA2OrFinanceUser && !hasApprovedEditRequest && !isRevisionOrDraft) {
       return res.status(400).json({
         error:
-          'Dokumen bersifat final. Hanya Direktur yang dapat mengedit langsung; R dan A1 wajib mengajukan Request Edit ke Direktur terlebih dahulu.',
+          'Dokumen bersifat final. Hanya Direktur atau A2/Finance (estimasi budget) yang dapat memperbarui langsung; R dan A1 wajib mengajukan Request Edit ke Direktur terlebih dahulu.',
       });
     }
 
@@ -2794,10 +2973,42 @@ async function startServer() {
           // Keep edit unlocked if still in Perlu Perbaikan; relock back to final ('none') otherwise
           editRequestStatus: keepUnlockedForRevision ? 'approved' : 'none',
           activityStatus: activityStatus ?? d.tors[idx].activityStatus,
-          budgetRequested: req.body.budgetRequested !== undefined ? (req.body.budgetRequested ? Number(req.body.budgetRequested) : null) : d.tors[idx].budgetRequested,
-          budgetApproved: req.body.budgetApproved !== undefined ? (req.body.budgetApproved ? Number(req.body.budgetApproved) : null) : d.tors[idx].budgetApproved,
-          budgetActualSpent: req.body.budgetActualSpent !== undefined ? (req.body.budgetActualSpent ? Number(req.body.budgetActualSpent) : null) : d.tors[idx].budgetActualSpent,
+          budgetRequested: req.body.budgetRequested !== undefined ? (req.body.budgetRequested !== null && req.body.budgetRequested !== '' ? Number(req.body.budgetRequested) : null) : d.tors[idx].budgetRequested,
+          budgetApproved: req.body.budgetApproved !== undefined ? (req.body.budgetApproved !== null && req.body.budgetApproved !== '' ? Number(req.body.budgetApproved) : null) : d.tors[idx].budgetApproved,
+          budgetActualSpent: req.body.budgetActualSpent !== undefined ? (req.body.budgetActualSpent !== null && req.body.budgetActualSpent !== '' ? Number(req.body.budgetActualSpent) : null) : d.tors[idx].budgetActualSpent,
           budgetNotes: req.body.budgetNotes ?? d.tors[idx].budgetNotes,
+          budgetApprovalStatus:
+            req.body.budgetApprovalStatus !== undefined
+              ? req.body.budgetApprovalStatus
+              : d.tors[idx].budgetApprovalStatus,
+          budgetDeterminedByFinanceName:
+            req.body.budgetDeterminedByFinanceName !== undefined
+              ? req.body.budgetDeterminedByFinanceName
+              : d.tors[idx].budgetDeterminedByFinanceName,
+          budgetDeterminedByFinanceAt:
+            req.body.budgetDeterminedByFinanceAt !== undefined
+              ? req.body.budgetDeterminedByFinanceAt
+              : d.tors[idx].budgetDeterminedByFinanceAt,
+          budgetUpdatedByA2Name:
+            req.body.budgetUpdatedByA2Name !== undefined
+              ? req.body.budgetUpdatedByA2Name
+              : d.tors[idx].budgetUpdatedByA2Name,
+          budgetUpdatedByA2At:
+            req.body.budgetUpdatedByA2At !== undefined
+              ? req.body.budgetUpdatedByA2At
+              : d.tors[idx].budgetUpdatedByA2At,
+          budgetApprovedByDirectorName:
+            req.body.budgetApprovedByDirectorName !== undefined
+              ? req.body.budgetApprovedByDirectorName
+              : d.tors[idx].budgetApprovedByDirectorName,
+          budgetApprovedByDirectorAt:
+            req.body.budgetApprovedByDirectorAt !== undefined
+              ? req.body.budgetApprovedByDirectorAt
+              : d.tors[idx].budgetApprovedByDirectorAt,
+          budgetAuditLogs:
+            Array.isArray(req.body.budgetAuditLogs)
+              ? req.body.budgetAuditLogs
+              : d.tors[idx].budgetAuditLogs,
           updatedAt: new Date().toISOString(),
         };
         updatedTor = d.tors[idx];
@@ -2876,6 +3087,103 @@ async function startServer() {
 
         syncApprovalHubData(d);
       }
+    });
+
+    res.json(updatedTor);
+  });
+
+  // Update / ACC Estimasi Budget ToR (Ditentukan oleh Finance, Diupdate oleh A2, Di-ACC oleh Direktur)
+  app.post('/api/tors/:id/budget-estimate', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    const { id } = req.params;
+    const { action, budgetRequested, budgetNotes } = req.body as {
+      action: 'finance_determine' | 'a2_update' | 'director_acc';
+      budgetRequested?: number;
+      budgetNotes?: string;
+    };
+
+    const data = db.getData();
+    const existing = data.tors.find((t) => t.id === id);
+    if (!existing) {
+      return res.status(404).json({ error: 'TOR tidak ditemukan' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const numericBudget =
+      budgetRequested !== undefined && budgetRequested !== null && !isNaN(Number(budgetRequested))
+        ? Number(budgetRequested)
+        : Number(existing.budgetApproved || existing.budgetRequested || 0);
+
+    let updatedTor: Tor | null = null;
+    db.update((d) => {
+      const idx = d.tors.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      const cur = d.tors[idx];
+      const existingLogs = Array.isArray(cur.budgetAuditLogs) ? cur.budgetAuditLogs : [];
+
+      if (action === 'director_acc') {
+        const logEntry = {
+          id: `bgt-log-${Date.now()}`,
+          timestamp: nowIso,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle || 'Executive Director',
+          actionLabel: `ACC Estimasi Budget ToR oleh Direktur — Budget yang disetujui untuk ini adalah Rp ${numericBudget.toLocaleString('id-ID')}`,
+          amount: numericBudget,
+          status: 'Disetujui Direktur',
+        };
+        d.tors[idx] = {
+          ...cur,
+          budgetApproved: numericBudget,
+          budgetApprovalStatus: 'Disetujui Direktur',
+          budgetApprovedByDirectorName: currentUser.name,
+          budgetApprovedByDirectorAt: nowIso,
+          budgetNotes: budgetNotes !== undefined ? budgetNotes : cur.budgetNotes,
+          budgetAuditLogs: [logEntry, ...existingLogs],
+          updatedAt: nowIso,
+        };
+      } else {
+        const isFirstDetermine = action === 'finance_determine' || !cur.budgetDeterminedByFinanceName;
+        const logEntry = {
+          id: `bgt-log-${Date.now()}`,
+          timestamp: nowIso,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle || 'A2 – Accountable Finance',
+          actionLabel: isFirstDetermine
+            ? `Penentuan Estimasi Budget ToR oleh Finance (Rp ${numericBudget.toLocaleString('id-ID')}) — Menunggu ACC Direktur`
+            : `Update Estimasi Budget ToR oleh A2 / Finance (Rp ${numericBudget.toLocaleString('id-ID')}) — Menunggu ACC Direktur`,
+          amount: numericBudget,
+          status: 'Menunggu ACC Direktur',
+        };
+        d.tors[idx] = {
+          ...cur,
+          budgetApproved: numericBudget,
+          budgetApprovalStatus: 'Menunggu ACC Direktur',
+          budgetDeterminedByFinanceName: cur.budgetDeterminedByFinanceName || currentUser.name,
+          budgetDeterminedByFinanceAt: cur.budgetDeterminedByFinanceAt || nowIso,
+          budgetUpdatedByA2Name: currentUser.name,
+          budgetUpdatedByA2At: nowIso,
+          budgetNotes: budgetNotes !== undefined ? budgetNotes : cur.budgetNotes,
+          budgetAuditLogs: [logEntry, ...existingLogs],
+          updatedAt: nowIso,
+        };
+      }
+
+      updatedTor = d.tors[idx];
+      d.auditLogs.unshift({
+        id: `log-bgt-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action:
+          action === 'director_acc'
+            ? 'ACC Estimasi Budget ToR (Direktur)'
+            : 'Update Estimasi Budget ToR (Finance / A2)',
+        entityType: 'TOR',
+        entityId: id,
+        details: `${d.tors[idx].torNumber}: Estimasi Kebutuhan Anggaran Rp ${numericBudget.toLocaleString('id-ID')} (${d.tors[idx].budgetApprovalStatus}).`,
+        timestamp: nowIso,
+      });
+      syncApprovalHubData(d);
     });
 
     res.json(updatedTor);
@@ -3186,6 +3494,78 @@ async function startServer() {
     res.json({ message: 'Status kegiatan berhasil diperbarui', activityStatus });
   });
 
+  // Delete TOR (Strictly Director Only)
+  app.delete('/api/tors/:id', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    const { id } = req.params;
+
+    if (currentUser.role !== 'director') {
+      return res.status(403).json({
+        error: 'Hanya Direktur yang memiliki kewenangan untuk menghapus dokumen ToR.',
+      });
+    }
+
+    const data = db.getData();
+    const targetTor = (data.tors || []).find((t) => t.id === id);
+    if (!targetTor) {
+      return res.status(404).json({ error: 'Dokumen ToR tidak ditemukan.' });
+    }
+
+    db.update((d) => {
+      d.tors = (d.tors || []).filter((t) => t.id !== id);
+      d.approvalRecords = (d.approvalRecords || []).filter((r) => r.torId !== id);
+      const removedCaIds = new Set(
+        (d.cashAdvances || []).filter((ca) => ca.torId === id).map((ca) => ca.id)
+      );
+      d.cashAdvances = (d.cashAdvances || []).filter((ca) => ca.torId !== id);
+      if (d.cashAdvanceSummaries && d.cashAdvanceSummaries[id]) {
+        delete d.cashAdvanceSummaries[id];
+      }
+      if (d.cashAdvanceAuditLogs && d.cashAdvanceAuditLogs[id]) {
+        delete d.cashAdvanceAuditLogs[id];
+      }
+      d.meetingMinutes = (d.meetingMinutes || []).filter((mm) => mm.torId !== id);
+      d.activityDocumentationList = (d.activityDocumentationList || []).filter(
+        (doc) => doc.torId !== id
+      );
+      if (d.activityDocumentations && d.activityDocumentations[id]) {
+        delete d.activityDocumentations[id];
+      }
+      if (d.monitoringReports) {
+        for (const key of Object.keys(d.monitoringReports)) {
+          if (d.monitoringReports[key]?.torId === id) {
+            delete d.monitoringReports[key];
+          }
+        }
+      }
+      if (d.approvalHubItems) {
+        delete d.approvalHubItems[`apv-tor-${id}`];
+        for (const caId of removedCaIds) {
+          delete d.approvalHubItems[`apv-ca-${caId}`];
+          delete d.approvalHubItems[`apv-finrep-${caId}`];
+        }
+      }
+      syncApprovalHubData(d);
+
+      d.auditLogs.unshift({
+        id: `log-del-tor-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Penghapusan Dokumen TOR (Direktur)',
+        entityType: 'TOR',
+        entityId: id,
+        details: `Direktur (${currentUser.name}) menghapus dokumen TOR ${targetTor.torNumber}: "${targetTor.title}" beserta dokumen turunan terkait.`,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    res.json({
+      message: `Dokumen ToR ${targetTor.torNumber} berhasil dihapus oleh Direktur.`,
+      id,
+    });
+  });
+
   // ==========================================
   // CASH ADVANCE (KASBON OPERASIONAL) ENDPOINTS
   // ==========================================
@@ -3379,6 +3759,9 @@ async function startServer() {
         const hubItem = draft.approvalHubItems?.[`apv-ca-${newRecord.id}`];
         if (hubItem) {
           if (!draft.approvalNotifications) draft.approvalNotifications = [];
+          draft.approvalNotifications = draft.approvalNotifications.filter(
+            (n) => n.id !== `notif-init-${hubItem.id}` && n.approvalItemId !== hubItem.id
+          );
           const a2Targets = [hubItem.accountableFinanceUserId].filter(
             (uid): uid is string => Boolean(uid)
           );
@@ -7062,12 +7445,14 @@ async function startServer() {
       latitude,
       longitude,
       outsideReason,
+      allowOutsideWithHrApproval,
       workItems,
     }: {
       date?: string;
       latitude: number;
       longitude: number;
       outsideReason?: string;
+      allowOutsideWithHrApproval?: boolean;
       workItems: { category: WijnaWorkCategory; shortDescription: string }[];
     } = req.body || {};
 
@@ -7114,8 +7499,8 @@ async function startServer() {
         lon
       );
       const isOutside = distanceMeters > sys.locationConfig.radiusMeters;
-      if (isOutside) {
-        errMsg = `Tidak dapat melakukan Clock In karena posisi Anda berada di luar titik koordinat WIJNA (${distanceMeters}m > radius ${sys.locationConfig.radiusMeters}m yang ditentukan oleh Direktur).`;
+      if (isOutside && !allowOutsideWithHrApproval) {
+        errMsg = `Tidak dapat melakukan Clock In karena posisi Anda berada di luar titik koordinat WIJNA (${distanceMeters}m > radius ${sys.locationConfig.radiusMeters}m). Pilih opsi "Tetap Clock In (Sah Setelah Mendapat ACC dari HR)" jika Anda tetap ingin Clock In dari luar kantor.`;
         return;
       }
 
@@ -7211,6 +7596,25 @@ async function startServer() {
       return res.status(400).json({ error: errMsg });
     }
     res.json({ record: createdOrUpdated, bundle: db.getData().attendanceSystem });
+  });
+
+  // 1B. RESET PRESENSI HARI INI (Agar dapat melakukan Deteksi Kantor & Clock In ulang)
+  app.post('/api/attendance-system/reset-today', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    const { date }: { date?: string } = req.body || {};
+    const targetDate =
+      date && String(date).trim()
+        ? String(date).trim()
+        : new Date().toISOString().slice(0, 10);
+
+    db.update((draft) => {
+      const sys = ensureAttendanceSystemInitialized(draft);
+      sys.records = sys.records.filter(
+        (r) => !(r.userId === currentUser.id && r.date === targetDate)
+      );
+    });
+
+    res.json({ bundle: db.getData().attendanceSystem });
   });
 
   // 3. UPDATE / TAMBAH PEKERJAAN DI TIMESHEET HARIAN (TERMASUK HARI WFA)

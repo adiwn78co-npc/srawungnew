@@ -30,14 +30,17 @@ export interface User {
 
 export interface Indicator {
   id: string;
-  name: string;
+  name: string; // Progress indicator
   description: string;
-  baseline: string;
-  target: string;
+  baseline: string; // Baseline
+  target: string; // End of project goal
+  endOfProjectGoal?: string; // Alias/explicit field for End of project goal
   unit: string;
   verificationMethod: string;
-  reportingFrequency: string;
-  dataSource?: string;
+  reportingFrequency: string; // Reporting frequency
+  dataSource?: string; // Data source
+  cumulativeType?: 'Cumulative' | 'Non-cumulative' | string; // Cumulative or non-cumulative
+  plannedDataBreakdown?: string; // Planned data breakdown
 }
 
 export type ProgramStatus = 'Draft' | 'Aktif' | 'Selesai' | 'Diarsipkan';
@@ -62,19 +65,21 @@ export interface Outcome {
   id: string;
   programId: string;
   programName?: string;
+  outcomeNumber?: string; // Nomor outcome (Satu)
   name: string;
-  description: string;
+  description: string; // Description (Satu)
   picId: string;
   picName: string;
   projectName?: string;
   status: 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai';
-  indicators: Indicator[];
+  indicators: Indicator[]; // Multi: Progress indicator, Data source, Cumulative or non-cumulative, Planned data breakdown, Reporting frequency, Baseline, End of project goal
   createdAt: string;
 }
 
 export interface Output {
   id: string;
   outcomeId: string;
+  outputNumber?: string;
   name: string;
   description: string;
   picId: string;
@@ -87,9 +92,12 @@ export interface Output {
 export interface Activity {
   id: string;
   outputId: string;
-  name: string;
+  activityNumber?: string; // e.g., "Activity 1.1"
+  name: string; // e.g., "Activity 1.1 Conduct regular Board meetings to ensure accountability, effective governance and decision-making."
   code?: string;
-  description: string;
+  description: string; // Activity description
+  anticipatedInputs?: string; // Anticipated inputs
+  plannedParticipantsBreakdown?: string; // If possible, break down planned participants by gender and age
   picId: string;
   picName: string;
   startDate: string;
@@ -314,12 +322,28 @@ export interface Tor {
   editReviewComment?: string;
   activityStatus: ActivityStatus;
   submissionStatus: SubmissionStatus;
-  // Budget Overview fields
-  budgetRequested?: number | null; // Dana Diminta
-  budgetApproved?: number | null; // Dana Disetujui
+  // Budget Overview fields (Ditentukan oleh Finance, Diupdate oleh A2, Di-ACC oleh Direktur)
+  budgetRequested?: number | null; // Dana Diminta / Estimasi Kebutuhan Anggaran (IDR)
+  budgetApproved?: number | null; // Dana Disetujui (ACC Direktur)
   budgetActualSpent?: number | null; // Pengeluaran Aktual Terverifikasi
   budgetCurrency?: string; // Default: 'IDR'
   budgetNotes?: string;
+  budgetApprovalStatus?: 'Menunggu Penentuan Finance' | 'Menunggu ACC Direktur' | 'Disetujui Direktur';
+  budgetDeterminedByFinanceName?: string;
+  budgetDeterminedByFinanceAt?: string;
+  budgetUpdatedByA2Name?: string;
+  budgetUpdatedByA2At?: string;
+  budgetApprovedByDirectorName?: string;
+  budgetApprovedByDirectorAt?: string;
+  budgetAuditLogs?: Array<{
+    id: string;
+    timestamp: string;
+    actorName: string;
+    actorRole: string;
+    actionLabel: string;
+    amount: number;
+    status: string;
+  }>;
   // Documentation (Stage 05) linked to this TOR
   documentation?: ActivityDocumentationRecord;
   isArchivedCompleted?: boolean;

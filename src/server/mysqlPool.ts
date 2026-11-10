@@ -132,8 +132,8 @@ export async function loadDatabaseFromMysql(
     locationConfig: {
       officeName: 'Kantor Pusat Yayasan WIJNA',
       address: 'Jl. Tebet Timur Dalam Raya No. 42, Jakarta Selatan',
-      latitude: -6.2297,
-      longitude: 106.8532,
+      latitude: -7.342604,
+      longitude: 110.489848,
       radiusMeters: 5,
       standardDailyHours: 8,
     },
@@ -179,6 +179,7 @@ export async function loadDatabaseFromMysql(
     programBudgets: kvMap['programBudgets'] || {},
     participantDatabase: parseRowList(participantRows),
     attendanceSystem,
+    cleanResetPrj3581V1: Boolean(kvMap['cleanResetPrj3581V1']),
   };
 }
 
@@ -643,6 +644,7 @@ export async function saveDatabaseToMysql(
       approvalNotifications: data.approvalNotifications || [],
       programBudgets: data.programBudgets || {},
       attendanceSystem: data.attendanceSystem || {},
+      cleanResetPrj3581V1: Boolean(data.cleanResetPrj3581V1),
     };
 
     for (const [k, v] of Object.entries(kvEntries)) {

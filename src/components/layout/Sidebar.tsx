@@ -164,7 +164,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'programs' as NavTab,
-      label: 'Our Impact',
+      label: 'Our Intervention',
       icon: Layers,
       show: true,
     },

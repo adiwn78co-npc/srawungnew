@@ -59,27 +59,27 @@ export const RACI_ROLE_GUIDE: {
   responsibility: string;
 }[] = [
   {
-    role: 'R – Responsible',
+    role: 'Responsible (Pelaksana)',
     responsibility:
       'Pelaksana kegiatan, membuat ToR, mengelola Monitoring Tools, mengumpulkan bukti, dan melaporkan hasil.',
   },
   {
-    role: 'A1 – Accountable Program',
+    role: 'Accountable Program (Penanggung Jawab Program)',
     responsibility:
       'Bertanggung jawab atas kualitas, pencapaian Output, arahan, dan persetujuan hasil program.',
   },
   {
-    role: 'A2 – Accountable Finance',
+    role: 'Accountable Finance (Penanggung Jawab Keuangan)',
     responsibility:
       'Bertanggung jawab atas anggaran, realisasi pengeluaran, bukti transaksi, dan kepatuhan keuangan.',
   },
   {
-    role: 'C – Consulted',
+    role: 'Consulted (Konsultasi Teknis)',
     responsibility:
       'Pihak yang memberikan masukan, konsultasi, dan pertimbangan teknis.',
   },
   {
-    role: 'I – Informed',
+    role: 'Informed (Penerima Informasi)',
     responsibility:
       'Pihak yang menerima informasi perkembangan dan hasil kegiatan.',
   },
@@ -595,15 +595,15 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
         outcomeId: output.outcomeId,
         responsibleUserId: '',
         responsibleUserName: '',
-        accountableUserId: financeManagerUser?.id || '',
-        accountableUserName: financeManagerUser?.name || 'Ratna Kusuma, S.E.',
+        accountableUserId: '',
+        accountableUserName: '',
         consultedUsers: [],
         informedUsers: [],
         status: 'Menunggu Program Manager',
         updatedAt: '',
       };
     },
-    [raciMap, outcomes, financeManagerUser]
+    [raciMap, outcomes]
   );
 
   // Build effective RACI audit history entries per Output (including fallback from existing fields)
@@ -684,17 +684,21 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     );
   }, [outputs, outcomes, selectedProgramId, getOutputRaciAuditList]);
 
-  // Helper to build Accountable names list (always includes Finance Manager automatically)
+  // Helper to build Accountable names list
   const getAccountableNamesList = useCallback(
     (raci: OutputRaciRecord): { name: string; isAutoFinance: boolean }[] => {
-      const finName = financeManagerUser?.name || 'Ratna Kusuma, S.E.';
       const primaryName = (raci.accountableUserName || '').trim();
+      const finName = (raci.accountableFinanceUserName || '').trim();
       const list: { name: string; isAutoFinance: boolean }[] = [];
 
       if (primaryName && primaryName.toLowerCase() !== finName.toLowerCase()) {
         list.push({ name: primaryName, isAutoFinance: false });
       }
-      list.push({ name: finName, isAutoFinance: true });
+      if (finName) {
+        list.push({ name: finName, isAutoFinance: true });
+      } else if (primaryName && financeManagerUser?.name && primaryName.toLowerCase() !== financeManagerUser.name.toLowerCase()) {
+        list.push({ name: financeManagerUser.name, isAutoFinance: true });
+      }
       return list;
     },
     [financeManagerUser]
@@ -734,22 +738,22 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     (isProgramManager || isAdmin || Boolean(currentUser?.permissions?.canManagePrograms));
   const canApproveRaci = isCurrentAccountActive && isDirector;
 
-  // Determine user's R / A1 / A2 assignment role on an Output
+  // Determine user's Responsible / Accountable assignment role on an Output
   const getUserRaciRoleForOutput = useCallback(
-    (output: Output): 'R – Responsible' | 'A1 – Accountable Program' | 'A2 – Accountable Finance' | null => {
+    (output: Output): 'Responsible' | 'Accountable Program' | 'Accountable Finance' | null => {
       if (!currentUser || currentUser.isActive === false) return null;
       const raci = getOutputRaci(output);
       if (raci.responsibleUserId === currentUser.id) {
-        return 'R – Responsible';
+        return 'Responsible';
       }
       if (raci.accountableUserId === currentUser.id && raci.accountableUserId !== '') {
-        return 'A1 – Accountable Program';
+        return 'Accountable Program';
       }
       if (
         currentUser.role === 'finance' ||
         (currentUser.roleTitle || '').toLowerCase().includes('finance')
       ) {
-        return 'A2 – Accountable Finance';
+        return 'Accountable Finance';
       }
       return null;
     },
@@ -2071,46 +2075,56 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                           </div>
                         )}
 
-                        {/* Section 2: "Tiket Tugas Kepercayaan" — Proportional & Professional RACI Ticket Container */}
+                        {/* Section 2: RACI Assignment Matrix — Professional Mission Ticket Design */}
                         <div className="relative rounded-xl border border-[#DFDDD7] bg-gradient-to-br from-[#FFFFFF] via-[#FDFCFB] to-[#F8F7F3] shadow-[0_2px_10px_-4px_rgba(28,25,23,0.08)] overflow-hidden">
-                          {/* Left Accent Bar based on RACI status */}
+                          {/* Ticket Left Accent Status Bar */}
                           <div
-                            className={`absolute inset-y-0 left-0 w-1.5 ${
+                            className={`absolute left-0 top-0 bottom-0 w-1.5 ${
                               raci.status === 'Aktif'
-                                ? 'bg-gradient-to-b from-emerald-600 to-teal-700'
+                                ? 'bg-gradient-to-b from-emerald-600 via-teal-600 to-emerald-700'
                                 : raci.status === 'Menunggu Persetujuan Direktur'
-                                ? 'bg-gradient-to-b from-amber-500 to-orange-600'
-                                : 'bg-gradient-to-b from-stone-500 to-stone-700'
+                                ? 'bg-gradient-to-b from-amber-500 via-orange-500 to-amber-600'
+                                : 'bg-gradient-to-b from-stone-400 to-stone-500'
                             }`}
                           />
 
-                          {/* Decorative Side Ticket Notches at the Perforation Line */}
+                          {/* Subtle Ticket Side Perforation Notches */}
                           <div
                             aria-hidden="true"
-                            className="hidden sm:block absolute left-0 top-[42px] -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white border border-[#DFDDD7] z-10"
+                            className="hidden sm:block absolute -left-2 top-[38px] w-3.5 h-3.5 rounded-full bg-white border border-[#DFDDD7] shadow-inner pointer-events-none"
                           />
                           <div
                             aria-hidden="true"
-                            className="hidden sm:block absolute right-0 top-[42px] translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white border border-[#DFDDD7] z-10"
+                            className="hidden sm:block absolute -right-2 top-[38px] w-3.5 h-3.5 rounded-full bg-white border border-[#DFDDD7] shadow-inner pointer-events-none"
                           />
 
-                          {/* Ticket Header Stub: "Tiket Tugas Kepercayaan" */}
+                          {/* Top Ticket Header Stub */}
                           <div className="pl-5 pr-4 py-2.5 bg-[#F6F5F0] border-b border-dashed border-[#D6D3CD] flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#2F3437] text-white text-[10px] font-mono font-semibold tracking-wider uppercase shadow-2xs">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-300" />
-                                TIKET TUGAS #{String(outputIdx + 1).padStart(2, '0')}
+                            <div className="flex items-center gap-2.5 flex-wrap">
+                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#2F3437] text-[#F7F6F2] text-[10px] font-mono font-bold tracking-widest uppercase shadow-2xs">
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${
+                                    raci.status === 'Aktif'
+                                      ? 'bg-emerald-400'
+                                      : raci.status === 'Menunggu Persetujuan Direktur'
+                                      ? 'bg-amber-400'
+                                      : 'bg-stone-400'
+                                  }`}
+                                />
+                                TIKET MISI #{String(outputIdx + 1).padStart(2, '0')}
                               </span>
-                              <span className="text-xs font-semibold text-[#2F3437] tracking-tight">
-                                Penugasan yang Dipercayakan
-                              </span>
-                              <span className="text-[#C7C4BC]" aria-hidden="true">·</span>
-                              <span className="text-[11.5px] text-[#6B6A65] font-medium">
-                                Matriks Peran &amp; Tanggung Jawab (RACI)
-                              </span>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-bold text-[#2F3437] tracking-tight">
+                                  Penugasan yang Dipercayakan
+                                </span>
+                                <span className="text-[11px] text-[#787774] hidden sm:inline">·</span>
+                                <span className="text-[11px] font-medium text-[#6B6A65]">
+                                  Matriks Peran &amp; Tanggung Jawab (RACI)
+                                </span>
+                              </div>
                               {myRaciRole && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50/90 border border-emerald-200/90 text-[10.5px] font-semibold text-emerald-800">
-                                  Amanah Anda: {myRaciRole}
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200/90 text-[10.5px] font-bold text-emerald-800 shadow-2xs">
+                                  ★ Mandat Anda: {myRaciRole}
                                 </span>
                               )}
                               {raci.directorNotes && raci.status !== 'Aktif' && (
@@ -2121,7 +2135,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                             </div>
 
                             <div className="flex items-center gap-2">
-                              <span className="hidden md:inline-block font-mono text-[10px] tracking-widest uppercase text-[#8A8881]">
+                              <span className="hidden md:inline-block text-[10px] font-mono text-[#8A8881] tracking-wider uppercase">
                                 MANDAT-{output.id.slice(-4).toUpperCase()}
                               </span>
                               {(() => {
@@ -2136,14 +2150,11 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                         [output.id]: !prev[output.id],
                                       }))
                                     }
-                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[#DCD9D0] bg-white hover:bg-[#FAF9F6] text-[11px] font-medium text-[#4A4945] transition-colors cursor-pointer shadow-2xs"
+                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[#DCD9D0] bg-white hover:bg-[#FAF9F6] text-[10.5px] font-semibold text-[#4A4945] transition-colors cursor-pointer shadow-2xs"
                                     title="Tampilkan atau sembunyikan riwayat audit RACI Output ini"
                                   >
                                     <History className="w-3 h-3 text-[#787774]" />
                                     <span>Riwayat Audit ({outputAuditList.length})</span>
-                                    <span className="text-[10px] font-mono text-[#8A8881]">
-                                      {isAuditOpen ? 'Hide' : 'Show'}
-                                    </span>
                                   </button>
                                 );
                               })()}
@@ -2151,7 +2162,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                           </div>
 
                           {expandedOutputRaciAuditMap[output.id] && (
-                            <div className="pl-5 pr-4 py-2.5 bg-[#FAF9F5] border-b border-dashed border-[#DFDDD7] space-y-1.5">
+                            <div className="pl-5 pr-4 py-2.5 bg-[#FAF9F6] border-b border-dashed border-[#DFDDD7] space-y-1.5">
                               {getOutputRaciAuditList(output).length === 0 ? (
                                 <div className="text-[11px] text-[#787774]">
                                   Belum ada riwayat audit pada Output ini.
@@ -2160,7 +2171,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                 getOutputRaciAuditList(output).map((aud) => (
                                   <div
                                     key={aud.id}
-                                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] bg-white px-2.5 py-1.5 rounded border border-[#E6E5E2]"
+                                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] bg-white px-2.5 py-1.5 rounded border border-[#E9E9E7]"
                                   >
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span
@@ -2169,7 +2180,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                             ? 'bg-amber-50 text-amber-800 border border-amber-200'
                                             : aud.status === 'Aktif'
                                             ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                            : 'bg-stone-100 text-stone-700 border border-stone-200'
+                                            : 'bg-stone-100 text-stone-700'
                                         }`}
                                       >
                                         {aud.action}
@@ -2195,25 +2206,22 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                             </div>
                           )}
 
-                          {/* 5-Column Ticket Body & Right Verification Stub */}
+                          {/* 5-Column Mission Ticket Body (English on top, Indonesian directly below, no R/A/C/I letter boxes) */}
                           <div className="pl-1.5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 divide-y sm:divide-y-0 lg:divide-x divide-[#EAE8E1]">
-                            {/* Column 1: R – Responsible */}
+                            {/* Column 1: Responsible / Pelaksana */}
                             <div
                               className="p-3.5 space-y-2 hover:bg-[#FAF9F5]/60 transition-colors"
-                              title="R – Responsible: Pelaksana kegiatan, membuat ToR, mengelola Monitoring Tools, mengumpulkan bukti, dan melaporkan hasil."
+                              title="Responsible (Pelaksana): Pelaksana kegiatan, membuat ToR, mengelola Monitoring Tools, mengumpulkan bukti, dan melaporkan hasil."
                             >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F3437]">
-                                  <span className="w-5 h-5 rounded-md bg-blue-50 border border-blue-200/80 text-blue-800 font-mono text-[10.5px] font-bold inline-flex items-center justify-center">
-                                    R
-                                  </span>
-                                  <span>Responsible</span>
-                                </span>
-                                <span className="text-[10.5px] font-medium text-[#8A8881]">
+                              <div className="border-b border-[#EAE8E1]/80 pb-1.5">
+                                <div className="text-xs font-bold text-[#2F3437] leading-tight">
+                                  Responsible
+                                </div>
+                                <div className="text-[11px] font-medium text-[#8A8881] leading-tight mt-0.5">
                                   Pelaksana
-                                </span>
+                                </div>
                               </div>
-                              <div className="text-xs font-semibold text-[#2F3437] leading-snug break-words pt-0.5 flex flex-wrap items-center gap-1.5">
+                              <div className="text-xs font-semibold text-[#2F3437] leading-snug break-words flex flex-wrap items-center gap-1.5">
                                 <span>{raci.responsibleUserName || '-'}</span>
                                 {raci.responsibleUserId &&
                                   users.some(
@@ -2226,23 +2234,20 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                               </div>
                             </div>
 
-                            {/* Column 2: A – Accountable (A1 Program & A2 Finance) */}
+                            {/* Column 2: Accountable / Penanggung Jawab */}
                             <div
                               className="p-3.5 space-y-2 hover:bg-[#FAF9F5]/60 transition-colors"
-                              title="A1 – Accountable Program: Bertanggung jawab atas kualitas, pencapaian Output, arahan, dan persetujuan hasil program. | A2 – Accountable Finance: Bertanggung jawab atas anggaran, realisasi pengeluaran, bukti transaksi, dan kepatuhan keuangan."
+                              title="Accountable (Penanggung Jawab): Bertanggung jawab atas kualitas pencapaian Output program dan kepatuhan keuangan."
                             >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F3437]">
-                                  <span className="w-5 h-5 rounded-md bg-amber-50 border border-amber-200/80 text-amber-900 font-mono text-[10.5px] font-bold inline-flex items-center justify-center">
-                                    A
-                                  </span>
-                                  <span>Accountable</span>
-                                </span>
-                                <span className="text-[10.5px] font-medium text-[#8A8881]">
+                              <div className="border-b border-[#EAE8E1]/80 pb-1.5">
+                                <div className="text-xs font-bold text-[#2F3437] leading-tight">
+                                  Accountable
+                                </div>
+                                <div className="text-[11px] font-medium text-[#8A8881] leading-tight mt-0.5">
                                   Penanggung Jawab
-                                </span>
+                                </div>
                               </div>
-                              <div className="space-y-1.5 text-xs leading-snug pt-0.5">
+                              <div className="space-y-1.5 text-xs leading-snug">
                                 {getAccountableNamesList(raci).map((acc, idx) => {
                                   const isA1Inactive =
                                     !acc.isAutoFinance &&
@@ -2254,11 +2259,6 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                     <div
                                       key={idx}
                                       className="flex items-baseline justify-between gap-2"
-                                      title={
-                                        acc.isAutoFinance
-                                          ? 'A2 – Accountable Finance: Bertanggung jawab atas anggaran, realisasi pengeluaran, bukti transaksi, dan kepatuhan keuangan.'
-                                          : 'A1 – Accountable Program: Bertanggung jawab atas kualitas, pencapaian Output, arahan, dan persetujuan hasil program.'
-                                      }
                                     >
                                       <span className="font-semibold text-[#2F3437] break-words">
                                         {acc.name}
@@ -2268,8 +2268,8 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                           </span>
                                         )}
                                       </span>
-                                      <span className="px-1.5 py-0.2 rounded bg-[#F3F2EE] border border-[#E5E3DC] text-[10px] font-mono text-[#6B6A65] shrink-0">
-                                        {acc.isAutoFinance ? 'A2 · Finance' : 'A1 · Program'}
+                                      <span className="text-[10.5px] text-[#787774] shrink-0">
+                                        {acc.isAutoFinance ? 'Finance' : 'Program'}
                                       </span>
                                     </div>
                                   );
@@ -2277,24 +2277,21 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                               </div>
                             </div>
 
-                            {/* Column 3: C – Consulted */}
+                            {/* Column 3: Consulted / Konsultasi Teknis */}
                             <div
                               className="p-3.5 space-y-2 hover:bg-[#FAF9F5]/60 transition-colors"
-                              title="C – Consulted: Pihak yang memberikan masukan, konsultasi, dan pertimbangan teknis."
+                              title="Consulted (Konsultasi Teknis): Pihak yang memberikan masukan, konsultasi, dan pertimbangan teknis."
                             >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F3437]">
-                                  <span className="w-5 h-5 rounded-md bg-purple-50 border border-purple-200/80 text-purple-800 font-mono text-[10.5px] font-bold inline-flex items-center justify-center">
-                                    C
-                                  </span>
-                                  <span>Consulted</span>
-                                </span>
-                                <span className="text-[10.5px] font-medium text-[#8A8881]">
+                              <div className="border-b border-[#EAE8E1]/80 pb-1.5">
+                                <div className="text-xs font-bold text-[#2F3437] leading-tight">
+                                  Consulted
+                                </div>
+                                <div className="text-[11px] font-medium text-[#8A8881] leading-tight mt-0.5">
                                   Konsultasi Teknis
-                                </span>
+                                </div>
                               </div>
                               {raci.consultedUsers && raci.consultedUsers.length > 0 ? (
-                                <div className="space-y-1 text-xs leading-snug pt-0.5">
+                                <div className="space-y-1 text-xs leading-snug">
                                   {raci.consultedUsers.map((person, idx) => {
                                     const isRealUser = isRegisteredUserName(person);
                                     return (
@@ -2302,10 +2299,10 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                         key={idx}
                                         className="flex items-baseline justify-between gap-2"
                                       >
-                                        <span className="text-[#37352F] font-medium break-words">
+                                        <span className="text-[#2F3437] font-medium break-words">
                                           {person}
                                         </span>
-                                        <span className="text-[10.5px] text-[#8A8881] shrink-0">
+                                        <span className="text-[10.5px] text-[#787774] shrink-0">
                                           {isRealUser ? 'Internal' : 'Eksternal'}
                                         </span>
                                       </div>
@@ -2313,28 +2310,25 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                   })}
                                 </div>
                               ) : (
-                                <div className="text-xs text-[#9B9A97] pt-0.5">-</div>
+                                <div className="text-xs text-[#A8A29E]">-</div>
                               )}
                             </div>
 
-                            {/* Column 4: I – Informed */}
+                            {/* Column 4: Informed / Penerima Informasi */}
                             <div
                               className="p-3.5 space-y-2 hover:bg-[#FAF9F5]/60 transition-colors"
-                              title="I – Informed: Pihak yang menerima informasi perkembangan dan hasil kegiatan."
+                              title="Informed (Penerima Informasi): Pihak yang menerima informasi perkembangan dan hasil kegiatan."
                             >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F3437]">
-                                  <span className="w-5 h-5 rounded-md bg-stone-100 border border-stone-200/90 text-stone-700 font-mono text-[10.5px] font-bold inline-flex items-center justify-center">
-                                    I
-                                  </span>
-                                  <span>Informed</span>
-                                </span>
-                                <span className="text-[10.5px] font-medium text-[#8A8881]">
+                              <div className="border-b border-[#EAE8E1]/80 pb-1.5">
+                                <div className="text-xs font-bold text-[#2F3437] leading-tight">
+                                  Informed
+                                </div>
+                                <div className="text-[11px] font-medium text-[#8A8881] leading-tight mt-0.5">
                                   Penerima Informasi
-                                </span>
+                                </div>
                               </div>
                               {raci.informedUsers && raci.informedUsers.length > 0 ? (
-                                <div className="space-y-1 text-xs leading-snug pt-0.5">
+                                <div className="space-y-1 text-xs leading-snug">
                                   {raci.informedUsers.map((person, idx) => {
                                     const isRealUser = isRegisteredUserName(person);
                                     return (
@@ -2342,10 +2336,10 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                         key={idx}
                                         className="flex items-baseline justify-between gap-2"
                                       >
-                                        <span className="text-[#37352F] font-medium break-words">
+                                        <span className="text-[#2F3437] font-medium break-words">
                                           {person}
                                         </span>
-                                        <span className="text-[10.5px] text-[#8A8881] shrink-0">
+                                        <span className="text-[10.5px] text-[#787774] shrink-0">
                                           {isRealUser ? 'Internal' : 'Eksternal'}
                                         </span>
                                       </div>
@@ -2353,37 +2347,37 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                   })}
                                 </div>
                               ) : (
-                                <div className="text-xs text-[#9B9A97] pt-0.5">-</div>
+                                <div className="text-xs text-[#A8A29E]">-</div>
                               )}
                             </div>
 
-                            {/* Column 5: Ticket Validation Stub — Ringkasan Approval Terbaru */}
+                            {/* Column 5: Ticket Validation Stub (Approval Summary / Ringkasan Persetujuan) */}
                             {(() => {
                               const latestAudit = getOutputRaciAuditList(output)[0];
                               const isPendingDir = raci.status === 'Menunggu Persetujuan Direktur';
                               const isNeedPm = raci.status === 'Menunggu Program Manager';
                               const hasRevision = Boolean(raci.directorNotes && raci.status !== 'Aktif');
                               return (
-                                <div className="p-3.5 space-y-1.5 bg-[#F6F5F0]/85 lg:border-l lg:border-dashed lg:border-[#D5D2CA] flex flex-col justify-between">
+                                <div className="p-3.5 space-y-2 bg-[#F6F5F0]/85 lg:border-l lg:border-dashed lg:border-[#D5D2CA] flex flex-col justify-between">
                                   <div className="space-y-1.5">
-                                    <div className="flex items-baseline justify-between gap-2">
-                                      <span className="text-xs font-semibold text-[#2F3437]">
-                                        Ringkasan Approval
-                                      </span>
-                                      <span className="text-[10px] font-mono uppercase tracking-wider text-[#8A8881]">
-                                        Validasi Tiket
-                                      </span>
+                                    <div className="border-b border-[#DFDDD7] pb-1.5">
+                                      <div className="text-xs font-bold text-[#2F3437] leading-tight">
+                                        Approval Summary
+                                      </div>
+                                      <div className="text-[11px] font-medium text-[#8A8881] leading-tight mt-0.5">
+                                        Ringkasan Persetujuan
+                                      </div>
                                     </div>
                                     <div className="pt-0.5">
                                       <span
-                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-semibold ${
+                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10.5px] font-semibold ${
                                           isPendingDir
                                             ? 'bg-amber-50 text-amber-800 border-amber-200'
                                             : hasRevision
                                             ? 'bg-rose-50 text-rose-800 border-rose-200'
                                             : isNeedPm
                                             ? 'bg-stone-100 text-stone-700 border-stone-200'
-                                            : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                            : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
                                         }`}
                                       >
                                         <span
@@ -2647,10 +2641,11 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
               {renderRaciGuideTable()}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* R - Responsible */}
+                {/* Responsible */}
                 <div>
-                  <label className="block font-semibold text-stone-800 mb-1">
-                    R (Responsible) *
+                  <label className="block mb-1">
+                    <span className="block font-bold text-stone-900">Responsible *</span>
+                    <span className="block text-[11px] text-stone-500">Pelaksana</span>
                   </label>
                   <select
                     value={draftResponsibleId}
@@ -2676,10 +2671,11 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                   </select>
                 </div>
 
-                {/* A - Accountable */}
+                {/* Accountable */}
                 <div>
-                  <label className="block font-semibold text-stone-800 mb-1">
-                    A (Accountable) *
+                  <label className="block mb-1">
+                    <span className="block font-bold text-stone-900">Accountable *</span>
+                    <span className="block text-[11px] text-stone-500">Penanggung Jawab</span>
                   </label>
                   <select
                     value={draftAccountableId}
@@ -2709,11 +2705,12 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                 </div>
               </div>
 
-              {/* C - Consulted */}
+              {/* Consulted */}
               <div className="p-3.5 rounded-md border border-stone-200 bg-[#FAF9F6] space-y-2.5">
-                <label className="block font-semibold text-stone-800">
-                  C (Consulted)
-                </label>
+                <div>
+                  <div className="font-bold text-stone-900">Consulted</div>
+                  <div className="text-[11px] text-stone-500">Konsultasi Teknis</div>
+                </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {/* Kolom User Terdaftar */}
@@ -2809,11 +2806,12 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                 </div>
               </div>
 
-              {/* I - Informed */}
+              {/* Informed */}
               <div className="p-3.5 rounded-md border border-stone-200 bg-[#FAF9F6] space-y-2.5">
-                <label className="block font-semibold text-stone-800">
-                  I (Informed)
-                </label>
+                <div>
+                  <div className="font-bold text-stone-900">Informed</div>
+                  <div className="text-[11px] text-stone-500">Penerima Informasi</div>
+                </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {/* Kolom User Terdaftar */}

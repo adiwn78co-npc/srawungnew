@@ -269,6 +269,18 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(tor),
     }),
+  updateTorBudgetEstimate: (
+    id: string,
+    payload: {
+      action: 'finance_determine' | 'a2_update' | 'director_acc';
+      budgetRequested?: number;
+      budgetNotes?: string;
+    }
+  ) =>
+    request<Tor>(`/api/tors/${id}/budget-estimate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   submitTor: (id: string, comment?: string) =>
     request<{ message: string; submissionStatus: string }>(`/api/tors/${id}/submit`, {
       method: 'POST',
@@ -293,6 +305,10 @@ export const api = {
     request<{ message: string; tor: Tor }>(`/api/tors/${id}/review-edit-request`, {
       method: 'POST',
       body: JSON.stringify({ decision, comment }),
+    }),
+  deleteTor: (id: string) =>
+    request<{ message: string; id: string }>(`/api/tors/${id}`, {
+      method: 'DELETE',
     }),
   updateDocument: (docId: string, data: { title?: string; summary?: string; content?: string }) =>
     request<any>(`/api/documents/${docId}`, {
@@ -622,6 +638,7 @@ export const api = {
     latitude: number;
     longitude: number;
     outsideReason?: string;
+    allowOutsideWithHrApproval?: boolean;
     workItems: { category: WijnaWorkCategory; shortDescription: string }[];
   }) =>
     request<{ record: DailyAttendanceTimesheetRecord; bundle: AttendanceSystemBundle }>(
@@ -629,6 +646,14 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+      }
+    ),
+  resetTodayAttendance: (payload?: { date?: string }) =>
+    request<{ bundle: AttendanceSystemBundle }>(
+      '/api/attendance-system/reset-today',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
       }
     ),
   updateDailyTimesheet: (payload: {

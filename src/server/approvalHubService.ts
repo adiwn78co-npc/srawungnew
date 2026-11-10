@@ -454,8 +454,10 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       delete draft.approvalHubItems[existingKey];
     }
   }
-  draft.approvalNotifications = (draft.approvalNotifications || []).filter((n) =>
-    Boolean(draft.approvalHubItems?.[n.approvalItemId])
+  draft.approvalNotifications = (draft.approvalNotifications || []).filter(
+    (n) =>
+      Boolean(draft.approvalHubItems?.[n.approvalItemId]) ||
+      Boolean(n.approvalItemId?.startsWith('raci-'))
   );
 
   // 1. Sync Terms of Reference (ToR) -> R -> A1 -> Direktur (Pelaporan)
@@ -1598,14 +1600,26 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         });
       }
     }
-  } else {
-    for (const notif of draft.approvalNotifications) {
-      notif.message = sanitizeNotifMessage(notif.message);
-      if (notif.documentTitle) {
-        notif.documentTitle = cleanTitleForNotif(notif.documentTitle);
-      }
-    }
   }
+  // Deduplicate notifications so the same document & event never appear twice
+  const seenNotifKeys = new Set<string>();
+  const dedupedNotifications = [];
+  for (const notif of draft.approvalNotifications || []) {
+    notif.message = sanitizeNotifMessage(notif.message);
+    if (notif.documentTitle) {
+      notif.documentTitle = cleanTitleForNotif(notif.documentTitle);
+    }
+    const normTargets = [...(notif.targetUserIds || [])].sort().join(',');
+    const dedupeKey = `${notif.approvalItemId}|${notif.eventType}|${normTargets}|${notif.message}`;
+    const initKey = `${notif.approvalItemId}|${notif.eventType}|${normTargets}`;
+    if (seenNotifKeys.has(dedupeKey) || (notif.eventType === 'ENTER_VERIFICATION' && seenNotifKeys.has(initKey))) {
+      continue;
+    }
+    seenNotifKeys.add(dedupeKey);
+    seenNotifKeys.add(initKey);
+    dedupedNotifications.push(notif);
+  }
+  draft.approvalNotifications = dedupedNotifications;
 
   const sortedItems = allItems.sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
@@ -2679,9 +2693,17 @@ export function executeApprovalHubAction(params: {
     }
   }
 
-  // Record notification if applicable
+  // Record notification if applicable (removing any duplicate for the same item & eventType)
   if (notifMessage) {
     if (!draft.approvalNotifications) draft.approvalNotifications = [];
+    draft.approvalNotifications = draft.approvalNotifications.filter(
+      (n) =>
+        !(
+          n.approvalItemId === item.id &&
+          (n.id === `notif-init-${item.id}` ||
+            (n.eventType === notifType && n.message === notifMessage))
+        )
+    );
     draft.approvalNotifications.unshift({
       id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       approvalItemId: item.id,

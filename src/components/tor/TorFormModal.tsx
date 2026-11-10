@@ -396,8 +396,60 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     editingTor ? editingTor.title : EXAMPLE_TITLE
   );
   const [budgetRequestedInput, setBudgetRequestedInput] = useState<number | string>(() =>
-    editingTor?.budgetRequested != null ? editingTor.budgetRequested : EXAMPLE_BUDGET
+    editingTor?.budgetApproved != null
+      ? editingTor.budgetApproved
+      : editingTor?.budgetRequested != null
+      ? editingTor.budgetRequested
+      : EXAMPLE_BUDGET
   );
+  const [budgetApprovalStatus, setBudgetApprovalStatus] = useState<
+    'Menunggu Penentuan Finance' | 'Menunggu ACC Direktur' | 'Disetujui Direktur'
+  >(() => editingTor?.budgetApprovalStatus || 'Menunggu ACC Direktur');
+  const [budgetDeterminedByFinanceName, setBudgetDeterminedByFinanceName] = useState<string>(
+    () => editingTor?.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.'
+  );
+  const [budgetDeterminedByFinanceAt, setBudgetDeterminedByFinanceAt] = useState<string>(
+    () => editingTor?.budgetDeterminedByFinanceAt || new Date().toISOString()
+  );
+  const [budgetUpdatedByA2Name, setBudgetUpdatedByA2Name] = useState<string>(
+    () => editingTor?.budgetUpdatedByA2Name || ''
+  );
+  const [budgetUpdatedByA2At, setBudgetUpdatedByA2At] = useState<string>(
+    () => editingTor?.budgetUpdatedByA2At || ''
+  );
+  const [budgetApprovedByDirectorName, setBudgetApprovedByDirectorName] = useState<string>(
+    () => editingTor?.budgetApprovedByDirectorName || ''
+  );
+  const [budgetApprovedByDirectorAt, setBudgetApprovedByDirectorAt] = useState<string>(
+    () => editingTor?.budgetApprovedByDirectorAt || ''
+  );
+  const [budgetAuditLogs, setBudgetAuditLogs] = useState<
+    Array<{
+      id: string;
+      timestamp: string;
+      actorName: string;
+      actorRole: string;
+      actionLabel: string;
+      amount: number;
+      status: string;
+    }>
+  >(() =>
+    editingTor?.budgetAuditLogs && editingTor.budgetAuditLogs.length > 0
+      ? editingTor.budgetAuditLogs
+      : [
+          {
+            id: 'bgt-init-1',
+            timestamp: editingTor?.createdAt || new Date().toISOString(),
+            actorName: editingTor?.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
+            actorRole: 'Finance / A2',
+            actionLabel: 'Penentuan Estimasi Budget Awal ToR oleh Finance',
+            amount: Number(editingTor?.budgetRequested ?? EXAMPLE_BUDGET),
+            status: editingTor?.budgetApprovalStatus || 'Menunggu ACC Direktur',
+          },
+        ]
+  );
+  const [budgetStatusNotice, setBudgetStatusNotice] = useState<string | null>(null);
+  const [showBudgetAuditInModal, setShowBudgetAuditInModal] = useState<boolean>(false);
   const [isExampleCleared, setIsExampleCleared] = useState<boolean>(false);
 
   // RACI Records per Output (Loaded from MEAL Connect)
@@ -553,6 +605,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   );
 
   const [budgetStorageTick, setBudgetStorageTick] = useState<number>(0);
+  const [reportedCaTotalForModal, setReportedCaTotalForModal] = useState<number>(0);
 
   useEffect(() => {
     let mounted = true;
@@ -565,10 +618,22 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         }
       })
       .catch(() => {});
+    if (editingTor?.id) {
+      api
+        .getCashAdvances({ torId: editingTor.id })
+        .then((caList) => {
+          if (!mounted || !Array.isArray(caList)) return;
+          const sumReported = caList
+            .filter((c) => Boolean(c.isReported) && c.status !== 'Ditolak')
+            .reduce((s, c) => s + (Number(c.realizedAmount ?? c.totalAmount) || 0), 0);
+          setReportedCaTotalForModal(sumReported);
+        })
+        .catch(() => {});
+    }
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [editingTor?.id]);
 
   const [showTimePeriodCorner, setShowTimePeriodCorner] = useState<boolean>(true);
 
@@ -1862,12 +1927,21 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         reportingDeadline: effectiveDeadline,
         additionalNotes: additionalNotes.trim() || undefined,
         implementingTeam: implementingTeamNames,
-        budgetRequested:
+        budgetRequested: editingTor?.budgetRequested ?? 0,
+        budgetApproved:
           budgetRequestedInput !== '' &&
           budgetRequestedInput != null &&
           !isNaN(Number(budgetRequestedInput))
             ? Number(budgetRequestedInput)
-            : 0,
+            : editingTor?.budgetApproved ?? 0,
+        budgetApprovalStatus,
+        budgetDeterminedByFinanceName,
+        budgetDeterminedByFinanceAt,
+        budgetUpdatedByA2Name: budgetUpdatedByA2Name || undefined,
+        budgetUpdatedByA2At: budgetUpdatedByA2At || undefined,
+        budgetApprovedByDirectorName: budgetApprovedByDirectorName || undefined,
+        budgetApprovedByDirectorAt: budgetApprovedByDirectorAt || undefined,
+        budgetAuditLogs,
         organizerPersonInCharge: dynamicOrganizerSummary,
       };
 
@@ -1884,7 +1958,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         onClose();
       } else {
         const newTor = await api.createTor(payload);
-        if (submitImmediately) {
+        if (submitImmediately && newTor.submissionStatus === 'Draft') {
           await api.submitTor(newTor.id);
         }
         onSuccess(newTor.id);
@@ -2214,19 +2288,243 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     </select>
                   </div>
 
-                  {/* Estimasi Anggaran (Budget Request) */}
-                  <div>
-                    <label className="block text-stone-700 font-medium mb-1">
-                      Estimasi Kebutuhan Anggaran (IDR)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={budgetRequestedInput}
-                      onChange={(e) => setBudgetRequestedInput(e.target.value)}
-                      placeholder="Contoh: 15000000"
-                      className="w-full h-8 px-2.5 bg-white hover:bg-stone-50/50 focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 font-mono transition-colors focus:outline-none"
-                    />
+                  {/* Estimasi Anggaran (Budget Request): Ditentukan Finance, Diupdate A2, Di-ACC Direktur */}
+                  <div className="sm:col-span-2 bg-stone-50/80 border border-stone-200 rounded-md p-3 space-y-2">
+                    {(() => {
+                      const activeOutputRaci = outputRaciMap[outputId];
+                      const isFinanceOrA2User =
+                        currentUser?.role === 'finance' ||
+                        (currentUser?.roleTitle || '').toLowerCase().includes('finance') ||
+                        activeOutputRaci?.accountableFinanceUserId === currentUser?.id;
+                      const isDirectorUser =
+                        currentUser?.role === 'director' ||
+                        (currentUser?.roleTitle || '').toLowerCase().includes('director') ||
+                        (currentUser?.roleTitle || '').toLowerCase().includes('direktur');
+                      const canEditBudgetField = isFinanceOrA2User || isDirectorUser;
+                      const numericVal =
+                        budgetRequestedInput !== '' &&
+                        budgetRequestedInput != null &&
+                        !isNaN(Number(budgetRequestedInput))
+                          ? Number(budgetRequestedInput)
+                          : 0;
+
+                      const handleA2OrFinanceUpdateBudget = async () => {
+                        const nowIso = new Date().toISOString();
+                        const actorName =
+                          isFinanceOrA2User && currentUser?.name
+                            ? currentUser.name
+                            : activeOutputRaci?.accountableFinanceUserName || 'Ratna Kusuma, S.E.';
+                        const newLog = {
+                          id: `bgt-log-${Date.now()}`,
+                          timestamp: nowIso,
+                          actorName,
+                          actorRole: 'A2 – Accountable Finance',
+                          actionLabel: `Update Estimasi Budget ToR oleh A2 / Finance (Rp ${numericVal.toLocaleString('id-ID')}) — Menunggu ACC Direktur`,
+                          amount: numericVal,
+                          status: 'Menunggu ACC Direktur',
+                        };
+                        setBudgetApprovalStatus('Menunggu ACC Direktur');
+                        setBudgetDeterminedByFinanceName(
+                          budgetDeterminedByFinanceName || actorName
+                        );
+                        setBudgetDeterminedByFinanceAt(budgetDeterminedByFinanceAt || nowIso);
+                        setBudgetUpdatedByA2Name(actorName);
+                        setBudgetUpdatedByA2At(nowIso);
+                        setBudgetAuditLogs((prev) => [newLog, ...prev]);
+                        setBudgetStatusNotice(
+                          `Estimasi Kebutuhan Anggaran (Rp ${numericVal.toLocaleString('id-ID')}) berhasil di-update oleh A2 / Finance (${actorName}). Menunggu ACC Direktur.`
+                        );
+                        if (editingTor?.id) {
+                          try {
+                            await api.updateTorBudgetEstimate(editingTor.id, {
+                              action: 'a2_update',
+                              budgetRequested: numericVal,
+                            });
+                          } catch {
+                            // saved on form submit if offline
+                          }
+                        }
+                      };
+
+                      const handleDirectorAccBudget = async () => {
+                        const nowIso = new Date().toISOString();
+                        const actorName =
+                          isDirectorUser && currentUser?.name
+                            ? currentUser.name
+                            : 'Dr. Hendra Wijaya';
+                        const newLog = {
+                          id: `bgt-log-${Date.now()}`,
+                          timestamp: nowIso,
+                          actorName,
+                          actorRole: 'Executive Director',
+                          actionLabel: `ACC Estimasi Budget ToR oleh Direktur (Rp ${numericVal.toLocaleString('id-ID')})`,
+                          amount: numericVal,
+                          status: 'Disetujui Direktur',
+                        };
+                        setBudgetApprovalStatus('Disetujui Direktur');
+                        setBudgetApprovedByDirectorName(actorName);
+                        setBudgetApprovedByDirectorAt(nowIso);
+                        setBudgetAuditLogs((prev) => [newLog, ...prev]);
+                        setBudgetStatusNotice(
+                          `Estimasi Kebutuhan Anggaran (Rp ${numericVal.toLocaleString('id-ID')}) telah di-ACC oleh Direktur (${actorName}).`
+                        );
+                        if (editingTor?.id) {
+                          try {
+                            await api.updateTorBudgetEstimate(editingTor.id, {
+                              action: 'director_acc',
+                              budgetRequested: numericVal,
+                            });
+                          } catch {
+                            // saved on form submit if offline
+                          }
+                        }
+                      };
+
+                      const remainingModalBudget = numericVal - reportedCaTotalForModal;
+
+                      return (
+                        <div className="space-y-1.5">
+                          {budgetApprovalStatus === 'Disetujui Direktur' && !isFinanceOrA2User ? (
+                            <div className="flex flex-wrap items-center justify-between gap-2 bg-[#F0FAF6] border border-[#B8E6D4] rounded-md px-3 py-1.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-semibold text-[#0F4C3A]">
+                                  Budget yang disetujui untuk ini adalah :
+                                </span>
+                                <span className="font-mono text-sm font-bold text-[#16654E]">
+                                  Rp {numericVal.toLocaleString('id-ID')}
+                                </span>
+                                <span className="text-[#CBD5E1]">·</span>
+                                <span className="text-xs font-semibold text-[#0F4C3A]">
+                                  Sisa Budget :
+                                </span>
+                                <span className="font-mono text-sm font-bold text-[#0F7B6C]">
+                                  Rp {remainingModalBudget.toLocaleString('id-ID')}
+                                </span>
+                              </div>
+                              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-white border border-[#B8E6D4] text-[#16654E]">
+                                ✓ Di-ACC Direktur
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap items-center justify-between gap-2 bg-[#F0FAF6]/70 border border-[#B8E6D4] rounded-md px-3 py-1.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-semibold text-[#0F4C3A]">
+                                  Budget yang disetujui untuk ini adalah :
+                                </span>
+                                <span className="font-mono text-sm font-bold text-[#16654E]">
+                                  Rp {numericVal.toLocaleString('id-ID')}
+                                </span>
+                                <span className="text-[#CBD5E1]">·</span>
+                                <span className="text-xs font-semibold text-[#0F4C3A]">
+                                  Sisa Budget :
+                                </span>
+                                <span className="font-mono text-sm font-bold text-[#0F7B6C]">
+                                  Rp {remainingModalBudget.toLocaleString('id-ID')}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                    budgetApprovalStatus === 'Disetujui Direktur'
+                                      ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                      : 'bg-amber-50 border-amber-300 text-amber-900'
+                                  }`}
+                                >
+                                  {budgetApprovalStatus === 'Disetujui Direktur'
+                                    ? '✓ Di-ACC Direktur'
+                                    : 'Menunggu ACC Direktur'}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {(isFinanceOrA2User ||
+                                  (isDirectorUser &&
+                                    budgetApprovalStatus !== 'Disetujui Direktur')) && (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={budgetRequestedInput}
+                                    onChange={(e) => {
+                                      setBudgetRequestedInput(e.target.value);
+                                      if (budgetApprovalStatus === 'Disetujui Direktur') {
+                                        setBudgetApprovalStatus('Menunggu ACC Direktur');
+                                      }
+                                    }}
+                                    placeholder="0"
+                                    className="w-36 h-7 px-2 border border-stone-300 bg-white rounded font-mono text-xs font-semibold text-stone-900 focus:outline-none focus:border-blue-600"
+                                  />
+                                )}
+
+                                {isFinanceOrA2User && (
+                                  <button
+                                    type="button"
+                                    onClick={handleA2OrFinanceUpdateBudget}
+                                    className="h-7 px-2.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+                                  >
+                                    Update Finance
+                                  </button>
+                                )}
+
+                                {isDirectorUser &&
+                                  budgetApprovalStatus !== 'Disetujui Direktur' && (
+                                    <button
+                                      type="button"
+                                      onClick={handleDirectorAccBudget}
+                                      className="h-7 px-2.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+                                    >
+                                      ACC Direktur
+                                    </button>
+                                  )}
+
+                                {isFinanceOrA2User && budgetAuditLogs.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowBudgetAuditInModal((p) => !p)}
+                                    className="h-7 px-2 rounded border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 text-[10.5px] font-medium transition-colors cursor-pointer"
+                                  >
+                                    Audit ({budgetAuditLogs.length})
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {budgetStatusNotice && isFinanceOrA2User && (
+                            <div className="text-[11px] text-emerald-900 bg-emerald-50 border border-emerald-200 rounded px-2.5 py-1 flex items-center justify-between gap-2">
+                              <span>{budgetStatusNotice}</span>
+                              <button
+                                type="button"
+                                onClick={() => setBudgetStatusNotice(null)}
+                                className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+                              >
+                                ×
+                              </button>
+                            </div>
+                          )}
+
+                          {showBudgetAuditInModal && isFinanceOrA2User && (
+                            <div className="border border-stone-200 rounded bg-white divide-y divide-stone-100 max-h-28 overflow-y-auto text-[10.5px]">
+                              {budgetAuditLogs.map((log) => (
+                                <div
+                                  key={log.id}
+                                  className="px-2 py-1 flex items-center justify-between gap-2"
+                                >
+                                  <span className="text-stone-700 truncate">
+                                    <strong>{log.actorName}</strong>: {log.actionLabel}
+                                  </span>
+                                  <span className="font-mono text-[10px] text-stone-500 shrink-0">
+                                    {new Date(log.timestamp).toLocaleString('id-ID', {
+                                      day: '2-digit',
+                                      month: 'short',
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                    })}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -2569,10 +2867,9 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                         Budget request USD/IDR
                       </td>
                       <td className="p-2.5 font-semibold text-stone-900 font-mono">
-                        {budgetRequestedInput !== '' &&
-                        budgetRequestedInput != null &&
-                        !isNaN(Number(budgetRequestedInput))
-                          ? `Rp ${Number(budgetRequestedInput).toLocaleString('id-ID')}`
+                        {editingTor?.budgetRequested != null &&
+                        !isNaN(Number(editingTor.budgetRequested))
+                          ? `Rp ${Number(editingTor.budgetRequested).toLocaleString('id-ID')}`
                           : 'Rp 0'}
                       </td>
                     </tr>

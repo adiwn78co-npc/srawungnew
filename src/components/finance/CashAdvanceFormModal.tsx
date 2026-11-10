@@ -19,6 +19,11 @@ import {
   Lock,
   RefreshCw,
   Zap,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  Edit3,
+  Download,
 } from 'lucide-react';
 import {
   Tor,
@@ -43,6 +48,7 @@ import { angkaKeTerbilangRupiah, formatRupiah } from '../../lib/terbilang.js';
 import { api } from '../../lib/api.js';
 import { getOrganizationSettings } from '../../lib/organizationSettings.js';
 import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
+import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
 
 interface CashAdvanceFormModalProps {
   isOpen: boolean;
@@ -458,8 +464,9 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
     return torTimelineItems.map((t) => t.id);
   });
 
-  // 7-Day Reporting Commitment Option
+  // 7-Day Reporting Commitment Option (Otomatis centang sesuai SOP)
   const [reportingCommitmentConfirmed, setReportingCommitmentConfirmed] = useState<boolean>(true);
+  const [showHierarchyInfo, setShowHierarchyInfo] = useState<boolean>(false);
   const [existingTorAdvances, setExistingTorAdvances] = useState<CashAdvanceRecord[]>([]);
 
   // Nomor Kasbon otomatis: persis sama seperti nama TOR namun dengan awalan CA
@@ -549,6 +556,24 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [previewPrint, setPreviewPrint] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const formPrintSheetRef = React.useRef<HTMLElement>(null);
+
+  const handleDownloadFormPreviewPdf = async () => {
+    if (!formPrintSheetRef.current) return;
+    setIsDownloadingPdf(true);
+    try {
+      await downloadElementAsPdf({
+        element: formPrintSheetRef.current,
+        filename: `Cash_Advance_${advanceNumber || 'Draft'}`,
+        paperFormat: 'a4',
+        orientation: 'portrait',
+        marginMm: 8,
+      });
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  };
 
   // Unreported Cash Advances count for this TOR (excluding current editing record and rejected ones)
   const unreportedAdvances = existingTorAdvances.filter(
@@ -1048,7 +1073,7 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
       aria-modal="true"
       className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto animate-in fade-in duration-150"
     >
-      <div className="bg-white rounded-lg border border-[#EDEDEC] shadow-2xl max-w-6xl w-full max-h-[96vh] flex flex-col overflow-hidden my-auto">
+      <div className="bg-white rounded-lg border border-[#EDEDEC] shadow-2xl max-w-[96vw] xl:max-w-[1440px] w-full max-h-[96vh] flex flex-col overflow-hidden my-auto">
         {/* ================= MODAL TOP ACTION BAR ================= */}
         <div className="px-6 py-3.5 border-b border-[#EDEDEC] bg-[#FAFAF9] flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -1077,13 +1102,24 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
               onClick={() => setPreviewPrint(!previewPrint)}
               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border transition-colors cursor-pointer ${
                 previewPrint
-                  ? 'bg-blue-50 text-[#1D4ED8] border-blue-200'
+                  ? 'bg-stone-900 text-white border-stone-900 hover:bg-stone-800'
                   : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
               }`}
             >
-              <Printer className="w-3.5 h-3.5" />
-              <span>{previewPrint ? 'Kembali ke Editor' : 'Pratinjau Cetak Resmi'}</span>
+              {previewPrint ? <Edit3 className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              <span>{previewPrint ? 'Kembali ke Form' : 'Preview Dokumen'}</span>
             </button>
+            {previewPrint && (
+              <button
+                type="button"
+                disabled={isDownloadingPdf}
+                onClick={handleDownloadFormPreviewPdf}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-[#1E3A8A] hover:bg-[#1E40AF] text-white transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isDownloadingPdf ? 'Mengunduh PDF...' : 'Download PDF'}</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -1126,6 +1162,310 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
         )}
 
         {/* ================= MODAL CONTENT (DOCUMENT SURFACE) ================= */}
+        {previewPrint ? (
+          <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-[#F7F7F5]">
+            <article
+              ref={formPrintSheetRef}
+              className="tor-formal-print-sheet bg-white rounded border border-slate-300 px-8 py-8 sm:px-14 sm:py-12 shadow-xs space-y-5 text-[14px] leading-[1.38] text-black max-w-4xl mx-auto"
+              style={{ fontFamily: '"Times New Roman", Times, Georgia, serif' }}
+            >
+              <div className="text-center pb-1">
+                <h1 className="text-[18px] font-bold text-black tracking-normal leading-snug uppercase">
+                  FORMULIR PENGAJUAN CASH ADVANCE (UANG MUKA KEGIATAN)
+                </h1>
+                <div className="text-[15px] font-bold text-black mt-0.5 leading-snug">
+                  {selectedTor?.title || '-'}
+                </div>
+              </div>
+
+              <section>
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  1. Informasi Pengajuan &amp; Referensi Kegiatan (Cash Advance Information)
+                </div>
+                <table className="w-full text-left border-collapse border border-black text-[13.5px]">
+                  <tbody>
+                    <tr>
+                      <td className="py-1.5 px-2.5 w-[28%] border border-black font-bold align-top">
+                        Organisasi / Lembaga
+                      </td>
+                      <td className="py-1.5 px-2.5 w-[72%] border border-black align-top" colSpan={3}>
+                        {organizationName}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 w-[28%] border border-black font-bold align-top">
+                        Nomor Cash Advance
+                      </td>
+                      <td className="py-1.5 px-2.5 w-[25%] border border-black font-bold align-top">
+                        {advanceNumber || '-'}
+                      </td>
+                      <td className="py-1.5 px-2.5 w-[22%] border border-black font-bold align-top">
+                        Tanggal Pengajuan
+                      </td>
+                      <td className="py-1.5 px-2.5 w-[25%] border border-black align-top">
+                        {requestDate}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Referensi Nomor TOR
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {selectedTor?.torNumber || '-'}
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Program
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {selectedTor?.programName || '-'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Judul Kegiatan
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top" colSpan={3}>
+                        {selectedTor?.title || '-'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Periode Pelaksanaan
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {selectedTor ? `${selectedTor.startDate} s/d ${selectedTor.endDate}` : '-'}
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Lokasi Kegiatan
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {location || '-'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Nama Pemohon (PIC)
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {requesterName} ({requesterRole})
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Divisi / Unit Kerja
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top">
+                        {department}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Rekening Penerima Dana
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top" colSpan={3}>
+                        <strong>{bankName}</strong> — No. Rekening: <strong>{bankAccountNumber}</strong> a.n.{' '}
+                        <strong>{bankAccountHolder}</strong>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                        Komitmen Pelaporan (H+7)
+                      </td>
+                      <td className="py-1.5 px-2.5 border border-black align-top" colSpan={3}>
+                        Dilaporkan paling lambat 7 (tujuh) hari setelah pengajuan dana — Batas Lapor:{' '}
+                        <strong>{reportingDeadlineDate}</strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+
+              <section>
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  2. Rincian Kebutuhan Anggaran Kasbon (Budget Breakdown)
+                </div>
+                <table className="w-full text-left border-collapse border border-black text-[13px]">
+                  <thead>
+                    <tr className="bg-[#EFEFEF] text-black font-bold">
+                      <th className="py-1.5 px-2 w-[6%] text-center border border-black">No</th>
+                      <th className="py-1.5 px-2 w-[14%] text-left border border-black">Kode</th>
+                      <th className="py-1.5 px-2.5 w-[34%] border border-black">
+                        Deskripsi / Uraian Kebutuhan
+                      </th>
+                      <th className="py-1.5 px-2 w-[14%] text-center border border-black">
+                        Vol / Satuan
+                      </th>
+                      <th className="py-1.5 px-2 w-[15%] text-right border border-black">
+                        Harga Satuan (Rp)
+                      </th>
+                      <th className="py-1.5 px-2 w-[17%] text-right border border-black">
+                        Total (Rp)
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((it, idx) => (
+                      <tr key={it.id || idx} className="align-top">
+                        <td className="py-1.5 px-2 text-center border border-black">{idx + 1}</td>
+                        <td className="py-1.5 px-2 text-left font-bold border border-black">
+                          {it.budgetCode || '-'}
+                        </td>
+                        <td className="py-1.5 px-2.5 border border-black">
+                          <div>{it.description || '-'}</div>
+                          {(it.timelineActivity || it.timelinePeriod) && (
+                            <div className="text-[11.5px] italic mt-0.5">
+                              Tahap: {it.timelineActivity || it.timelinePeriod}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-center border border-black">
+                          {it.volume} {it.unit || 'Unit'} × {it.frequency || 1} {it.frequencyUnit || 'Kali'}
+                        </td>
+                        <td className="py-1.5 px-2 text-right border border-black">
+                          {formatRupiah(it.unitPrice)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right font-bold border border-black">
+                          {formatRupiah(it.totalAmount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#EFEFEF] font-bold text-black">
+                      <td colSpan={5} className="py-1.5 px-2.5 text-right border border-black uppercase">
+                        Total Pengajuan Cash Advance
+                      </td>
+                      <td className="py-1.5 px-2 text-right border border-black">
+                        {formatRupiah(grandTotal)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={6} className="py-1.5 px-2.5 border border-black italic text-[13px]">
+                        <strong>Terbilang:</strong> &ldquo;{amountInWords}&rdquo;
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </section>
+
+              <section className="pt-2">
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  3. Otorisasi &amp; Persetujuan Dokumen (Signatures &amp; Verification)
+                </div>
+                <table className="w-full text-center border-collapse border border-black text-[13px]">
+                  <thead>
+                    <tr className="bg-[#EFEFEF] font-bold">
+                      <th className="py-1.5 px-2 w-1/4 border border-black">1. Diajukan Oleh</th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">2. Diperiksa Oleh</th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">3. Disetujui Oleh</th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">4. Dicairkan Oleh</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="align-top">
+                      <td className="py-2.5 px-2 border border-black">
+                        <div className="my-1.5 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            compact
+                            documentNumber={advanceNumber || 'CA-DRAFT'}
+                            roleCode="PIC"
+                            signerName={requesterName}
+                            signDate={requestDate}
+                            statusLabel="TELAH DIAJUKAN"
+                          />
+                        </div>
+                        <div className="font-bold underline">{requesterName}</div>
+                        <div className="text-[11.5px]">{requesterRole}</div>
+                      </td>
+                      <td className="py-2.5 px-2 border border-black">
+                        <div className="my-1.5 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            compact
+                            variant={
+                              existingRecord?.signatures?.verifiedBy?.status === 'Terverifikasi'
+                                ? 'authorized'
+                                : 'pending'
+                            }
+                            documentNumber={advanceNumber || 'CA'}
+                            roleCode="FIN"
+                            signerName={
+                              existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'
+                            }
+                            signDate={existingRecord?.signatures?.verifiedBy?.date || requestDate}
+                            statusLabel={
+                              existingRecord?.signatures?.verifiedBy?.status || 'MENUNGGU VERIFIKASI'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'}
+                        </div>
+                        <div className="text-[11.5px]">Finance Specialist</div>
+                      </td>
+                      <td className="py-2.5 px-2 border border-black">
+                        <div className="my-1.5 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            compact
+                            variant={
+                              existingRecord?.signatures?.approvedBy?.status === 'Disetujui'
+                                ? 'authorized'
+                                : 'pending'
+                            }
+                            documentNumber={advanceNumber || 'CA'}
+                            roleCode="DIR"
+                            signerName={
+                              existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'
+                            }
+                            signDate={existingRecord?.signatures?.approvedBy?.date || requestDate}
+                            statusLabel={
+                              existingRecord?.signatures?.approvedBy?.status || 'MENUNGGU APPROVAL'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'}
+                        </div>
+                        <div className="text-[11.5px]">Executive Director</div>
+                      </td>
+                      <td className="py-2.5 px-2 border border-black">
+                        <div className="my-1.5 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            compact
+                            variant={
+                              existingRecord?.signatures?.disbursedBy?.isDisbursed
+                                ? 'authorized'
+                                : 'pending'
+                            }
+                            documentNumber={advanceNumber || 'CA'}
+                            roleCode="CSH"
+                            signerName={existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                            signDate={existingRecord?.signatures?.disbursedBy?.date || requestDate}
+                            statusLabel={
+                              existingRecord?.signatures?.disbursedBy?.isDisbursed
+                                ? 'TELAH DICAIRKAN'
+                                : 'BELUM DICAIRKAN'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                        </div>
+                        <div className="text-[11.5px]">Kasir / Finance Officer</div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+            </article>
+          </div>
+        ) : (
         <div className="p-6 overflow-y-auto flex-1 space-y-6 text-[#2F3437] bg-white">
           {/* ================= HEADER SECTION: NGO OFFICIAL DOCUMENT BANNER ================= */}
           <div className="border border-[#1E3A8A]/30 rounded-t-lg bg-white overflow-hidden shadow-2xs">
@@ -1188,72 +1528,106 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                         </option>
                       ))}
                     </select>
-                    {selectedTor && (
-                      <div className="mt-1.5 space-y-1.5">
-                        <div className="flex items-center justify-between text-[10.5px] text-slate-500">
-                          <div className="flex items-center gap-2">
-                            <span>Anggaran TOR:</span>
-                            <strong className="text-emerald-700 font-mono font-bold">
-                              {formatRupiah(selectedTor.budgetRequested || selectedTor.budgetApproved || 0)}
-                            </strong>
-                            <span className="text-slate-300">•</span>
-                            <span className="capitalize">{selectedTor.submissionStatus}</span>
-                          </div>
-                        </div>
-
-                        {/* Program -> Outcome -> Output -> Activity -> ToR -> Finance Code / Cash Advance Code */}
-                        <div className="p-2.5 rounded border border-blue-200 bg-blue-50/40 text-[10.5px] space-y-1.5">
-                          <div className="font-mono font-bold text-[#1E3A8A] uppercase tracking-wider text-[9.5px]">
-                            Program → Outcome → Output → Activity → ToR → Finance Code / Cash Advance Code
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 text-slate-700">
-                            <div>
-                              <span className="text-slate-500">Program:</span>{' '}
-                              <strong className="text-slate-900">{selectedTor.programName || '-'}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Outcome:</span>{' '}
-                              <strong className="text-slate-900">{selectedTor.outcomeName || '-'}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Output:</span>{' '}
-                              <strong className="text-slate-900">{selectedTor.outputName || '-'}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Activity:</span>{' '}
-                              <strong className="text-slate-900">{selectedTor.activityName || '-'}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Kode ToR / Activity:</span>{' '}
+                    {selectedTor && (() => {
+                      const approvedTorBudget = Number(
+                        selectedTor.budgetApproved ?? selectedTor.budgetRequested ?? 0
+                      );
+                      const reportedCaTotal = existingTorAdvances
+                        .filter((c) => Boolean(c.isReported) && c.status !== 'Ditolak')
+                        .reduce(
+                          (sum, c) => sum + (Number(c.realizedAmount ?? c.totalAmount) || 0),
+                          0
+                        );
+                      const remainingTorBudget = approvedTorBudget - reportedCaTotal;
+                      return (
+                        <div className="mt-1.5 space-y-1.5">
+                          {/* Compact Bar with Hide & Show Toggle for Hierarchy & Finance Code */}
+                          <div className="px-2.5 py-1.5 rounded border border-blue-200 bg-blue-50/50 flex flex-wrap items-center justify-between gap-2 text-[10.5px]">
+                            <div className="flex flex-wrap items-center gap-1.5 text-slate-600">
+                              <span>Anggaran TOR (Sisa):</span>
+                              <strong className="text-emerald-700 font-mono font-bold">
+                                {formatRupiah(remainingTorBudget)}
+                              </strong>
+                              <span className="text-slate-300">•</span>
+                              <span>Kode:</span>
                               <strong className="font-mono text-[#1E3A8A]">
                                 {selectedTor.activityCode || selectedTor.hierarchyCode || '-'}
                               </strong>
+                              <span className="text-slate-300">•</span>
+                              <span className="font-mono font-semibold text-[#1E3A8A]">
+                                {programBudgetCodes.length} Kode Finance
+                              </span>
                             </div>
-                            <div>
-                              <span className="text-slate-500">Budget Period & Pagu FY {caFiscalYear}:</span>{' '}
-                              <strong className="font-mono text-slate-900">
-                                {matchedBudgetPeriod ? matchedBudgetPeriod.code : '-'} •{' '}
-                                {programBudgetDataset && programBudgetDataset.annualApprovedBudget > 0
-                                  ? formatRupiah(programBudgetDataset.annualApprovedBudget)
-                                  : 'Belum Diisi'}
-                              </strong>
+                          <button
+                            type="button"
+                            onClick={() => setShowHierarchyInfo((prev) => !prev)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white hover:bg-blue-100/70 text-[#1E3A8A] border border-blue-200 font-semibold text-[10px] transition-colors cursor-pointer shrink-0"
+                          >
+                            <span>{showHierarchyInfo ? 'Sembunyikan Hirarki' : 'Lihat Hirarki & Kode'}</span>
+                            {showHierarchyInfo ? (
+                              <ChevronUp className="w-3 h-3" />
+                            ) : (
+                              <ChevronDown className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Collapsible Program -> Outcome -> Output -> Activity -> ToR -> Finance Code / Cash Advance Code */}
+                        {showHierarchyInfo && (
+                          <div className="p-2.5 rounded border border-blue-200 bg-blue-50/40 text-[10.5px] space-y-1.5 animate-in fade-in duration-150">
+                            <div className="font-mono font-bold text-[#1E3A8A] uppercase tracking-wider text-[9.5px]">
+                              Program → Outcome → Output → Activity → ToR → Finance Code / Cash Advance Code
                             </div>
-                            <div className="sm:col-span-2 pt-1 border-t border-blue-200/60">
-                              <span className="text-slate-500">
-                                Kode Finance Terdaftar Eksklusif Program Ini:
-                              </span>{' '}
-                              <strong className="font-mono text-[#1E3A8A]">
-                                {programBudgetCodes.length > 0
-                                  ? `${programBudgetCodes.length} Kode (${programBudgetCodes
-                                      .map((c) => c.code)
-                                      .join(', ')})`
-                                  : 'Belum ada Budget Code pada Program ini'}
-                              </strong>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 text-slate-700">
+                              <div>
+                                <span className="text-slate-500">Program:</span>{' '}
+                                <strong className="text-slate-900">{selectedTor.programName || '-'}</strong>
+                              </div>
+                              <div>
+                                <span className="text-slate-500">Outcome:</span>{' '}
+                                <strong className="text-slate-900">{selectedTor.outcomeName || '-'}</strong>
+                              </div>
+                              <div>
+                                <span className="text-slate-500">Output:</span>{' '}
+                                <strong className="text-slate-900">{selectedTor.outputName || '-'}</strong>
+                              </div>
+                              <div>
+                                <span className="text-slate-500">Activity:</span>{' '}
+                                <strong className="text-slate-900">{selectedTor.activityName || '-'}</strong>
+                              </div>
+                              <div>
+                                <span className="text-slate-500">Kode ToR / Activity:</span>{' '}
+                                <strong className="font-mono text-[#1E3A8A]">
+                                  {selectedTor.activityCode || selectedTor.hierarchyCode || '-'}
+                                </strong>
+                              </div>
+                              <div>
+                                <span className="text-slate-500">Budget Period &amp; Pagu FY {caFiscalYear}:</span>{' '}
+                                <strong className="font-mono text-slate-900">
+                                  {matchedBudgetPeriod ? matchedBudgetPeriod.code : '-'} •{' '}
+                                  {programBudgetDataset && programBudgetDataset.annualApprovedBudget > 0
+                                    ? formatRupiah(programBudgetDataset.annualApprovedBudget)
+                                    : 'Belum Diisi'}
+                                </strong>
+                              </div>
+                              <div className="sm:col-span-2 pt-1 border-t border-blue-200/60">
+                                <span className="text-slate-500">
+                                  Kode Finance Terdaftar Eksklusif Program Ini:
+                                </span>{' '}
+                                <strong className="font-mono text-[#1E3A8A]">
+                                  {programBudgetCodes.length > 0
+                                    ? `${programBudgetCodes.length} Kode (${programBudgetCodes
+                                        .map((c) => c.code)
+                                        .join(', ')})`
+                                    : 'Belum ada Budget Code pada Program ini'}
+                                </strong>
+                              </div>
                             </div>
                           </div>
-                        </div>
+                        )}
                       </div>
-                    )}
+                    );
+                    })()}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
@@ -1409,14 +1783,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Pilihan Pelaporan Paling Lambat 7 Hari Setelah Pengajuan Dana */}
+                  {/* Pilihan Pelaporan Paling Lambat 7 Hari Setelah Pengajuan Dana (Otomatis Centang) */}
                   <div className="p-3 bg-amber-50/90 border border-amber-300 rounded-md space-y-1.5">
-                    <label className="flex items-start gap-2 cursor-pointer">
+                    <label className="flex items-start gap-2 select-none">
                       <input
                         type="checkbox"
-                        checked={reportingCommitmentConfirmed}
-                        onChange={(e) => setReportingCommitmentConfirmed(e.target.checked)}
-                        className="mt-0.5 rounded border-amber-400 text-[#1E3A8A] focus:ring-[#1E3A8A]"
+                        checked={true}
+                        readOnly
+                        onChange={() => setReportingCommitmentConfirmed(true)}
+                        className="mt-0.5 rounded border-amber-400 text-[#1D4ED8] accent-[#1D4ED8] focus:ring-[#1E3A8A] pointer-events-none"
                       />
                       <span className="text-[11.5px] font-bold text-amber-950 leading-snug">
                         Dilaporkan paling lambat 7 (tujuh) hari setelah pengajuan dana *
@@ -1586,56 +1961,58 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="bg-[#1E293B] text-white font-semibold text-[11px] uppercase tracking-wider border-b border-slate-700">
-                      <th className="py-2 px-2 w-10 text-center border-r border-slate-700">No</th>
-                      <th className="py-2 px-2 w-40 border-r border-slate-700">
+                      <th className="py-2 px-1.5 w-9 text-center border-r border-slate-700">No</th>
+                      <th className="py-2 px-2 w-48 min-w-[180px] border-r border-slate-700">
                         Tahap Implementasi
                       </th>
-                      <th className="py-2 px-2 w-24 text-center border-r border-slate-700">Kode</th>
-                      <th className="py-2 px-3 min-w-[240px] border-r border-slate-700">
+                      <th className="py-2 px-2.5 w-80 min-w-[310px] text-left border-r border-slate-700">
+                        Kode &amp; Kategori Budget
+                      </th>
+                      <th className="py-2 px-3 min-w-[280px] border-r border-slate-700">
                         Deskripsi / Uraian Kebutuhan *
                       </th>
-                      <th className="py-2 px-1.5 w-16 text-center border-r border-slate-700">VOLUME</th>
-                      <th className="py-2 px-1.5 w-20 text-center border-r border-slate-700">SATUAN</th>
-                      <th className="py-2 px-1.5 w-16 text-center border-r border-slate-700">FREK.</th>
-                      <th className="py-2 px-1.5 w-20 text-center border-r border-slate-700">SATUAN</th>
-                      <th className="py-2 px-2.5 w-28 text-right border-r border-slate-700">
+                      <th className="py-2 px-1 w-14 text-center border-r border-slate-700">VOL</th>
+                      <th className="py-2 px-1 w-16 text-center border-r border-slate-700">SATUAN</th>
+                      <th className="py-2 px-1 w-14 text-center border-r border-slate-700">FREK</th>
+                      <th className="py-2 px-1 w-16 text-center border-r border-slate-700">SATUAN</th>
+                      <th className="py-2 px-2 w-28 text-right border-r border-slate-700">
                         Biaya Satuan (Rp)
                       </th>
-                      <th className="py-2 px-2.5 w-28 text-right border-r border-slate-700">
+                      <th className="py-2 px-2 w-28 text-right border-r border-slate-700">
                         Total (Rp)
                       </th>
-                      <th className="py-2 px-1 w-10 text-center">Aksi</th>
+                      <th className="py-2 px-1 w-9 text-center">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 bg-white">
                     {items.map((item, idx) => (
                       <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="py-2 px-2 text-center font-mono text-slate-500 font-semibold border-r border-slate-200">
+                        <td className="py-2 px-1.5 text-center font-mono text-slate-500 font-semibold border-r border-slate-200">
                           {idx + 1}
                         </td>
 
                         {/* Aktivitas Implementasi */}
-                        <td className="py-2 px-1.5 border-r border-slate-200 w-44">
+                        <td className="py-2 px-1.5 border-r border-slate-200 w-48 min-w-[180px]">
                           <select
                             value={item.timelineItemId || torTimelineItems[0]?.id || ''}
                             onChange={(e) =>
                               handleItemChange(item.id, 'timelineItemId', e.target.value)
                             }
-                            className="w-full px-1.5 py-1 text-[11px] font-medium rounded border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:border-[#1E3A8A]"
+                            className="w-full px-2 py-1 text-[11px] font-medium rounded border border-slate-300 bg-slate-50 text-slate-800 text-left focus:outline-none focus:border-[#1E3A8A]"
                           >
                             {(implementationMode === 'all'
                               ? torTimelineItems
                               : torTimelineItems.filter((t) => selectedTimelineIds.includes(t.id))
                             ).map((tl, tlIdx) => (
-                              <option key={tl.id} value={tl.id}>
+                              <option key={tl.id} value={tl.id} className="text-left">
                                 Tahap {tlIdx + 1}: {tl.activity}
                               </option>
                             ))}
                           </select>
                         </td>
 
-                        {/* Kode Budget (Eksklusif Terhubung ke Master Budget Code Program pada ToR) */}
-                        <td className="py-2 px-1.5 border-r border-slate-200 w-32 text-center">
+                        {/* Kode Budget (Eksklusif Terhubung ke Master Budget Code Program pada ToR - Rata Kiri & Lebih Panjang) */}
+                        <td className="py-2 px-2 border-r border-slate-200 w-80 min-w-[310px] text-left">
                           <select
                             value={
                               programBudgetCodes.some(
@@ -1647,14 +2024,22 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                                 : ''
                             }
                             onChange={(e) => handleItemChange(item.id, 'budgetCode', e.target.value)}
-                            className="w-full px-1.5 py-1 text-xs font-mono font-bold rounded border border-blue-300 bg-blue-50/40 text-[#1E3A8A] text-center focus:outline-none focus:ring-1 focus:ring-[#1E3A8A]"
+                            className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded border border-blue-300 bg-blue-50/40 text-[#1E3A8A] text-left focus:outline-none focus:ring-1 focus:ring-[#1E3A8A]"
+                            style={{ textAlign: 'left', textAlignLast: 'left' }}
                             title={`Hanya menampilkan kode finance yang terdaftar pada Program: ${
                               selectedTor?.programName || '-'
                             }`}
                           >
-                            <option value="">Pilih Kode</option>
+                            <option value="" className="text-left" style={{ textAlign: 'left' }}>
+                              Pilih Kode
+                            </option>
                             {programBudgetCodes.map((mc) => (
-                              <option key={mc.id} value={mc.code}>
+                              <option
+                                key={mc.id}
+                                value={mc.code}
+                                className="text-left"
+                                style={{ textAlign: 'left' }}
+                              >
                                 {mc.code} — {mc.budgetCategory}
                               </option>
                             ))}
@@ -1662,13 +2047,13 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                         </td>
 
                         {/* Deskripsi Kebutuhan */}
-                        <td className="py-2 px-2 border-r border-slate-200 min-w-[240px]">
+                        <td className="py-2 px-2 border-r border-slate-200 min-w-[280px]">
                           <input
                             type="text"
                             value={item.description}
                             onChange={(e) => handleItemChange(item.id, 'description', e.target.value)}
                             placeholder="Pilih kode atau ketik uraian kebutuhan..."
-                            className="w-full px-2 py-1 text-xs text-slate-800 font-medium rounded border border-slate-200 focus:border-[#1E3A8A] focus:outline-none"
+                            className="w-full px-2.5 py-1.5 text-xs text-slate-800 font-medium rounded border border-slate-200 focus:border-[#1E3A8A] focus:outline-none"
                           />
                         </td>
 
@@ -1936,6 +2321,7 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
             </div>
           </div>
         </div>
+        )}
 
         {/* ================= MODAL FOOTER ACTIONS ================= */}
         <div className="px-6 py-4 border-t border-[#EDEDEC] bg-[#F7F7F5] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">

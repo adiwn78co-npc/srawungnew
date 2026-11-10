@@ -22,6 +22,7 @@ import {
   Send,
   ExternalLink,
   SlidersHorizontal,
+  Trash2,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -219,7 +220,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onNavigateToPrograms,
   onRefreshData,
 }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, isDirector } = useAuth();
+  const [confirmDeleteTorId, setConfirmDeleteTorId] = useState<string | null>(null);
+  const [deletingTorId, setDeletingTorId] = useState<string | null>(null);
 
   // Complete Filter States
   const [filterSubmissionStatus, setFilterSubmissionStatus] = useState<string>('all');
@@ -1182,6 +1185,59 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                               >
                                 {quickSubmitLoadingTorId === tor.id ? 'Mengajukan...' : 'Ajukan TOR'}
                               </button>
+                            )}
+
+                            {/* Hapus TOR (Khusus Direktur) */}
+                            {isDirector && (
+                              confirmDeleteTorId === tor.id ? (
+                                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-rose-50 border border-rose-200 text-xs">
+                                  <span className="text-rose-800 font-semibold text-[11px]">Yakin hapus TOR?</span>
+                                  <button
+                                    type="button"
+                                    disabled={deletingTorId === tor.id}
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      try {
+                                        setDeletingTorId(tor.id);
+                                        await api.deleteTor(tor.id);
+                                        setConfirmDeleteTorId(null);
+                                        onRefreshData?.();
+                                      } catch {
+                                        // ignore
+                                      } finally {
+                                        setDeletingTorId(null);
+                                      }
+                                    }}
+                                    className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-semibold text-[11px] cursor-pointer disabled:opacity-50"
+                                  >
+                                    {deletingTorId === tor.id ? 'Menghapus...' : 'Ya, Hapus'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={deletingTorId === tor.id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setConfirmDeleteTorId(null);
+                                    }}
+                                    className="px-2 py-0.5 rounded bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-medium text-[11px] cursor-pointer"
+                                  >
+                                    Batal
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDeleteTorId(tor.id);
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-50/70 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-semibold rounded-md transition-colors cursor-pointer"
+                                  title="Hanya Direktur yang dapat menghapus dokumen ToR"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Hapus TOR</span>
+                                </button>
+                              )
                             )}
 
                             {/* Buka TOR Lengkap */}

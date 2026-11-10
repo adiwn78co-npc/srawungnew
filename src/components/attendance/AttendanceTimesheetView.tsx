@@ -522,8 +522,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const [showLocationConfigModal, setShowLocationConfigModal] = useState<boolean>(false);
   const [cfgOfficeName, setCfgOfficeName] = useState<string>('');
   const [cfgAddress, setCfgAddress] = useState<string>('');
-  const [cfgLat, setCfgLat] = useState<number>(-6.2297);
-  const [cfgLon, setCfgLon] = useState<number>(106.8532);
+  const [cfgLat, setCfgLat] = useState<number>(-7.342604);
+  const [cfgLon, setCfgLon] = useState<number>(110.489848);
   const [cfgRadius, setCfgRadius] = useState<number>(5);
   const [cfgStandardHours, setCfgStandardHours] = useState<number>(8);
 
@@ -746,9 +746,15 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     );
   }, [bundle, currentUser, lockedTodayDate]);
 
-  const [userCoordLat, setUserCoordLat] = useState<number>(-6.2297);
-  const [userCoordLon, setUserCoordLon] = useState<number>(106.8532);
+  const [userCoordLat, setUserCoordLat] = useState<number>(-7.342604);
+  const [userCoordLon, setUserCoordLon] = useState<number>(110.489848);
   const [customCoordTouched, setCustomCoordTouched] = useState<boolean>(false);
+  const [hasCheckedLocation, setHasCheckedLocation] = useState<boolean>(false);
+  const [isCheckingLocation, setIsCheckingLocation] = useState<boolean>(false);
+  const [outsideClockInChoice, setOutsideClockInChoice] = useState<
+    'none' | 'cancel' | 'clock_in_with_hr'
+  >('none');
+  const [showLocationCheckPanel, setShowLocationCheckPanel] = useState<boolean>(false);
 
   // Sinkronkan titik koordinat default staf dengan titik kantor saat bundle dimuat (jika belum diubah manual)
   useEffect(() => {
@@ -790,6 +796,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       setIsWorkingOutsideArea(false);
       setOutsideReasonInput('');
       setCustomCoordTouched(false);
+      setHasCheckedLocation(false);
+      setOutsideClockInChoice('none');
       if (bundle?.locationConfig) {
         setUserCoordLat(bundle.locationConfig.latitude);
         setUserCoordLon(bundle.locationConfig.longitude);
@@ -818,8 +826,8 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   // Koordinat aktif yang akan dicek bersamaan saat tombol Clock In ditekan
   const resolvedCoords = useMemo(() => {
-    const officeLat = bundle?.locationConfig?.latitude ?? -6.2297;
-    const officeLon = bundle?.locationConfig?.longitude ?? 106.8532;
+    const officeLat = bundle?.locationConfig?.latitude ?? -7.342604;
+    const officeLon = bundle?.locationConfig?.longitude ?? 110.489848;
     if (customCoordTouched) {
       return {
         lat: Number.isFinite(userCoordLat) ? userCoordLat : officeLat,
@@ -881,7 +889,85 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     );
   };
 
-  // TOMBOL 1: CLOCK IN + CEK KOORDINAT KANTOR SECARA BERSAMAAN SAAT DIKLIK
+  const officeLatVal = bundle?.locationConfig?.latitude ?? -7.342604;
+  const officeLonVal = bundle?.locationConfig?.longitude ?? 110.489848;
+  const allowedRadiusVal = bundle?.locationConfig?.radiusMeters || 5;
+  const currentDistanceMeters = useMemo(
+    () =>
+      calculateClientDistanceMeters(
+        officeLatVal,
+        officeLonVal,
+        resolvedCoords.lat,
+        resolvedCoords.lon
+      ),
+    [calculateClientDistanceMeters, officeLatVal, officeLonVal, resolvedCoords.lat, resolvedCoords.lon]
+  );
+  const isMatchedWithOffice = hasCheckedLocation && currentDistanceMeters <= allowedRadiusVal;
+
+  const handleCheckLocationNow = useCallback(
+    async (resetIfClockedIn: boolean = false) => {
+      setErrorMsg(null);
+      setShowLocationCheckPanel(true);
+      setIsCheckingLocation(true);
+
+      if (resetIfClockedIn && Boolean(myTodayRecord?.clockInTime)) {
+        try {
+          const resetRes = await api.resetTodayAttendance({ date: lockedTodayDate });
+          setBundle(resetRes.bundle);
+          window.dispatchEvent(
+            new CustomEvent('wijna-attendance-bundle-updated', { detail: resetRes.bundle })
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      const finalizeGpsCheck = (lat: number, lon: number) => {
+        const dist = calculateClientDistanceMeters(officeLatVal, officeLonVal, lat, lon);
+        const isOutsideFlag = dist > allowedRadiusVal;
+        setUserCoordLat(lat);
+        setUserCoordLon(lon);
+        setIsWorkingOutsideArea(isOutsideFlag);
+        setCustomCoordTouched(true);
+        setHasCheckedLocation(true);
+        setIsCheckingLocation(false);
+        setOutsideClockInChoice('none');
+      };
+
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            finalizeGpsCheck(pos.coords.latitude, pos.coords.longitude);
+          },
+          () => {
+            // Jika izin GPS ditolak atau perangkat tidak berada di koordinat kantor, otomatis terdeteksi di luar koordinat kantor
+            finalizeGpsCheck(-6.8586, 107.9204);
+          },
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+        );
+        return;
+      }
+
+      finalizeGpsCheck(-6.8586, 107.9204);
+    },
+    [
+      allowedRadiusVal,
+      calculateClientDistanceMeters,
+      lockedTodayDate,
+      myTodayRecord?.clockInTime,
+      officeLatVal,
+      officeLonVal,
+    ]
+  );
+
+  // Deteksi lokasi otomatis saat halaman presensi dimuat
+  useEffect(() => {
+    if (bundle?.locationConfig && !hasCheckedLocation && !isCheckingLocation) {
+      handleCheckLocationNow(false);
+    }
+  }, [bundle?.locationConfig, hasCheckedLocation, isCheckingLocation, handleCheckLocationNow]);
+
+  // TOMBOL 1: CLOCK IN (DETEKSI KANTOR DULU; JIKA SESUAI TITIK KOORDINAT -> CLOCK IN DIBUKA; JIKA TIDAK -> SATU PILIHAN TETAP CLOCK IN DENGAN IZIN HR)
   const handleClockIn = async () => {
     setErrorMsg(null);
 
@@ -890,26 +976,35 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       return;
     }
 
-    const officeLat = bundle?.locationConfig?.latitude ?? -6.2297;
-    const officeLon = bundle?.locationConfig?.longitude ?? 106.8532;
-    const allowedRadius = bundle?.locationConfig?.radiusMeters || 5;
+    if (!hasCheckedLocation) {
+      setShowLocationCheckPanel(true);
+      setErrorMsg(
+        'Silakan Deteksi Kantor terlebih dahulu. Jika sesuai titik koordinat Kantor WIJNA, tombol Clock In akan dibuka.'
+      );
+      return;
+    }
+
+    if (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr') {
+      setShowLocationCheckPanel(true);
+      setErrorMsg(
+        'Lokasi tidak sesuai titik koordinat Kantor WIJNA. Pilih opsi "Tetap Clock In dengan Izin HR" di bawah agar Clock In dapat dilakukan dan sah setelah di-ACC HR.'
+      );
+      return;
+    }
+
     const targetLat = resolvedCoords.lat;
     const targetLon = resolvedCoords.lon;
-    const distanceMeters = calculateClientDistanceMeters(
-      officeLat,
-      officeLon,
-      targetLat,
-      targetLon
-    );
-    const isMatchedWithOffice = distanceMeters <= allowedRadius;
 
     setSubmittingAction(true);
     try {
-      // Mengecek kecocokan koordinat dan mengeksekusi Clock In secara bersamaan
       const res = await api.clockInAttendance({
         date: lockedTodayDate,
         latitude: targetLat,
         longitude: targetLon,
+        allowOutsideWithHrApproval: !isMatchedWithOffice && outsideClockInChoice === 'clock_in_with_hr',
+        outsideReason: !isMatchedWithOffice
+          ? outsideReasonInput.trim() || 'Izin HR: Clock In di luar titik koordinat Kantor WIJNA'
+          : undefined,
         workItems: contributions.slice(0, 2).map((c) => ({
           category: c.category,
           shortDescription: c.shortDescription.trim() || c.category,
@@ -920,11 +1015,15 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       window.dispatchEvent(
         new CustomEvent('wijna-attendance-bundle-updated', { detail: res.bundle })
       );
-      showToast('Clock In berhasil! Lokasi sesuai Titik Kantor.');
+      if (isMatchedWithOffice) {
+        showToast('Clock In berhasil dan SAH! Lokasi sesuai titik koordinat Kantor WIJNA.');
+      } else {
+        showToast(
+          'Clock In dengan Izin HR tercatat! Status Clock In akan SAH setelah di-ACC oleh HR.'
+        );
+      }
     } catch (err: any) {
-      const failMsg = !isMatchedWithOffice
-        ? 'Clock In ditolak: Lokasi berada di luar Titik Kantor.'
-        : err.message || 'Gagal melakukan Clock In.';
+      const failMsg = err.message || 'Gagal melakukan Clock In.';
       setErrorMsg(failMsg);
     } finally {
       setSubmittingAction(false);
@@ -2232,19 +2331,11 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                 </p>
               </div>
 
-              {/* Info Tanggal & Titik Kantor */}
+              {/* Info Tanggal */}
               <div className="flex flex-wrap items-center gap-2 text-xs shrink-0">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FAF9F6] text-[#475569] border border-[#E6E5E0] font-medium">
                   <Calendar className="w-3.5 h-3.5 text-[#64748B]" />
                   <span>{formatDateIndonesianLocked(lockedTodayDate)}</span>
-                </span>
-
-                <span
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F0FAF6] text-[#16654E] border border-[#C2EBD9] font-medium"
-                  title="Titik Kantor"
-                >
-                  <MapPin className="w-3.5 h-3.5 text-[#0F7B6C]" />
-                  <span>Titik Kantor</span>
                 </span>
               </div>
             </div>
@@ -2353,7 +2444,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
               </div>
             </div>
 
-            {/* Baris Bawah: Status Kehadiran yang Tenang & Tombol Clock In / Clock Out Besar */}
+            {/* Baris Bawah: Cek Lokasi Koordinat Kantor WIJNA + Status Kehadiran & Tombol Clock In / Clock Out */}
             {isWfaDay ? (
               <div className="p-3.5 rounded-xl bg-[#F0FAF6] border border-[#C2EBD9] flex items-center justify-between gap-2 text-xs text-[#16654E]">
                 <div className="flex items-center gap-2 font-semibold">
@@ -2365,88 +2456,271 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                 </div>
               </div>
             ) : (
-              <div className="pt-3 border-t border-[#F1F0EC] flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
-                {/* Ringkasan Kehadiran & Waktu Real-Time yang Terhubung dengan Sidebar Your Contribution */}
-                <div className="flex flex-wrap items-center justify-between sm:justify-start gap-3 sm:gap-6 bg-[#FAF9F6] px-3.5 sm:px-4 py-2.5 rounded-xl border border-[#EAE8E1] text-xs">
-                  <div>
-                    <span className="text-[11px] text-[#787774] block">
-                      {hasClockedIn ? 'Waktu Clock In' : 'Notifikasi Presensi'}
-                    </span>
-                    <span className="font-semibold text-sm text-[#1E293B] tabular-nums">
-                      {myTodayRecord?.clockInTime
-                        ? formatTimeWithSeconds(myTodayRecord.clockInTime)
-                        : 'Silakan Clock In dahulu'}
-                    </span>
-                  </div>
-                  <div className="h-6 w-px bg-[#E2E0D8]" />
-                  <div>
-                    <span className="text-[11px] text-[#787774] block">
-                      {hasClockedIn ? 'Jam Selesai' : 'Waktu Real-Time'}
-                    </span>
-                    <span className="font-mono font-semibold text-sm text-[#1E293B] tabular-nums">
-                      {myTodayRecord?.clockOutTime
-                        ? formatTimeWithSeconds(myTodayRecord.clockOutTime)
-                        : hasClockedIn
-                        ? '—'
-                        : new Date(nowMs).toLocaleTimeString('id-ID', {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: false,
-                          })}
-                    </span>
-                  </div>
-                  <div className="h-6 w-px bg-[#E2E0D8]" />
-                  <div>
-                    <span className="text-[11px] text-[#787774] block">
-                      {hasClockedIn ? 'Durasi Real-Time' : 'Status Hari Ini'}
-                    </span>
-                    <span className="font-semibold text-sm text-[#1F7A63] tabular-nums">
-                      {hasClockedOut
-                        ? `Selesai (${liveDuration.hms})`
-                        : hasClockedIn
-                        ? `Sedang Beraktivitas · ${liveDuration.hms}`
-                        : 'Belum Clock In'}
-                    </span>
+              <div className="pt-3 border-t border-[#F1F0EC] space-y-3">
+                {/* BARIS 1: DETEKSI GPS TOMBOL BESAR & INDIKATOR OTOMATIS (DI KANTOR ATAU TIDAK) */}
+                <div className="rounded-xl border border-[#EAE8E1] bg-[#FAF9F6] p-3.5 sm:p-4 text-xs space-y-3 transition-all">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="font-bold text-[#1E293B] flex flex-wrap items-center gap-2">
+                        <MapPin className="w-4 h-4 text-[#1F7A63] shrink-0" />
+                        <span>Deteksi Titik Koordinat Kantor WIJNA Sebelum Clock In</span>
+                      </div>
+                      <p className="text-[11px] text-[#64748B]">
+                        {!hasCheckedLocation
+                          ? `Klik tombol Deteksi GPS untuk mendeteksi otomatis apakah lokasi Anda berada di ${
+                              bundle?.locationConfig?.officeName || 'Kantor WIJNA'
+                            } (${officeLatVal.toFixed(4)}, ${officeLonVal.toFixed(
+                              4
+                            )} · radius ${radiusMeters}m).`
+                          : isMatchedWithOffice
+                          ? `Indikator otomatis: Lokasi Anda berada di Kantor WIJNA (${currentDistanceMeters}m). Tombol Clock In telah dibuka.`
+                          : `Indikator otomatis: Lokasi berada di luar titik koordinat Kantor WIJNA (${currentDistanceMeters}m > ${radiusMeters}m). Gunakan opsi Izin HR di bawah agar Clock In sah.`}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                      {/* Indikator Otomatis Hasil Deteksi GPS (Bukan Tombol Manual) */}
+                      <div className="inline-flex items-center rounded-xl border border-[#E2E0D8] bg-white p-1 gap-1">
+                        <div
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all select-none ${
+                            hasCheckedLocation && isMatchedWithOffice
+                              ? 'bg-[#F0FAF6] text-[#16654E] border border-[#2E9E7B]'
+                              : 'text-[#94A3B8] border border-transparent opacity-60'
+                          }`}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>Di Kantor</span>
+                        </div>
+
+                        <div
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all select-none ${
+                            hasCheckedLocation && !isMatchedWithOffice
+                              ? 'bg-[#FAF9F6] text-[#1E293B] border border-[#CBD5E1] shadow-2xs'
+                              : 'text-[#94A3B8] border border-transparent opacity-60'
+                          }`}
+                        >
+                          <MapPin className="w-3.5 h-3.5 shrink-0" />
+                          <span>Tidak Sesuai Koordinat</span>
+                        </div>
+                      </div>
+
+                      {/* Tombol Besar Deteksi GPS */}
+                      <button
+                        type="button"
+                        disabled={isCheckingLocation}
+                        onClick={() => handleCheckLocationNow(true)}
+                        className="h-11 sm:h-12 px-5 rounded-xl bg-[#1F7A63] hover:bg-[#17614E] text-white text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer whitespace-nowrap"
+                        title="Deteksi otomatis koordinat GPS dan pilih indikator lokasi secara otomatis"
+                      >
+                        <MapPin className="w-4 h-4 shrink-0" />
+                        <span>{isCheckingLocation ? 'Mendeteksi GPS...' : 'Deteksi GPS'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
-                {/* Tombol Besar Clock In (Cek Koordinat & Clock In Bersamaan) & Clock Out */}
-                <div className="grid grid-cols-2 gap-2.5 lg:w-[420px]">
-                  <button
-                    type="button"
-                    disabled={submittingAction || hasClockedIn}
-                    onClick={handleClockIn}
-                    className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
-                      hasClockedIn
-                        ? 'bg-[#F0FAF6] text-[#16654E] border border-[#B8E6D4] cursor-default'
-                        : 'bg-[#1F7A63] hover:bg-[#17614E] text-white shadow-xs cursor-pointer'
-                    }`}
-                  >
-                    <LogIn className="w-4 h-4" />
-                    <span>
-                      {hasClockedIn
-                        ? 'Sudah Clock In'
-                        : submittingAction
-                        ? 'Mengecek & Clock In...'
-                        : 'Clock In'}
-                    </span>
-                  </button>
+                {/* BARIS 2: RINGKASAN KEHADIRAN & TOMBOL TETAP "CLOCK IN" DAN "CLOCK OUT" */}
+                <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center justify-between sm:justify-start gap-3 sm:gap-6 bg-[#FAF9F6] px-3.5 sm:px-4 py-2.5 rounded-xl border border-[#EAE8E1] text-xs">
+                    <div>
+                      <span className="text-[11px] text-[#787774] block">
+                        {hasClockedIn ? 'Waktu Clock In' : 'Notifikasi Presensi'}
+                      </span>
+                      <span className="font-semibold text-sm text-[#1E293B] tabular-nums">
+                        {myTodayRecord?.clockInTime
+                          ? formatTimeWithSeconds(myTodayRecord.clockInTime)
+                          : !hasCheckedLocation
+                          ? 'Silakan Deteksi GPS dahulu'
+                          : isMatchedWithOffice
+                          ? 'Sesuai Koordinat · Siap Clock In'
+                          : outsideClockInChoice === 'clock_in_with_hr'
+                          ? 'Izin HR Dipilih · Siap Clock In'
+                          : 'Pilih Izin HR di bawah'}
+                      </span>
+                    </div>
+                    <div className="h-6 w-px bg-[#E2E0D8]" />
+                    <div>
+                      <span className="text-[11px] text-[#787774] block">
+                        {hasClockedIn ? 'Jam Selesai' : 'Waktu Real-Time'}
+                      </span>
+                      <span className="font-mono font-semibold text-sm text-[#1E293B] tabular-nums">
+                        {myTodayRecord?.clockOutTime
+                          ? formatTimeWithSeconds(myTodayRecord.clockOutTime)
+                          : hasClockedIn
+                          ? '—'
+                          : new Date(nowMs).toLocaleTimeString('id-ID', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: false,
+                            })}
+                      </span>
+                    </div>
+                    <div className="h-6 w-px bg-[#E2E0D8]" />
+                    <div>
+                      <span className="text-[11px] text-[#787774] block">
+                        {hasClockedIn ? 'Durasi Real-Time' : 'Status Hari Ini'}
+                      </span>
+                      <span className="font-semibold text-sm text-[#1F7A63] tabular-nums">
+                        {hasClockedOut
+                          ? `Selesai (${liveDuration.hms})`
+                          : hasClockedIn
+                          ? myTodayRecord?.isOutsideWorkLocation &&
+                            myTodayRecord?.outsideReviewStatus === 'PENDING_HR_REVIEW'
+                            ? `Menunggu ACC HR · ${liveDuration.hms}`
+                            : `Sedang Beraktivitas (Sah) · ${liveDuration.hms}`
+                          : 'Belum Clock In'}
+                      </span>
+                    </div>
+                  </div>
 
-                  <button
-                    type="button"
-                    disabled={submittingAction || !hasClockedIn || hasClockedOut}
-                    onClick={handleClockOut}
-                    className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
-                      !hasClockedIn || hasClockedOut
-                        ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
-                        : 'bg-[#2B5B84] hover:bg-[#214768] text-white shadow-xs cursor-pointer'
+                  {/* Tombol Besar Clock In & Clock Out (Tulisan tetap "Clock In" dan "Clock Out") */}
+                  <div className="grid grid-cols-2 gap-2.5 lg:w-[440px]">
+                    <button
+                      type="button"
+                      disabled={
+                        submittingAction ||
+                        hasClockedIn ||
+                        !hasCheckedLocation ||
+                        (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr')
+                      }
+                      onClick={handleClockIn}
+                      className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
+                        hasClockedIn
+                          ? 'bg-[#F0FAF6] text-[#16654E] border border-[#B8E6D4] cursor-default'
+                          : !hasCheckedLocation ||
+                            (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr')
+                          ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
+                          : 'bg-[#1F7A63] hover:bg-[#17614E] text-white shadow-xs cursor-pointer'
+                      }`}
+                    >
+                      <LogIn className="w-4 h-4 shrink-0" />
+                      <span>Clock In</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={submittingAction || !hasClockedIn || hasClockedOut}
+                      onClick={handleClockOut}
+                      className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
+                        !hasClockedIn || hasClockedOut
+                          ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
+                          : 'bg-[#2B5B84] hover:bg-[#214768] text-white shadow-xs cursor-pointer'
+                      }`}
+                    >
+                      <LogOut className="w-4 h-4 shrink-0" />
+                      <span>Clock Out</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* BARIS 3 (DI BAWAH): OPSI & STATUS IZIN HR DENGAN TONE DESAIN YANG SERAGAM */}
+                {hasCheckedLocation && !isMatchedWithOffice && !hasClockedIn && (
+                  <div className="rounded-xl border border-[#EAE8E1] bg-[#FAF9F6] p-3.5 text-xs space-y-2.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOutsideClockInChoice((prev) =>
+                          prev === 'clock_in_with_hr' ? 'none' : 'clock_in_with_hr'
+                        )
+                      }
+                      className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
+                        outsideClockInChoice === 'clock_in_with_hr'
+                          ? 'bg-[#F0FAF6] border-[#2E9E7B] text-[#0F4C3A]'
+                          : 'bg-white hover:bg-[#F3F4F6]/60 border-[#E6E5E0] text-[#334155]'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="font-semibold text-xs flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={outsideClockInChoice === 'clock_in_with_hr'}
+                            onChange={() => {}}
+                            className="w-3.5 h-3.5 accent-[#1F7A63] rounded cursor-pointer"
+                          />
+                          <span>
+                            Tetap Clock In dengan Izin HR (Clock In Sah Setelah Di-ACC HR)
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#64748B] pl-5.5">
+                          Aktifkan opsi ini apabila Anda bertugas di luar titik koordinat Kantor WIJNA agar tombol Clock In dapat digunakan dan diverifikasi oleh HR.
+                        </p>
+                      </div>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border ${
+                          outsideClockInChoice === 'clock_in_with_hr'
+                            ? 'bg-[#1F7A63] text-white border-[#1F7A63]'
+                            : 'bg-[#FAF9F6] text-[#64748B] border-[#E2E0D8]'
+                        }`}
+                      >
+                        {outsideClockInChoice === 'clock_in_with_hr'
+                          ? 'Aktif · Siap Clock In'
+                          : 'Pilih Opsi'}
+                      </span>
+                    </button>
+
+                    {outsideClockInChoice === 'clock_in_with_hr' && (
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 bg-white p-2.5 rounded-xl border border-[#E6E5E0]">
+                        <span className="text-[11px] font-semibold text-[#334155] shrink-0">
+                          Keterangan Izin HR:
+                        </span>
+                        <input
+                          type="text"
+                          value={outsideReasonInput}
+                          onChange={(e) => setOutsideReasonInput(e.target.value)}
+                          placeholder="Contoh: Dinas luar / rapat koordinasi mitra di lapangan..."
+                          className="flex-1 h-8 px-2.5 text-xs bg-[#FAF9F6] border border-[#E2E0D8] rounded-lg focus:outline-none focus:border-[#1F7A63]"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {hasClockedIn && myTodayRecord?.isOutsideWorkLocation && (
+                  <div
+                    className={`px-4 py-3 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-3 ${
+                      myTodayRecord.outsideReviewStatus === 'HR_REVIEWED' ||
+                      myTodayRecord.outsideReviewStatus === 'ACKNOWLEDGED_BY_FINANCE' ||
+                      myTodayRecord.outsideReviewStatus === 'REVIEWED_BY_DIRECTOR'
+                        ? 'bg-[#F0FAF6] border-[#B8E6D4] text-[#0F4C3A]'
+                        : 'bg-[#FAF9F6] border-[#EAE8E1] text-[#1E293B]'
                     }`}
                   >
-                    <LogOut className="w-4 h-4" />
-                    <span>{hasClockedOut ? 'Sudah Clock Out' : 'Clock Out'}</span>
-                  </button>
-                </div>
+                    <div className="space-y-0.5">
+                      <div className="font-semibold text-[#1E293B] flex items-center gap-2">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            myTodayRecord.outsideReviewStatus === 'HR_REVIEWED' ||
+                            myTodayRecord.outsideReviewStatus === 'ACKNOWLEDGED_BY_FINANCE' ||
+                            myTodayRecord.outsideReviewStatus === 'REVIEWED_BY_DIRECTOR'
+                              ? 'bg-[#1F7A63]'
+                              : 'bg-[#F59E0B]'
+                          }`}
+                        />
+                        <span>
+                          {myTodayRecord.outsideReviewStatus === 'HR_REVIEWED' ||
+                          myTodayRecord.outsideReviewStatus === 'ACKNOWLEDGED_BY_FINANCE' ||
+                          myTodayRecord.outsideReviewStatus === 'REVIEWED_BY_DIRECTOR'
+                            ? 'Clock In dengan Izin HR Telah Di-ACC HR (Clock In Sah)'
+                            : 'Clock In dengan Izin HR Tercatat — Menunggu ACC HR Agar Clock In Sah'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-[#64748B] pl-4">
+                        Keterangan Izin HR: {myTodayRecord.outsideLocationReason || '-'}
+                      </div>
+                    </div>
+                    {isHR && myTodayRecord.outsideReviewStatus === 'PENDING_HR_REVIEW' && (
+                      <button
+                        type="button"
+                        onClick={() => handleReviewOutsideLocation(myTodayRecord.id, 'hr', 'approve')}
+                        className="h-9 px-4 rounded-xl bg-[#1F7A63] hover:bg-[#17614E] text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer shadow-2xs transition-colors"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>ACC Izin HR (Sah)</span>
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

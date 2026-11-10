@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Users,
   Building2,
@@ -17,6 +18,8 @@ import {
   Clock,
   ChevronDown,
   ChevronUp,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -808,6 +811,348 @@ export const ParticipantDatabaseView: React.FC<ParticipantDatabaseViewProps> = (
     }
   };
 
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importingDb, setImportingDb] = useState<boolean>(false);
+
+  const handleDownloadParticipantDatabaseExcel = () => {
+    try {
+      const exportRows = records.map((rec) => {
+        const involvementsStr = getResolvedInvolvements(rec)
+          .map(
+            (inv) =>
+              `${inv.programName || inv.programId} (${
+                Array.isArray(inv.rolesInProgram) && inv.rolesInProgram.length > 0
+                  ? inv.rolesInProgram.join(', ')
+                  : inv.roleInProgram || 'Peserta'
+              })`
+          )
+          .join('; ');
+
+        if (rec.participantType === 'INDIVIDU') {
+          return {
+            'ID Peserta': rec.participantCode,
+            'Jenis Peserta': 'INDIVIDU',
+            'Nama Peserta / Kelompok': rec.fullName,
+            'Organisasi / Kategori': rec.organizationInstitution || '',
+            'Wilayah / Komunitas': rec.regionCommunity || '',
+            'Kelompok Usia': rec.ageGroup || 'Dewasa (31–59 tahun)',
+            'Jenis Kelamin': rec.gender || 'Laki-laki',
+            Disabilitas: rec.disability || 'Tidak',
+            'Keterangan Disabilitas': rec.disabilityNotes || '',
+            'Peran Komunitas / Program':
+              Array.isArray(rec.communityRoles) && rec.communityRoles.length > 0
+                ? rec.communityRoles.join(', ')
+                : rec.communityRole || 'Masyarakat Umum',
+            'Penanggung Jawab / Kontak': '',
+            'Anak Laki-laki': 0,
+            'Anak Perempuan': 0,
+            'Remaja Laki-laki': 0,
+            'Remaja Perempuan': 0,
+            'Pemuda Laki-laki': 0,
+            'Pemuda Perempuan': 0,
+            'Dewasa Laki-laki': 0,
+            'Dewasa Perempuan': 0,
+            'Lansia Laki-laki': 0,
+            'Lansia Perempuan': 0,
+            'Total Anggota': 1,
+            'Program & Peran': involvementsStr,
+          };
+        }
+
+        const comp = rec.memberComposition || createEmptyComposition();
+        const totals = getMatrixTotals(comp);
+        return {
+          'ID Peserta': rec.participantCode,
+          'Jenis Peserta': 'KELOMPOK/ORGANISASI',
+          'Nama Peserta / Kelompok': rec.groupName,
+          'Organisasi / Kategori': rec.groupCategory || 'Komunitas',
+          'Wilayah / Komunitas': rec.regionCommunity || '',
+          'Kelompok Usia': '',
+          'Jenis Kelamin': '',
+          Disabilitas: '',
+          'Keterangan Disabilitas': '',
+          'Peran Komunitas / Program':
+            Array.isArray(rec.programRoles) && rec.programRoles.length > 0
+              ? rec.programRoles.join(', ')
+              : rec.programRole || 'Peserta',
+          'Penanggung Jawab / Kontak': rec.contactPerson || '',
+          'Anak Laki-laki': Number(comp.anak?.lakiLaki) || 0,
+          'Anak Perempuan': Number(comp.anak?.perempuan) || 0,
+          'Remaja Laki-laki': Number(comp.remaja?.lakiLaki) || 0,
+          'Remaja Perempuan': Number(comp.remaja?.perempuan) || 0,
+          'Pemuda Laki-laki': Number(comp.pemuda?.lakiLaki) || 0,
+          'Pemuda Perempuan': Number(comp.pemuda?.perempuan) || 0,
+          'Dewasa Laki-laki': Number(comp.dewasa?.lakiLaki) || 0,
+          'Dewasa Perempuan': Number(comp.dewasa?.perempuan) || 0,
+          'Lansia Laki-laki': Number(comp.lansia?.lakiLaki) || 0,
+          'Lansia Perempuan': Number(comp.lansia?.perempuan) || 0,
+          'Total Anggota': totals.grandTotal || rec.totalMembers || 0,
+          'Program & Peran': involvementsStr,
+        };
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(exportRows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Database Peserta');
+      const todaySlug = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(workbook, `Database_Peserta_WIJNA_${todaySlug}.xlsx`);
+      showToast('Database Peserta berhasil diunduh (.xlsx).');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal mengunduh Database Peserta.');
+    }
+  };
+
+  const handleImportParticipantDatabaseFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setImportingDb(true);
+    setErrorMessage(null);
+    try {
+      let rawRows: Record<string, any>[] = [];
+      const lowerName = file.name.toLowerCase();
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        rawRows = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.records)
+          ? parsed.records
+          : [];
+      } else {
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(firstSheet, {
+          defval: '',
+        });
+      }
+
+      if (!rawRows || rawRows.length === 0) {
+        setErrorMessage('File yang diimpor tidak memiliki baris data peserta.');
+        return;
+      }
+
+      let importedCount = 0;
+      for (const row of rawRows) {
+        const rawCode = String(
+          row['ID Peserta'] || row['ID'] || row['participantCode'] || ''
+        ).trim();
+        const rawType = String(
+          row['Jenis Peserta'] || row['JENIS'] || row['participantType'] || ''
+        )
+          .trim()
+          .toUpperCase();
+        const isGroup =
+          rawType.includes('KELOMPOK') ||
+          rawType.includes('ORGANISASI') ||
+          rawCode.toUpperCase().startsWith('GRP') ||
+          rawCode.toUpperCase().startsWith('KLP') ||
+          Boolean(row['groupName']);
+
+        const nameVal = String(
+          row['Nama Peserta / Kelompok'] ||
+            row['NAMA PESERTA & PERAN'] ||
+            row['Nama Peserta'] ||
+            row['fullName'] ||
+            row['groupName'] ||
+            ''
+        ).trim();
+
+        if (!nameVal) continue;
+
+        const regionVal = String(
+          row['Wilayah / Komunitas'] ||
+            row['WILAYAH/KOMUNITAS'] ||
+            row['regionCommunity'] ||
+            ''
+        ).trim();
+
+        // Parse Program & Peran if present
+        let involvements: ParticipantProgramInvolvement[] = [];
+        if (Array.isArray(row.programInvolvements)) {
+          involvements = row.programInvolvements;
+        } else {
+          const progRaw = String(row['Program & Peran'] || row['PROGRAM & PERAN'] || '').trim();
+          if (progRaw) {
+            const parts = progRaw
+              .split(';')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            for (const part of parts) {
+              const matchParen = part.match(/^(.*?)\s*\((.*?)\)$/);
+              const pName = (matchParen ? matchParen[1] : part).trim();
+              const rolesStr = (matchParen ? matchParen[2] : 'Peserta').trim();
+              const matchedProg =
+                programsList.find(
+                  (p) =>
+                    p.name.toLowerCase() === pName.toLowerCase() ||
+                    p.code?.toLowerCase() === pName.toLowerCase() ||
+                    p.name.toLowerCase().includes(pName.toLowerCase())
+                ) || programsList[0];
+              if (matchedProg) {
+                const rList = rolesStr
+                  .split(',')
+                  .map((x) => x.trim())
+                  .filter(Boolean);
+                involvements.push({
+                  programId: matchedProg.id,
+                  programCode: matchedProg.code,
+                  programName: matchedProg.name,
+                  rolesInProgram: rList.length > 0 ? rList : ['Peserta'],
+                  roleInProgram: rList.length > 0 ? rList.join(', ') : 'Peserta',
+                  joinedAt: new Date().toISOString().slice(0, 10),
+                });
+              }
+            }
+          }
+        }
+
+        const existingMatch = records.find((r) => {
+          if (rawCode && r.participantCode.toLowerCase() === rawCode.toLowerCase()) {
+            return true;
+          }
+          if (isGroup && r.participantType === 'KELOMPOK/ORGANISASI') {
+            return r.groupName.trim().toLowerCase() === nameVal.toLowerCase();
+          }
+          if (!isGroup && r.participantType === 'INDIVIDU') {
+            return r.fullName.trim().toLowerCase() === nameVal.toLowerCase();
+          }
+          return false;
+        });
+
+        if (!isGroup) {
+          const rolesStr = String(
+            row['Peran Komunitas / Program'] || row['communityRole'] || 'Masyarakat Umum'
+          ).trim();
+          const rolesArr = rolesStr
+            .split(',')
+            .map((s) => s.trim() as MasterCommunityRole)
+            .filter(Boolean);
+          const payload: Partial<MasterParticipantRecord> = {
+            participantType: 'INDIVIDU',
+            fullName: nameVal,
+            organizationInstitution: String(
+              row['Organisasi / Kategori'] || row['organizationInstitution'] || ''
+            ).trim(),
+            ageGroup: (row['Kelompok Usia'] ||
+              row['ageGroup'] ||
+              'Dewasa (31–59 tahun)') as MasterParticipantAgeGroup,
+            gender: (row['Jenis Kelamin'] ||
+              row['gender'] ||
+              'Laki-laki') as MasterParticipantGender,
+            disability: (row['Disabilitas'] ||
+              row['disability'] ||
+              'Tidak') as MasterDisabilityStatus,
+            disabilityNotes: String(
+              row['Keterangan Disabilitas'] || row['disabilityNotes'] || ''
+            ).trim(),
+            communityRole: rolesArr.join(', ') || 'Masyarakat Umum',
+            communityRoles: rolesArr.length > 0 ? rolesArr : ['Masyarakat Umum'],
+            regionCommunity: regionVal,
+            programInvolvements:
+              involvements.length > 0
+                ? involvements
+                : existingMatch?.programInvolvements || [],
+          };
+
+          if (existingMatch) {
+            await api.updateParticipantRecord(existingMatch.id, payload);
+          } else {
+            await api.createParticipantRecord(payload);
+          }
+          importedCount += 1;
+        } else {
+          const comp: GroupMemberCompositionMatrix = row.memberComposition
+            ? row.memberComposition
+            : {
+                anak: {
+                  lakiLaki: Number(row['Anak Laki-laki']) || 0,
+                  perempuan: Number(row['Anak Perempuan']) || 0,
+                  lainnya: 0,
+                  memilihTidakMenjawab: 0,
+                },
+                remaja: {
+                  lakiLaki: Number(row['Remaja Laki-laki']) || 0,
+                  perempuan: Number(row['Remaja Perempuan']) || 0,
+                  lainnya: 0,
+                  memilihTidakMenjawab: 0,
+                },
+                pemuda: {
+                  lakiLaki: Number(row['Pemuda Laki-laki']) || 0,
+                  perempuan: Number(row['Pemuda Perempuan']) || 0,
+                  lainnya: 0,
+                  memilihTidakMenjawab: 0,
+                },
+                dewasa: {
+                  lakiLaki: Number(row['Dewasa Laki-laki']) || 0,
+                  perempuan: Number(row['Dewasa Perempuan']) || 0,
+                  lainnya: 0,
+                  memilihTidakMenjawab: 0,
+                },
+                lansia: {
+                  lakiLaki: Number(row['Lansia Laki-laki']) || 0,
+                  perempuan: Number(row['Lansia Perempuan']) || 0,
+                  lainnya: 0,
+                  memilihTidakMenjawab: 0,
+                },
+              };
+          const matrixTotals = getMatrixTotals(comp);
+          const fallbackTotal = Number(row['Total Anggota'] || row['totalMembers']) || 0;
+          if (matrixTotals.grandTotal === 0 && fallbackTotal > 0) {
+            comp.dewasa.lakiLaki = Math.floor(fallbackTotal / 2);
+            comp.dewasa.perempuan = fallbackTotal - comp.dewasa.lakiLaki;
+          }
+          const finalTotals = getMatrixTotals(comp);
+          const rolesStr = String(
+            row['Peran Komunitas / Program'] || row['programRole'] || 'Peserta'
+          ).trim();
+          const rolesArr = rolesStr
+            .split(',')
+            .map((s) => s.trim() as MasterGroupProgramRole)
+            .filter(Boolean);
+
+          const payload: Partial<MasterParticipantRecord> = {
+            participantType: 'KELOMPOK/ORGANISASI',
+            groupName: nameVal,
+            groupCategory: (row['Organisasi / Kategori'] ||
+              row['groupCategory'] ||
+              'Komunitas') as MasterGroupCategory,
+            regionCommunity: regionVal,
+            contactPerson: String(
+              row['Penanggung Jawab / Kontak'] || row['contactPerson'] || ''
+            ).trim(),
+            programRole: rolesArr.join(', ') || 'Peserta',
+            programRoles: rolesArr.length > 0 ? rolesArr : ['Peserta'],
+            memberComposition: comp,
+            totalMembers: finalTotals.grandTotal,
+            programInvolvements:
+              involvements.length > 0
+                ? involvements
+                : existingMatch?.programInvolvements || [],
+          };
+
+          if (existingMatch) {
+            await api.updateParticipantRecord(existingMatch.id, payload);
+          } else {
+            await api.createParticipantRecord(payload);
+          }
+          importedCount += 1;
+        }
+      }
+
+      await loadDatabase();
+      showToast(`Berhasil mengimpor ${importedCount} data peserta ke database.`);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal mengimpor file Database Peserta.');
+    } finally {
+      setImportingDb(false);
+    }
+  };
+
   const activeFormMatrixTotals = useMemo(
     () => getMatrixTotals(memberComposition),
     [memberComposition]
@@ -874,7 +1219,36 @@ export const ParticipantDatabaseView: React.FC<ParticipantDatabaseViewProps> = (
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv,.json"
+              onChange={handleImportParticipantDatabaseFile}
+              className="hidden"
+            />
+
+            <button
+              type="button"
+              onClick={handleDownloadParticipantDatabaseExcel}
+              className="h-7 inline-flex items-center justify-center gap-1.5 px-2.5 rounded border border-[#D9D9D6] bg-white hover:bg-[#FAFAF9] text-[#252525] text-[11.5px] font-medium transition-colors cursor-pointer"
+              title="Unduh seluruh Database Peserta ke file Excel (.xlsx)"
+            >
+              <Download className="w-3.5 h-3.5 text-[#15803D] shrink-0" />
+              <span>Unduh Database (.xlsx)</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={importingDb}
+              onClick={() => importFileInputRef.current?.click()}
+              className="h-7 inline-flex items-center justify-center gap-1.5 px-2.5 rounded border border-[#2B6E3F] bg-[#2B6E3F] hover:bg-[#235A33] text-white text-[11.5px] font-medium transition-colors cursor-pointer"
+              title="Import data peserta dari file Database Excel (.xlsx / .csv / .json) yang sudah ada"
+            >
+              <Upload className="w-3.5 h-3.5 shrink-0" />
+              <span>{importingDb ? 'Mengimpor...' : 'Import Database'}</span>
+            </button>
+
             {canViewAuditTrail && (
               <button
                 type="button"

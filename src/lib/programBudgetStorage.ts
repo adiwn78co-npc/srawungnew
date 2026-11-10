@@ -4,6 +4,8 @@ import {
   Outcome,
   Output,
   Activity,
+  SubActivity,
+  Indicator,
   Tor,
   CashAdvanceRecord,
   ApprovalHubItem,
@@ -100,7 +102,10 @@ export interface ProgramBudgetRevisionRecord {
     | 'BUDGET_SUBMITTED_TO_DIRECTOR'
     | 'BUDGET_APPROVED_BY_DIRECTOR'
     | 'BUDGET_REVISION_REQUESTED'
-    | 'ACTIVE_TOR_PERIOD_CHANGED';
+    | 'ACTIVE_TOR_PERIOD_CHANGED'
+    | 'PERIOD_CODE_UPDATED_BY_DIRECTOR'
+    | 'PERIOD_UPDATE_CONFIRMED_BY_FINANCE'
+    | 'MASTER_CODE_CONFIRMED';
   previousAnnualBudget: number;
   newAnnualBudget: number;
   periodStructureType: BudgetPeriodStructureType;
@@ -134,6 +139,18 @@ export interface ProgramBudgetDataset {
   budgetRevisionNotes?: string;
   budgetRevisionRequestedBy?: string;
   budgetRevisionRequestedAt?: string;
+  periodUpdateStatus?: 'Menunggu Konfirmasi Finance' | 'Terkonfirmasi Finance';
+  periodUpdatedByDirectorName?: string;
+  periodUpdatedByDirectorAt?: string;
+  periodConfirmedByFinanceName?: string;
+  periodConfirmedByFinanceAt?: string;
+  masterCodeUpdateStatus?: 'Menunggu Konfirmasi Update Master Kode' | 'Master Kode Terkonfirmasi';
+  masterCodeUpdatedByName?: string;
+  masterCodeUpdatedByRole?: string;
+  masterCodeUpdatedAt?: string;
+  masterCodeConfirmedByName?: string;
+  masterCodeConfirmedByRole?: string;
+  masterCodeConfirmedAt?: string;
   totalProgramBudget?: number; // Total Program Budget across the program lifecycle
   annualApprovedBudget: number; // Automatically reflects the sum of all budget periods entered for that year
   periodStructureType: BudgetPeriodStructureType;
@@ -258,29 +275,37 @@ export function buildDefaultCustomPeriods(
 
 export function getActivePeriods(dataset: ProgramBudgetDataset): ProgramBudgetPeriod[] {
   const fy = dataset.fiscalYear || new Date().getFullYear();
+  const normalizeSingleActive = (periods: ProgramBudgetPeriod[]): ProgramBudgetPeriod[] => {
+    const firstActiveIdx = periods.findIndex((p) => p.isActiveForTor);
+    const activeIdx = firstActiveIdx >= 0 ? firstActiveIdx : 0;
+    return periods.map((p, idx) => ({
+      ...p,
+      isActiveForTor: idx === activeIdx,
+    }));
+  };
   if (Array.isArray(dataset.customPeriods) && dataset.customPeriods.length > 0) {
     const customSum = dataset.customPeriods.reduce(
       (s, p) => s + (Number(p.allocatedAmount) || 0),
       0
     );
     if (customSum > 0 || dataset.periodStructureType === 'custom') {
-      return dataset.customPeriods;
+      return normalizeSingleActive(dataset.customPeriods);
     }
     if (
       dataset.periodStructureType === 'quarterly' &&
       Array.isArray(dataset.quarterlyPeriods) &&
       dataset.quarterlyPeriods.some((p) => (Number(p.allocatedAmount) || 0) > 0)
     ) {
-      return dataset.quarterlyPeriods;
+      return normalizeSingleActive(dataset.quarterlyPeriods);
     }
     if (
       dataset.periodStructureType === 'semester' &&
       Array.isArray(dataset.semesterPeriods) &&
       dataset.semesterPeriods.some((p) => (Number(p.allocatedAmount) || 0) > 0)
     ) {
-      return dataset.semesterPeriods;
+      return normalizeSingleActive(dataset.semesterPeriods);
     }
-    return dataset.customPeriods;
+    return normalizeSingleActive(dataset.customPeriods);
   }
   return buildDefaultCustomPeriods(fy, 0);
 }
@@ -332,32 +357,7 @@ export function deriveDatabaseMasterCodesForProgram(params: {
 
   const codeMap = new Map<string, ProgramMasterBudgetCode>();
 
-  // 1. From actual Program -> Outcome -> Output -> Activity hierarchy
-  const progOutcomeIds = new Set(
-    outcomes.filter((oc) => oc.programId === programId).map((oc) => oc.id)
-  );
-  const progOutputIds = new Set(
-    outputs.filter((op) => progOutcomeIds.has(op.outcomeId)).map((op) => op.id)
-  );
-  const progActivities = activities.filter((act) => progOutputIds.has(act.outputId));
-
-  for (const act of progActivities) {
-    const code = (act.code || '').trim();
-    if (code && !codeMap.has(code)) {
-      codeMap.set(code, {
-        id: `mbc-act-${act.id}`,
-        code,
-        budgetCategory: act.name,
-        allocatedAmount: 0,
-        createdAt: act.createdAt || new Date().toISOString(),
-        updatedAt: act.createdAt || new Date().toISOString(),
-        createdBy: act.picName || 'Database Activity',
-        source: 'Database Activity',
-      });
-    }
-  }
-
-  // 2. From actual ToR records belonging strictly to this program
+  // 1. From actual ToR records belonging strictly to this program (if any already use a code)
   const cleanProgName = (programName || '').trim().toLowerCase();
   const progTors = tors.filter((t) => {
     if (programId && t.programId) {
@@ -503,6 +503,9 @@ export function hydrateProgramBudgetDatasetsFromServer(
     }
   }
   saveAllProgramBudgetDatasets(authoritative);
+  if (Object.keys(authoritative).length === 0) {
+    saveMasterBudgetList([]);
+  }
   return authoritative;
 }
 
@@ -1209,7 +1212,7 @@ export function calculateProgramBudgetMetrics(
 /**
  * Generates and downloads an official Excel (.xlsx) template for Master Budget Codes
  * containing the exact two required columns: Code | Budget Category.
- * Uses existing program codes if available, or empty rows ready for user input.
+ * Finance can directly add/import Master Budget Codes via this Excel file without going through Activity.
  */
 export function downloadMasterBudgetExcelTemplate(
   programName: string,
@@ -1221,15 +1224,56 @@ export function downloadMasterBudgetExcelTemplate(
           Code: c.code,
           'Budget Category': c.budgetCategory,
         }))
-      : [{ Code: '', 'Budget Category': '' }];
+      : [
+          {
+            Code: '1.1',
+            'Budget Category': 'Board Governance & Organizational Accountability',
+          },
+          {
+            Code: '2.1',
+            'Budget Category': 'Donor Networking & Partnership Engagement',
+          },
+          {
+            Code: '2.2',
+            'Budget Category': 'Grants Management & Proposal Development Training',
+          },
+          {
+            Code: '3.1',
+            'Budget Category': 'Safeguarding, PSEAH & Organizational Policy Implementation',
+          },
+          {
+            Code: '4.1',
+            'Budget Category': 'Financial Management System & External Audit',
+          },
+          {
+            Code: '5.1',
+            'Budget Category': 'Public Communications, Digital Media & Knowledge Management',
+          },
+        ];
 
   const worksheet = XLSX.utils.json_to_sheet(rows, {
     header: ['Code', 'Budget Category'],
   });
-  worksheet['!cols'] = [{ wch: 16 }, { wch: 42 }];
+  worksheet['!cols'] = [{ wch: 20 }, { wch: 56 }];
+
+  const guideRows = [
+    {
+      Bagian: 'Input Master Budget Code Langsung oleh Finance (Tanpa Perlu Lewat Activity)',
+      Penjelasan:
+        'Finance dapat langsung menambahkan daftar Master Budget Code beserta Budget Category pada sheet "Master Budget Codes", lalu mengunggah file Excel ini di tab Master Budget Code.',
+    },
+    {
+      Bagian: 'Kolom Wajib',
+      Penjelasan:
+        '1. Code (contoh: 1.1, 1.1.1, 2.1, ADM-01) | 2. Budget Category (contoh: Uraian / Kategori Anggaran).',
+    },
+  ];
+  const guideSheet = XLSX.utils.json_to_sheet(guideRows);
+  guideSheet['!cols'] = [{ wch: 58 }, { wch: 95 }];
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Master Budget Codes');
+  XLSX.utils.book_append_sheet(workbook, guideSheet, 'Panduan Finance');
 
   const cleanSlug = (programName || 'Program')
     .replace(/[^a-zA-Z0-9]+/g, '_')
@@ -1278,11 +1322,11 @@ export async function parseMasterBudgetExcelFile(
     const keys = Object.keys(row);
     const codeKey =
       keys.find((k) =>
-        /^(code|kode|budget\s*code|kode\s*budget)$/i.test(k.trim())
+        /^(code|kode|budget\s*code|kode\s*budget|master\s*code|master\s*kode)$/i.test(k.trim())
       ) || keys[0];
     const catKey =
       keys.find((k) =>
-        /^(budget\s*category|category|kategori|kategori\s*budget|nama|uraian)$/i.test(
+        /^(budget\s*category|category|kategori|kategori\s*budget|nama|uraian|deskripsi)$/i.test(
           k.trim()
         )
       ) || keys[1];
@@ -1395,4 +1439,1198 @@ export function getFinanceReportingPeriods(fiscalYear: number = 2026): FinanceRe
     };
   });
 }
+
+export interface HierarchyExcelPreviewRow {
+  rowNumber: number;
+  outcomeNumber: string; // Satu: Nomor outcome
+  outcomeName: string; // Gabungan / Nama Outcome
+  outcomeDescription: string; // Satu: Description Outcome
+  outcomeIndicator: string; // Multi: Progress indicator
+  outcomeDataSource: string; // Multi: Data source
+  outcomeCumulative: string; // Multi: Cumulative or non-cumulative
+  outcomePlannedBreakdown: string; // Multi: Planned data breakdown
+  outcomeReportingFrequency: string; // Multi: Reporting frequency
+  outcomeBaseline: string; // Multi: Baseline
+  outcomeTarget: string; // Multi: End of project goal
+  outcomeUnit: string;
+  outputNumber: string; // Satu: Nomor output
+  outputName: string; // Gabungan / Nama Output
+  outputDescription: string; // Satu: Description Output
+  outputIndicator: string; // Multi: Progress indicator Output
+  outputDataSource: string; // Multi: Data source Output
+  outputCumulative: string; // Multi: Cumulative or non-cumulative Output
+  outputPlannedBreakdown: string; // Multi: Planned data breakdown Output
+  outputReportingFrequency: string; // Multi: Reporting frequency Output
+  outputBaseline: string; // Multi: Baseline Output
+  outputTarget: string; // Multi: End of project goal Output
+  outputUnit: string;
+  activityNumber: string;
+  activityCode: string;
+  activityName: string;
+  activityDescription: string; // Activity description
+  activityAnticipatedInputs: string; // Anticipated inputs
+  activityPlannedParticipants: string; // If possible, break down planned participants by gender and age
+  activityStartDate: string;
+  activityEndDate: string;
+  subActivityName: string;
+  subActivityPic: string;
+  status: 'valid' | 'duplicate' | 'invalid';
+  statusMessage: string;
+  isNewOutcome: boolean;
+  isNewOutcomeIndicator: boolean;
+  isNewOutput: boolean;
+  isNewOutputIndicator: boolean;
+  isNewActivity: boolean;
+  isNewSubActivity: boolean;
+}
+
+/**
+ * Generates and downloads a dedicated 3-column Excel (.xlsx) template specifically for Program Hierarchy
+ * matching image_199f0824.png:
+ * Columns: Outcome | Output | Activity
+ * Cell format:
+ * - Outcome: "Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity."
+ * - Output:  "Output 1.1: Conduct regular board meeting"
+ * - Activity: "Activity 1.1: Conduct regular Board meetings to ensure accountability, effective governance and decision-making."
+ */
+export function downloadProgramHierarchyExcelTemplate(params: {
+  program: Program;
+  outcomes: Outcome[];
+  outputs: Output[];
+  activities: Activity[];
+  subActivities?: SubActivity[];
+}): void {
+  const { program, outcomes, outputs, activities } = params;
+  const progOutcomes = outcomes.filter((o) => o.programId === program.id);
+
+  const headers = ['Outcome', 'Output', 'Activity'];
+  const rows: Record<string, string>[] = [];
+
+  if (progOutcomes.length > 0) {
+    progOutcomes.forEach((oc, ocIdx) => {
+      const ocNumber =
+        oc.outcomeNumber ||
+        (oc.name.match(/^(Outcome\s*[\d.]+)/i)?.[1] ?? `Outcome ${ocIdx + 1}`);
+      const ocCleanTitle =
+        oc.name.replace(/^Outcome\s*[\d.]+\s*[:\-–]?\s*/i, '').trim() ||
+        oc.description ||
+        oc.name;
+      const outcomeCell = `${ocNumber}: ${ocCleanTitle}`;
+
+      const relOutputs = outputs.filter((op) => op.outcomeId === oc.id);
+      if (relOutputs.length === 0) {
+        rows.push({
+          Outcome: outcomeCell,
+          Output: '',
+          Activity: '',
+        });
+      } else {
+        relOutputs.forEach((op, opIdx) => {
+          const opNumber =
+            op.outputNumber ||
+            (op.name.match(/^(Output\s*[\d.]+)/i)?.[1] ??
+              `Output ${ocIdx + 1}.${opIdx + 1}`);
+          const opCleanTitle =
+            op.name.replace(/^Output\s*[\d.]+\s*[:\-–]?\s*/i, '').trim() ||
+            op.description ||
+            op.name;
+          const outputCell = `${opNumber}: ${opCleanTitle}`;
+
+          const relActs = activities.filter((a) => a.outputId === op.id);
+          if (relActs.length === 0) {
+            rows.push({
+              Outcome: outcomeCell,
+              Output: outputCell,
+              Activity: '',
+            });
+          } else {
+            relActs.forEach((act, actIdx) => {
+              const actNumber =
+                act.activityNumber ||
+                (act.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ??
+                  `Activity ${ocIdx + 1}.${opIdx + 1}${relActs.length > 1 ? `.${actIdx + 1}` : ''}`);
+              const actCleanTitle =
+                act.name.replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '').trim() ||
+                act.name;
+              const activityCell = `${actNumber}: ${actCleanTitle}`;
+
+              rows.push({
+                Outcome: outcomeCell,
+                Output: outputCell,
+                Activity: activityCell,
+              });
+            });
+          }
+        });
+      }
+    });
+  } else {
+    rows.push(
+      {
+        Outcome:
+          'Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity.',
+        Output: 'Output 1.1: Conduct regular board meeting',
+        Activity:
+          'Activity 1.1: Conduct regular Board meetings to ensure accountability, effective governance and decision-making.',
+      },
+      {
+        Outcome:
+          'Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity.',
+        Output:
+          'Output 1.2: Organizational policies are developed, updated, and approved by the Board.',
+        Activity:
+          'Activity 1.2: Develop and update organizational policies and procedures to strengthen institutional systems and compliance.',
+      },
+      {
+        Outcome:
+          'Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity.',
+        Output:
+          'Output 1.3: Key staff positions are filled with qualified and competent personnel, with staff retention maintained.',
+        Activity:
+          'Activity 1.3: Recruit and retain qualified WIJNA staff to maintain organizational capacity and continuity.',
+      },
+      {
+        Outcome:
+          'Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity.',
+        Output:
+          'Output 1.4: Staff receive development training that enhances their skills and improves overall institutional effectiveness.',
+        Activity:
+          'Activity 1.4: Conduct staff and organizational development training to enhance skills, performance, and institutional effectiveness.',
+      },
+      {
+        Outcome: 'Outcome 2: WIJNA has increased its capacity to access grants beyond MCC.',
+        Output:
+          'Output 2.1: Donor networking activities strengthened to expand engagement and partnership opportunities.',
+        Activity:
+          'Activity 2.1: Conduct networking activities with partners, donors, and relevant stakeholders to strengthen collaboration and WIJNA’s visibility.',
+      },
+      {
+        Outcome: 'Outcome 2: WIJNA has increased its capacity to access grants beyond MCC.',
+        Output:
+          'Output 2.2: Relevant WIJNA staff trained in grants management and proposal development.',
+        Activity:
+          'Activity 2.2: Conduct grants management and proposal development training for relevant WIJNA staff to enhance fundraising capacity.',
+      },
+      {
+        Outcome: 'Outcome 2: WIJNA has increased its capacity to access grants beyond MCC.',
+        Output:
+          'Output 2.3: Project proposals are developed and submitted to potential funding sources.',
+        Activity:
+          "Activity 2.3: Develop and submit project proposals to potential funding sources to diversify and expand WIJNA's resource base.",
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output:
+          'Output 3.1: Partner assessments conducted to evaluate appropriateness, capacity, safeguarding, and financial alignment with MCC standards.',
+        Activity:
+          "Activity 3.1: Conduct partner assessments to evaluate partners' partnership appropriateness, capacity building, safeguarding and financial capacity alignment with MCC accompaniment approach.",
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output:
+          'Output 3.2: Partners receive technical support in project planning, implementation, reporting, and monitoring to ensure quality and effectiveness.',
+        Activity:
+          'Activity 3.2: Provide technical support to partners in project planning, development, implementation, reporting, and monitoring to ensure quality and effectiveness.',
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output: 'Output 3.3: Conduct orientations and training.',
+        Activity:
+          "Activity 3.3: Conduct orientations and training to strengthen partners' capacity for compliance with MCC standards and guidance.",
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output:
+          "Output 3.4: Partners' peacebuilding skills enhanced through MPI participation.",
+        Activity:
+          'Activity 3.4: Facilitate the participation of partners in the Mindanao Peacebuilding Institute (MPI).',
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output: 'Output 3.5: Annual partner gatherings conducted.',
+        Activity:
+          'Activity 3.5: Conduct annual partner gatherings and learning events.',
+      },
+      {
+        Outcome:
+          'Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.',
+        Output: 'Output 3.6: Monitoring and evaluation activities conducted.',
+        Activity: 'Activity 3.6: Conduct regular monitoring and evaluation activities.',
+      },
+      {
+        Outcome:
+          'Outcome 4: Improved implementation quality and impact of Global Service Learning (GSL) Program.',
+        Output: 'Output 4.1: Indonesian GSL participants recruited.',
+        Activity:
+          'Activity 4.1: Conduct recruitment selection and vetting of GSL participants.',
+      },
+      {
+        Outcome:
+          'Outcome 4: Improved implementation quality and impact of Global Service Learning (GSL) Program.',
+        Output: 'Output 4.2: Participants supported.',
+        Activity:
+          'Activity 4.2: Conduct coordination, monitoring and logistics support.',
+      },
+      {
+        Outcome:
+          'Outcome 4: Improved implementation quality and impact of Global Service Learning (GSL) Program.',
+        Output: 'Output 4.3: Placements and host families prepared.',
+        Activity: 'Activity 4.3: Development of placement and host families.',
+      },
+      {
+        Outcome:
+          'Outcome 4: Improved implementation quality and impact of Global Service Learning (GSL) Program.',
+        Output: 'Output 4.4: Related GSL activities conducted.',
+        Activity: 'Activity 4.4: Conduct related activities supporting GSL.',
+      },
+      {
+        Outcome:
+          'Outcome 5: Improve strategic engagement between MCC and Mennonite and Papua Synod.',
+        Output: 'Output 5.1: Strengthened engagement between MCC and Synods.',
+        Activity:
+          'Activity 5.1: Conduct networking and coordination support for MCC.',
+      }
+    );
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(rows, { header: headers });
+  worksheet['!cols'] = [
+    { wch: 52 }, // Outcome
+    { wch: 52 }, // Output
+    { wch: 62 }, // Activity
+  ];
+
+  const guideRows = [
+    {
+      Bagian: '1. Format Tabel Excel Hirarki (3 Kolom Terpisah: Outcome | Output | Activity)',
+      Rumus_dan_Contoh:
+        'Tabel Excel untuk Hirarki dibuat terpisah hanya 3 kolom: Kolom A = Outcome, Kolom B = Output, Kolom C = Activity.',
+    },
+    {
+      Bagian: '2. Format & Rumus Kolom Outcome',
+      Rumus_dan_Contoh:
+        'Format: "Outcome [Nomor]: [Nama Outcome]" — Contoh rumus penggabungan di Excel: =A2&": "&B2 -> menghasilkan "Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity."',
+    },
+    {
+      Bagian: '3. Format & Rumus Kolom Output',
+      Rumus_dan_Contoh:
+        'Format: "Output [Nomor]: [Nama Output]" — Contoh rumus penggabungan di Excel: =C2&": "&D2 -> menghasilkan "Output 1.1: Conduct regular board meeting"',
+    },
+    {
+      Bagian: '4. Format & Rumus Kolom Activity',
+      Rumus_dan_Contoh:
+        'Format: "Activity [Nomor]: [Nama Activity]" — Contoh rumus penggabungan di Excel: =E2&": "&F2 -> menghasilkan "Activity 1.1: Conduct regular Board meetings to ensure accountability, effective governance and decision-making."',
+    },
+    {
+      Bagian: '5. Pengelompokan Otomatis Saat Diimpor',
+      Rumus_dan_Contoh:
+        'Baris-baris dengan Nomor/Nama Outcome yang sama (misal 4 baris Outcome 1) akan otomatis dikelompokkan ke dalam 1 Outcome induk beserta seluruh Output (1.1 s/d 1.4) dan Activity (1.1 s/d 1.4) di bawahnya.',
+    },
+  ];
+  const guideSheet = XLSX.utils.json_to_sheet(guideRows);
+  guideSheet['!cols'] = [{ wch: 56 }, { wch: 110 }];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Hirarki Program');
+  XLSX.utils.book_append_sheet(workbook, guideSheet, 'Rumus Excel Hirarki');
+
+  const cleanSlug = (program.name || 'Program')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .slice(0, 32);
+  XLSX.writeFile(workbook, `Template_Hirarki_Program_${cleanSlug}.xlsx`);
+}
+
+/**
+ * Generates and downloads a separate Excel (.xlsx) template specifically for the Program Matrix
+ * (Matriks Outcome & Output Multi-Indikator + Matriks Activity Description, Anticipated Inputs & Participants).
+ */
+export function downloadProgramMatrixExcelTemplate(params: {
+  program: Program;
+  outcomes: Outcome[];
+  outputs: Output[];
+  activities: Activity[];
+  subActivities?: SubActivity[];
+}): void {
+  const { program, outcomes, outputs, activities } = params;
+  const progOutcomes = outcomes.filter((o) => o.programId === program.id);
+  const defaultStart = program.startDate || new Date().toISOString().slice(0, 10);
+  const defaultEnd = program.endDate || defaultStart;
+
+  const headers = [
+    'Nomor outcome',
+    'Description',
+    'Progress indicator',
+    'Data source',
+    'Cumulative or non-cumulative',
+    'Planned data breakdown',
+    'Reporting frequency',
+    'Baseline',
+    'End of project goal',
+    'Nomor output',
+    'Description Output',
+    'Progress indicator Output',
+    'Data source Output',
+    'Cumulative or non-cumulative Output',
+    'Planned data breakdown Output',
+    'Reporting frequency Output',
+    'Baseline Output',
+    'End of project goal Output',
+    'Activity',
+    'Activity description',
+    'Anticipated inputs',
+    'If possible, break down planned participants by gender and age',
+    'Tanggal Mulai Activity',
+    'Tanggal Selesai Activity',
+  ];
+
+  const rows: Record<string, string>[] = [];
+
+  if (progOutcomes.length > 0) {
+    progOutcomes.forEach((oc, ocIdx) => {
+      const ocNumber =
+        oc.outcomeNumber ||
+        (oc.name.match(/^(Outcome\s*\d+)/i)?.[1] ?? `Outcome ${ocIdx + 1}`);
+      const ocDesc =
+        oc.description ||
+        oc.name.replace(/^Outcome\s*\d+\s*:\s*/i, '').trim() ||
+        oc.name;
+      const ocIndicators = oc.indicators && oc.indicators.length > 0 ? oc.indicators : [null];
+      const relOutputs = outputs.filter((op) => op.outcomeId === oc.id);
+
+      const hierarchyFlatRows: {
+        op?: Output;
+        opNum?: string;
+        opDesc?: string;
+        opInd?: Indicator;
+        act?: Activity;
+      }[] = [];
+
+      if (relOutputs.length === 0) {
+        hierarchyFlatRows.push({});
+      } else {
+        relOutputs.forEach((op, opIdx) => {
+          const opNum =
+            op.outputNumber ||
+            (op.name.match(/^(Output\s*[\d.]+)/i)?.[1] ?? `Output ${ocIdx + 1}.${opIdx + 1}`);
+          const opDesc =
+            op.description ||
+            op.name.replace(/^Output\s*[\d.]+\s*:\s*/i, '').trim() ||
+            op.name;
+          const opIndicators = op.indicators && op.indicators.length > 0 ? op.indicators : [undefined];
+          const relActs = activities.filter((a) => a.outputId === op.id);
+
+          const actFlat: { act?: Activity }[] = [];
+          if (relActs.length === 0) {
+            actFlat.push({});
+          } else {
+            relActs.forEach((act) => {
+              actFlat.push({ act });
+            });
+          }
+
+          const opMax = Math.max(opIndicators.length, actFlat.length);
+          for (let j = 0; j < opMax; j++) {
+            const aItem = actFlat[j] || {};
+            const opInd = opIndicators[j] || (j === 0 ? opIndicators[0] : undefined);
+            hierarchyFlatRows.push({
+              op,
+              opNum,
+              opDesc,
+              opInd,
+              act: aItem.act,
+            });
+          }
+        });
+      }
+
+      const maxRowCount = Math.max(hierarchyFlatRows.length, ocIndicators.length);
+      for (let i = 0; i < maxRowCount; i++) {
+        const hItem = hierarchyFlatRows[i] || {};
+        const ind = ocIndicators[i] || (i === 0 ? ocIndicators[0] : null);
+
+        rows.push({
+          'Nomor outcome': ocNumber,
+          Description: ocDesc,
+          'Progress indicator': ind?.name || '',
+          'Data source': ind?.dataSource || ind?.verificationMethod || '',
+          'Cumulative or non-cumulative': ind?.cumulativeType || 'Non cumulative',
+          'Planned data breakdown': ind?.plannedDataBreakdown || '',
+          'Reporting frequency': ind?.reportingFrequency || 'Annual',
+          Baseline: ind?.baseline || 'TBA',
+          'End of project goal': ind?.endOfProjectGoal || ind?.target || '',
+          'Nomor output': hItem.opNum || '',
+          'Description Output': hItem.opDesc || '',
+          'Progress indicator Output': hItem.opInd?.name || '',
+          'Data source Output': hItem.opInd?.dataSource || hItem.opInd?.verificationMethod || '',
+          'Cumulative or non-cumulative Output': hItem.opInd?.cumulativeType || 'Non cumulative',
+          'Planned data breakdown Output': hItem.opInd?.plannedDataBreakdown || '',
+          'Reporting frequency Output': hItem.opInd?.reportingFrequency || 'Annual',
+          'Baseline Output': hItem.opInd?.baseline || 'TBA',
+          'End of project goal Output': hItem.opInd?.endOfProjectGoal || hItem.opInd?.target || '',
+          Activity: hItem.act?.name || '',
+          'Activity description': hItem.act?.description || '',
+          'Anticipated inputs': hItem.act?.anticipatedInputs || '',
+          'If possible, break down planned participants by gender and age':
+            hItem.act?.plannedParticipantsBreakdown || '',
+          'Tanggal Mulai Activity': hItem.act?.startDate || (hItem.act ? defaultStart : ''),
+          'Tanggal Selesai Activity': hItem.act?.endDate || (hItem.act ? defaultEnd : ''),
+        });
+      }
+    });
+  } else {
+    rows.push({
+      'Nomor outcome': 'Outcome 1',
+      Description:
+        'WIJNA has increased its organization structure, Governance and Operational Capacity.',
+      'Progress indicator': '# of board meetings conducted annually.',
+      'Data source': 'MoM, attendance list, photo documentation, and board resolution',
+      'Cumulative or non-cumulative': 'Non cumulative',
+      'Planned data breakdown': '6 board member (3M 3F)',
+      'Reporting frequency': 'Annual',
+      Baseline: 'TBA',
+      'End of project goal': '1 board meeting conducted annually.',
+      'Nomor output': 'Output 1.1',
+      'Description Output': 'Conduct regular board meeting',
+      'Progress indicator Output':
+        '# of regular Board meetings conducted according to the approved governance schedule',
+      'Data source Output': 'Board minutes and attendance',
+      'Cumulative or non-cumulative Output': 'Non cumulative',
+      'Planned data breakdown Output':
+        "3 Board' minutes and 3 attendance list ; 6 board member (3 M & 3 F) ; 6 Wijna's staff (3M & 3F)",
+      'Reporting frequency Output': 'Annual',
+      'Baseline Output': 'TBA',
+      'End of project goal Output':
+        'Three board meetings are conducted over the project period, at a rate of one per year from 2026 to 2028.',
+      Activity:
+        'Activity 1.1: Conduct regular Board meetings to ensure accountability, effective governance and decision-making.',
+      'Activity description':
+        'Regular board meetings will be conducted once a year. During these meetings, WIJNA will present the organization’s financial status and key accomplishments within the period.',
+      'Anticipated inputs': 'Venue, transportation, key documents, documenter',
+      'If possible, break down planned participants by gender and age':
+        '6 board member (3 male and 3 female) and 6 Wijna staff (3 male and 3 female)',
+      'Tanggal Mulai Activity': defaultStart,
+      'Tanggal Selesai Activity': defaultEnd,
+    });
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(rows, { header: headers });
+  worksheet['!cols'] = [
+    { wch: 16 },
+    { wch: 42 },
+    { wch: 40 },
+    { wch: 36 },
+    { wch: 24 },
+    { wch: 34 },
+    { wch: 20 },
+    { wch: 14 },
+    { wch: 38 },
+    { wch: 16 },
+    { wch: 42 },
+    { wch: 40 },
+    { wch: 36 },
+    { wch: 28 },
+    { wch: 34 },
+    { wch: 22 },
+    { wch: 14 },
+    { wch: 42 },
+    { wch: 45 },
+    { wch: 56 },
+    { wch: 36 },
+    { wch: 45 },
+    { wch: 18 },
+    { wch: 18 },
+  ];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Matriks Program');
+
+  const cleanSlug = (program.name || 'Program')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .slice(0, 32);
+  XLSX.writeFile(workbook, `Template_Matriks_Program_${cleanSlug}.xlsx`);
+}
+
+/**
+ * Parses an uploaded Excel/CSV file for Program Hierarchy (3-column Outcome | Output | Activity)
+ * or Program Matrix, and builds preview rows with automatic carry-forward and hierarchy code generation.
+ */
+export async function parseProgramHierarchyExcelFile(params: {
+  file: File;
+  program: Program;
+  existingOutcomes: Outcome[];
+  existingOutputs: Output[];
+  existingActivities: Activity[];
+  existingSubActivities: SubActivity[];
+}): Promise<HierarchyExcelPreviewRow[]> {
+  const {
+    file,
+    program,
+    existingOutcomes,
+    existingOutputs,
+    existingActivities,
+    existingSubActivities,
+  } = params;
+
+  const MAX_EXCEL_FILE_BYTES = 5 * 1024 * 1024;
+  if (file.size > MAX_EXCEL_FILE_BYTES) {
+    throw new Error('Ukuran file Excel melebihi batas maksimum (5 MB).');
+  }
+  const lowerFileName = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(lowerFileName)) {
+    throw new Error('Format file tidak didukung. Gunakan file .xlsx, .xls, atau .csv.');
+  }
+
+  const sanitizeCell = (val: unknown): string => {
+    const str = String(val ?? '').trim();
+    return str.replace(/^[=+\-@\t\r]+/, '').trim();
+  };
+
+  const normalizeDateStr = (val: string, fallback: string): string => {
+    if (!val) return fallback;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) {
+      return d.toISOString().slice(0, 10);
+    }
+    return fallback;
+  };
+
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const sheetName =
+    workbook.SheetNames.find((n) => /hirarki|hierarki|matriks|program|sheet1/i.test(n)) ||
+    workbook.SheetNames[0];
+  if (!sheetName) return [];
+
+  const sheet = workbook.Sheets[sheetName];
+  const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, {
+    defval: '',
+  });
+
+  const progOutcomes = existingOutcomes.filter((o) => o.programId === program.id);
+  const defaultStart = program.startDate || new Date().toISOString().slice(0, 10);
+  const defaultEnd = program.endDate || defaultStart;
+
+  const findCol = (row: Record<string, any>, pattern: RegExp): string => {
+    const key = Object.keys(row).find((k) => pattern.test(k.trim()));
+    return key ? sanitizeCell(row[key]) : '';
+  };
+
+  // Canonical key helpers that prioritize Outcome/Output/Activity numbers when present
+  const getCanonicalOcKey = (num: string, desc: string, fallbackName: string): string => {
+    const cleanNum = (num || (fallbackName.match(/^(Outcome\s*[\d.]+)/i)?.[1] ?? ''))
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    if (cleanNum) return cleanNum;
+    return (fallbackName || desc).trim().toLowerCase();
+  };
+
+  const getCanonicalOpKey = (num: string, desc: string, fallbackName: string): string => {
+    const cleanNum = (num || (fallbackName.match(/^(Output\s*[\d.]+)/i)?.[1] ?? ''))
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    if (cleanNum) return cleanNum;
+    return (fallbackName || desc).trim().toLowerCase();
+  };
+
+  const getCanonicalActKey = (num: string, actName: string): string => {
+    const cleanNum = (num || (actName.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? ''))
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const cleanTitle = actName
+      .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+      .trim()
+      .toLowerCase();
+    if (cleanNum && cleanTitle) return `${cleanNum}__${cleanTitle}`;
+    return (cleanNum || cleanTitle || actName.trim().toLowerCase());
+  };
+
+  const outcomeOrder: string[] = progOutcomes.map((o) =>
+    getCanonicalOcKey(o.outcomeNumber || '', o.description || '', o.name)
+  );
+  const outputOrderByOutcome = new Map<string, string[]>();
+  const actCountByOutput = new Map<string, number>();
+
+  progOutcomes.forEach((oc) => {
+    const ocKey = getCanonicalOcKey(oc.outcomeNumber || '', oc.description || oc.name, oc.name);
+    const ops = existingOutputs.filter((op) => op.outcomeId === oc.id);
+    outputOrderByOutcome.set(
+      ocKey,
+      ops.map((op) => getCanonicalOpKey(op.outputNumber || '', op.description || '', op.name))
+    );
+    ops.forEach((op) => {
+      const opNorm = getCanonicalOpKey(op.outputNumber || '', op.description || '', op.name);
+      const opFullKey = `${ocKey}__${opNorm}`;
+      const acts = existingActivities.filter((a) => a.outputId === op.id);
+      actCountByOutput.set(opFullKey, acts.length);
+    });
+  });
+
+  const existingOutcomeSet = new Set<string>();
+  const existingOutcomeIndicatorSet = new Set<string>();
+  const existingOutputSet = new Set<string>();
+  const existingOutputIndicatorSet = new Set<string>();
+  const existingActivitySet = new Set<string>();
+  const existingSubSet = new Set<string>();
+
+  progOutcomes.forEach((oc) => {
+    const ocKey = getCanonicalOcKey(oc.outcomeNumber || '', oc.description || '', oc.name);
+    existingOutcomeSet.add(ocKey);
+    existingOutcomeSet.add(oc.name.trim().toLowerCase());
+    if (oc.outcomeNumber) {
+      existingOutcomeSet.add(oc.outcomeNumber.trim().toLowerCase());
+    }
+    (oc.indicators || []).forEach((ind) => {
+      existingOutcomeIndicatorSet.add(`${ocKey}__${ind.name.trim().toLowerCase()}`);
+    });
+
+    existingOutputs
+      .filter((op) => op.outcomeId === oc.id)
+      .forEach((op) => {
+        const opNorm = getCanonicalOpKey(op.outputNumber || '', op.description || '', op.name);
+        const opKey = `${ocKey}__${opNorm}`;
+        existingOutputSet.add(opKey);
+        existingOutputSet.add(`${ocKey}__${op.name.trim().toLowerCase()}`);
+        (op.indicators || []).forEach((ind) => {
+          existingOutputIndicatorSet.add(`${opKey}__${ind.name.trim().toLowerCase()}`);
+        });
+
+        existingActivities
+          .filter((a) => a.outputId === op.id)
+          .forEach((act) => {
+            const actNorm = getCanonicalActKey(act.activityNumber || '', act.name);
+            const actKey = `${opKey}__${actNorm}`;
+            existingActivitySet.add(actKey);
+            existingActivitySet.add(`${opKey}__${act.name.trim().toLowerCase()}`);
+            if (act.activityNumber) {
+              existingActivitySet.add(
+                `${opKey}__${act.activityNumber.replace(/\s+/g, ' ').trim().toLowerCase()}`
+              );
+            }
+            existingSubActivities
+              .filter((s) => s.activityId === act.id)
+              .forEach((sub) => {
+                existingSubSet.add(`${actKey}__${sub.name.trim().toLowerCase()}`);
+              });
+          });
+      });
+  });
+
+  const seenOutcomesInFile = new Set<string>();
+  const seenOutcomeIndicatorsInFile = new Set<string>();
+  const seenOutputsInFile = new Set<string>();
+  const seenOutputIndicatorsInFile = new Set<string>();
+  const seenActivitiesInFile = new Set<string>();
+  const seenSubsInFile = new Set<string>();
+
+  let lastOutcomeNumber = '';
+  let lastOutcomeName = '';
+  let lastOutcomeDesc = '';
+
+  let lastOutputNumber = '';
+  let lastOutputName = '';
+  let lastOutputDesc = '';
+
+  let lastActivityNumber = '';
+  let lastActivityName = '';
+  let lastActivityCode = '';
+  let lastActivityDesc = '';
+  let lastActivityAnticipatedInputs = '';
+  let lastActivityPlannedParticipants = '';
+  let lastActivityStart = defaultStart;
+  let lastActivityEnd = defaultEnd;
+
+  const previewRows: HierarchyExcelPreviewRow[] = [];
+
+  rawRows.slice(0, 500).forEach((row, idx) => {
+    const rawOcNum = findCol(
+      row,
+      /^(nomor\s*outcome|no\.?\s*outcome|outcome\s*number|outcome\s*no|kode\s*outcome)$/i
+    );
+    const rawOcLegacyName = findCol(row, /^(outcome|nama\s*outcome|outcome\s*name)$/i);
+    const rawOcDesc = findCol(
+      row,
+      /^(description|deskripsi\s*outcome|outcome\s*description|deskripsi)$/i
+    );
+
+    // Multi-indicator columns for Outcome (when importing Matrix Excel)
+    const rawOcInd = findCol(
+      row,
+      /^(progress\s*indicator|indikator\s*outcome|outcome\s*indicator)$/i
+    );
+    const rawOcDataSource = findCol(
+      row,
+      /^(data\s*source|sumber\s*data|sumber\s*data\s*outcome)$/i
+    );
+    const rawOcCumulative = findCol(
+      row,
+      /^(cumulative\s*or\s*non-?cumulative|cumulative\s*outcome|sifat\s*indikator)$/i
+    );
+    const rawOcPlannedBreakdown = findCol(
+      row,
+      /^(planned\s*data\s*breakdown|data\s*breakdown|disagregasi\s*data)$/i
+    );
+    const rawOcReportingFreq = findCol(
+      row,
+      /^(reporting\s*frequency|frekuensi\s*pelaporan|frekuensi\s*outcome)$/i
+    );
+    const rawOcBase = findCol(
+      row,
+      /^(baseline|baseline\s*outcome|outcome\s*baseline)$/i
+    );
+    const rawOcTarget = findCol(
+      row,
+      /^(end\s*of\s*project\s*goal|target\s*outcome|outcome\s*target)$/i
+    );
+    const rawOcUnit = findCol(row, /^(satuan\s*outcome|unit\s*outcome|outcome\s*unit)$/i);
+
+    // Output columns (supports both 3-column "Output" and Matrix "Nomor output" + "Description Output")
+    const rawOpNum = findCol(
+      row,
+      /^(nomor\s*output|no\.?\s*output|output\s*number|output\s*no|kode\s*output)$/i
+    );
+    const rawOpLegacyName = findCol(row, /^(output|nama\s*output|output\s*name)$/i);
+    const rawOpDesc = findCol(
+      row,
+      /^(description\s*output|deskripsi\s*output|output\s*description)$/i
+    );
+    const rawOpInd = findCol(
+      row,
+      /^(progress\s*indicator\s*output|indikator\s*output|output\s*indicator)$/i
+    );
+    const rawOpDataSource = findCol(
+      row,
+      /^(data\s*source\s*output|sumber\s*data\s*output)$/i
+    );
+    const rawOpCumulative = findCol(
+      row,
+      /^(cumulative\s*or\s*non-?cumulative\s*output|cumulative\s*output)$/i
+    );
+    const rawOpPlannedBreakdown = findCol(
+      row,
+      /^(planned\s*data\s*breakdown\s*output|data\s*breakdown\s*output)$/i
+    );
+    const rawOpReportingFreq = findCol(
+      row,
+      /^(reporting\s*frequency\s*output|frekuensi\s*output)$/i
+    );
+    const rawOpBase = findCol(row, /^(baseline\s*output|output\s*baseline)$/i);
+    const rawOpTarget = findCol(
+      row,
+      /^(end\s*of\s*project\s*goal\s*output|target\s*output|output\s*target)$/i
+    );
+    const rawOpUnit = findCol(row, /^(satuan\s*output|unit\s*output|output\s*unit)$/i);
+
+    // Activity columns (supports 3-column "Activity: ..." and Matrix columns)
+    const rawActNum = findCol(
+      row,
+      /^(nomor\s*activity|no\.?\s*activity|activity\s*number|activity\s*no)$/i
+    );
+    const rawActCode = findCol(
+      row,
+      /^(kode\s*activity.*|kode\s*kegiatan|activity\s*code|budget\s*code|kode\s*anggaran|kode)$/i
+    );
+    const rawActName = findCol(
+      row,
+      /^(activity|nama\s*activity|nama\s*kegiatan|activity\s*name)$/i
+    );
+    const rawActDesc = findCol(
+      row,
+      /^(activity\s*description|deskripsi\s*activity|deskripsi\s*kegiatan)$/i
+    );
+    const rawActInputs = findCol(
+      row,
+      /^(anticipated\s*inputs?|input\s*kegiatan|kebutuhan\s*input)$/i
+    );
+    const rawActParticipants = findCol(
+      row,
+      /^(if\s*possible.*participants.*|planned\s*participants.*|participants\s*breakdown.*|target\s*peserta.*)$/i
+    );
+    const rawActStart = findCol(row, /^(tanggal\s*mulai.*|start\s*date|mulai)$/i);
+    const rawActEnd = findCol(row, /^(tanggal\s*selesai.*|end\s*date|selesai)$/i);
+
+    const rawSubName = findCol(row, /^(nama\s*sub.*|sub\s*activity|sub-activity|sub\s*kegiatan)$/i);
+    const rawSubPic = findCol(row, /^(pic\s*sub.*|pic\s*activity|pic)$/i);
+
+    // Skip completely empty rows
+    if (
+      !rawOcNum &&
+      !rawOcLegacyName &&
+      !rawOcDesc &&
+      !rawOcInd &&
+      !rawOpNum &&
+      !rawOpLegacyName &&
+      !rawOpDesc &&
+      !rawOpInd &&
+      !rawActName &&
+      !rawSubName
+    ) {
+      return;
+    }
+
+    // Resolve Outcome Number & Description (e.g. "Outcome 1: WIJNA has increased...")
+    let currentOcNum = rawOcNum;
+    let currentOcDesc = rawOcDesc;
+    if (!currentOcNum && rawOcLegacyName) {
+      const m = rawOcLegacyName.match(/^(Outcome\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      if (m) {
+        currentOcNum = m[1].replace(/\s+/g, ' ').trim();
+        if (!currentOcDesc) currentOcDesc = m[2].trim();
+      }
+    }
+
+    if (currentOcNum || currentOcDesc || rawOcLegacyName) {
+      const nextNum = currentOcNum || lastOutcomeNumber;
+      const nextDesc = currentOcDesc || rawOcLegacyName || lastOutcomeDesc;
+      const nextCombined =
+        nextNum && nextDesc && !nextDesc.toLowerCase().startsWith(nextNum.toLowerCase())
+          ? `${nextNum}: ${nextDesc}`
+          : nextDesc || nextNum;
+
+      if (
+        lastOutcomeName &&
+        nextCombined.toLowerCase() !== lastOutcomeName.toLowerCase() &&
+        (currentOcNum.toLowerCase() !== lastOutcomeNumber.toLowerCase() || !currentOcNum)
+      ) {
+        lastOutputNumber = '';
+        lastOutputName = '';
+        lastOutputDesc = '';
+        lastActivityName = '';
+      }
+      if (currentOcNum) lastOutcomeNumber = currentOcNum;
+      if (currentOcDesc) lastOutcomeDesc = currentOcDesc;
+      else if (rawOcLegacyName && !lastOutcomeDesc) lastOutcomeDesc = rawOcLegacyName;
+      lastOutcomeName = nextCombined;
+    }
+
+    const outcomeNumber = lastOutcomeNumber || 'Outcome 1';
+    const outcomeDescription = lastOutcomeDesc || lastOutcomeName;
+    const outcomeName =
+      lastOutcomeName ||
+      (outcomeNumber && outcomeDescription
+        ? `${outcomeNumber}: ${outcomeDescription}`
+        : outcomeDescription);
+
+    // Resolve Output Number & Description (e.g. "Output 1.1: Conduct regular board meeting")
+    let currentOpNum = rawOpNum;
+    let currentOpDesc = rawOpDesc;
+    if (!currentOpNum && rawOpLegacyName) {
+      const m = rawOpLegacyName.match(/^(Output\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      if (m) {
+        currentOpNum = m[1].replace(/\s+/g, ' ').trim();
+        if (!currentOpDesc) currentOpDesc = m[2].trim();
+      }
+    }
+
+    if (currentOpNum || currentOpDesc || rawOpLegacyName) {
+      const nextOpNum = currentOpNum || lastOutputNumber;
+      const nextOpDesc = currentOpDesc || rawOpLegacyName || lastOutputDesc;
+      const nextOpCombined =
+        nextOpNum && nextOpDesc && !nextOpDesc.toLowerCase().startsWith(nextOpNum.toLowerCase())
+          ? `${nextOpNum}: ${nextOpDesc}`
+          : nextOpDesc || nextOpNum;
+
+      if (
+        lastOutputName &&
+        nextOpCombined.toLowerCase() !== lastOutputName.toLowerCase() &&
+        (currentOpNum.toLowerCase() !== lastOutputNumber.toLowerCase() || !currentOpNum)
+      ) {
+        lastActivityName = '';
+      }
+      if (currentOpNum) lastOutputNumber = currentOpNum;
+      if (currentOpDesc) lastOutputDesc = currentOpDesc;
+      else if (rawOpLegacyName && !lastOutputDesc) lastOutputDesc = rawOpLegacyName;
+      lastOutputName = nextOpCombined;
+    }
+
+    const hasOutputInRow = Boolean(
+      currentOpNum || currentOpDesc || rawOpLegacyName || rawOpInd || rawActName || rawSubName
+    );
+    const outputNumber = hasOutputInRow ? lastOutputNumber : '';
+    const outputDescription = hasOutputInRow ? lastOutputDesc || lastOutputName : '';
+    const outputName = hasOutputInRow ? lastOutputName : '';
+
+    // Resolve Activity Number & Name (e.g. "Activity 1.1: Conduct regular Board meetings...")
+    if (rawActName) {
+      const actMatch = rawActName.match(/^(Activity\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      const extractedActNum =
+        rawActNum || (actMatch ? actMatch[1].replace(/\s+/g, ' ').trim() : '');
+      const cleanActTitle = actMatch ? actMatch[2].trim() : rawActName.trim();
+      const formattedActName = extractedActNum
+        ? `${extractedActNum}: ${cleanActTitle}`
+        : cleanActTitle;
+
+      lastActivityNumber = extractedActNum;
+      lastActivityName = formattedActName;
+      lastActivityCode = rawActCode;
+      lastActivityDesc = rawActDesc;
+      lastActivityAnticipatedInputs = rawActInputs;
+      lastActivityPlannedParticipants = rawActParticipants;
+      lastActivityStart = normalizeDateStr(rawActStart, defaultStart);
+      lastActivityEnd = normalizeDateStr(rawActEnd, defaultEnd);
+    }
+
+    const activityNumber = rawActName ? lastActivityNumber : rawSubName ? lastActivityNumber : '';
+    const activityName = rawActName ? lastActivityName : rawSubName ? lastActivityName : '';
+    const activityDescription = rawActDesc || (rawActName ? '' : lastActivityDesc);
+    const activityAnticipatedInputs =
+      rawActInputs || (rawActName ? '' : lastActivityAnticipatedInputs);
+    const activityPlannedParticipants =
+      rawActParticipants || (rawActName ? '' : lastActivityPlannedParticipants);
+    const activityStartDate = rawActName
+      ? normalizeDateStr(rawActStart, defaultStart)
+      : lastActivityStart;
+    const activityEndDate = rawActName
+      ? normalizeDateStr(rawActEnd, defaultEnd)
+      : lastActivityEnd;
+
+    if (!outcomeName) {
+      previewRows.push({
+        rowNumber: idx + 2,
+        outcomeNumber: '',
+        outcomeName: '-',
+        outcomeDescription: '',
+        outcomeIndicator: rawOcInd,
+        outcomeDataSource: rawOcDataSource,
+        outcomeCumulative: rawOcCumulative,
+        outcomePlannedBreakdown: rawOcPlannedBreakdown,
+        outcomeReportingFrequency: rawOcReportingFreq,
+        outcomeBaseline: rawOcBase,
+        outcomeTarget: rawOcTarget,
+        outcomeUnit: rawOcUnit,
+        outputNumber: outputNumber || '',
+        outputName: outputName || '-',
+        outputDescription: outputDescription || '',
+        outputIndicator: rawOpInd,
+        outputDataSource: rawOpDataSource,
+        outputCumulative: rawOpCumulative,
+        outputPlannedBreakdown: rawOpPlannedBreakdown,
+        outputReportingFrequency: rawOpReportingFreq,
+        outputBaseline: rawOpBase,
+        outputTarget: rawOpTarget,
+        outputUnit: rawOpUnit,
+        activityNumber: activityNumber || '',
+        activityCode: rawActCode || '-',
+        activityName: activityName || '-',
+        activityDescription: '',
+        activityAnticipatedInputs: activityAnticipatedInputs || '',
+        activityPlannedParticipants: activityPlannedParticipants || '',
+        activityStartDate,
+        activityEndDate,
+        subActivityName: rawSubName,
+        subActivityPic: rawSubPic,
+        status: 'invalid',
+        statusMessage: 'Kolom Outcome wajib diisi',
+        isNewOutcome: false,
+        isNewOutcomeIndicator: false,
+        isNewOutput: false,
+        isNewOutputIndicator: false,
+        isNewActivity: false,
+        isNewSubActivity: false,
+      });
+      return;
+    }
+
+    if (activityName && !outputName) {
+      previewRows.push({
+        rowNumber: idx + 2,
+        outcomeNumber,
+        outcomeName,
+        outcomeDescription,
+        outcomeIndicator: rawOcInd,
+        outcomeDataSource: rawOcDataSource,
+        outcomeCumulative: rawOcCumulative,
+        outcomePlannedBreakdown: rawOcPlannedBreakdown,
+        outcomeReportingFrequency: rawOcReportingFreq,
+        outcomeBaseline: rawOcBase,
+        outcomeTarget: rawOcTarget,
+        outcomeUnit: rawOcUnit,
+        outputNumber: '',
+        outputName: '-',
+        outputDescription: '',
+        outputIndicator: '',
+        outputDataSource: '',
+        outputCumulative: '',
+        outputPlannedBreakdown: '',
+        outputReportingFrequency: '',
+        outputBaseline: '',
+        outputTarget: '',
+        outputUnit: '',
+        activityNumber: activityNumber || '',
+        activityCode: rawActCode || '-',
+        activityName,
+        activityDescription,
+        activityAnticipatedInputs,
+        activityPlannedParticipants,
+        activityStartDate,
+        activityEndDate,
+        subActivityName: rawSubName,
+        subActivityPic: rawSubPic,
+        status: 'invalid',
+        statusMessage: 'Activity memerlukan kolom Output induk',
+        isNewOutcome: false,
+        isNewOutcomeIndicator: false,
+        isNewOutput: false,
+        isNewOutputIndicator: false,
+        isNewActivity: false,
+        isNewSubActivity: false,
+      });
+      return;
+    }
+
+    const ocKey = getCanonicalOcKey(outcomeNumber, outcomeDescription, outcomeName);
+    if (!outcomeOrder.includes(ocKey)) {
+      outcomeOrder.push(ocKey);
+    }
+    const ocNum = outcomeOrder.indexOf(ocKey) + 1;
+
+    let opNum = 1;
+    const opNorm = outputName
+      ? getCanonicalOpKey(outputNumber, outputDescription, outputName)
+      : '';
+    const opKey = opNorm ? `${ocKey}__${opNorm}` : '';
+    if (opNorm) {
+      const opList = outputOrderByOutcome.get(ocKey) || [];
+      if (!opList.includes(opNorm)) {
+        opList.push(opNorm);
+        outputOrderByOutcome.set(ocKey, opList);
+      }
+      opNum = opList.indexOf(opNorm) + 1;
+    }
+
+    const ocIndKey = rawOcInd ? `${ocKey}__${rawOcInd.toLowerCase()}` : '';
+    const opIndKey = rawOpInd && opKey ? `${opKey}__${rawOpInd.toLowerCase()}` : '';
+    const actNorm = activityName ? getCanonicalActKey(activityNumber, activityName) : '';
+    const actKey = actNorm && opKey ? `${opKey}__${actNorm}` : '';
+    const actNumOnlyKey =
+      activityNumber && opKey
+        ? `${opKey}__${activityNumber.replace(/\s+/g, ' ').trim().toLowerCase()}`
+        : '';
+    const subKey = rawSubName && actKey ? `${actKey}__${rawSubName.toLowerCase()}` : '';
+
+    const isNewOutcome =
+      !existingOutcomeSet.has(ocKey) &&
+      !existingOutcomeSet.has(outcomeName.toLowerCase()) &&
+      !seenOutcomesInFile.has(ocKey);
+    const isNewOutcomeIndicator = Boolean(
+      rawOcInd &&
+        !existingOutcomeIndicatorSet.has(ocIndKey) &&
+        !seenOutcomeIndicatorsInFile.has(ocIndKey)
+    );
+    const isNewOutput = Boolean(
+      outputName && !existingOutputSet.has(opKey) && !seenOutputsInFile.has(opKey)
+    );
+    const isNewOutputIndicator = Boolean(
+      rawOpInd &&
+        opKey &&
+        !existingOutputIndicatorSet.has(opIndKey) &&
+        !seenOutputIndicatorsInFile.has(opIndKey)
+    );
+    const isNewActivity = Boolean(
+      activityName &&
+        !existingActivitySet.has(actKey) &&
+        !(actNumOnlyKey && existingActivitySet.has(actNumOnlyKey)) &&
+        !seenActivitiesInFile.has(actKey)
+    );
+    const isNewSubActivity = Boolean(
+      rawSubName && activityName && !existingSubSet.has(subKey) && !seenSubsInFile.has(subKey)
+    );
+
+    let resolvedActCode = rawActCode || (rawActName ? '' : lastActivityCode);
+    if (activityName && !resolvedActCode) {
+      const prevCount = actCountByOutput.get(opKey) || 0;
+      const nextActNum = isNewActivity ? prevCount + 1 : Math.max(1, prevCount);
+      if (isNewActivity) {
+        actCountByOutput.set(opKey, nextActNum);
+      }
+      resolvedActCode = `${ocNum}.${opNum}.${nextActNum}`;
+      lastActivityCode = resolvedActCode;
+    } else if (isNewActivity && opKey) {
+      actCountByOutput.set(opKey, (actCountByOutput.get(opKey) || 0) + 1);
+    }
+
+    seenOutcomesInFile.add(ocKey);
+    if (ocIndKey) seenOutcomeIndicatorsInFile.add(ocIndKey);
+    if (opKey) seenOutputsInFile.add(opKey);
+    if (opIndKey) seenOutputIndicatorsInFile.add(opIndKey);
+    if (actKey) seenActivitiesInFile.add(actKey);
+    if (actNumOnlyKey) seenActivitiesInFile.add(actNumOnlyKey);
+    if (subKey) seenSubsInFile.add(subKey);
+
+    const nothingNewInRow =
+      !isNewOutcome &&
+      !isNewOutcomeIndicator &&
+      !isNewOutput &&
+      !isNewOutputIndicator &&
+      !isNewActivity &&
+      !isNewSubActivity;
+
+    const addedParts: string[] = [];
+    if (isNewOutcome) addedParts.push(outcomeNumber);
+    if (isNewOutcomeIndicator) addedParts.push('Indikator Outcome');
+    if (isNewOutput) addedParts.push(outputNumber || `Output ${ocNum}.${opNum}`);
+    if (isNewOutputIndicator) addedParts.push('Indikator Output');
+    if (isNewActivity) addedParts.push(activityNumber || `Activity ${ocNum}.${opNum}`);
+    if (isNewSubActivity) addedParts.push('Sub-Activity');
+
+    previewRows.push({
+      rowNumber: idx + 2,
+      outcomeNumber,
+      outcomeName,
+      outcomeDescription,
+      outcomeIndicator: rawOcInd,
+      outcomeDataSource: rawOcDataSource,
+      outcomeCumulative: rawOcCumulative || 'Non cumulative',
+      outcomePlannedBreakdown: rawOcPlannedBreakdown,
+      outcomeReportingFrequency: rawOcReportingFreq || 'Annual',
+      outcomeBaseline: rawOcBase,
+      outcomeTarget: rawOcTarget,
+      outcomeUnit: rawOcUnit,
+      outputNumber: outputNumber || (outputName ? `Output ${ocNum}.${opNum}` : ''),
+      outputName,
+      outputDescription,
+      outputIndicator: rawOpInd,
+      outputDataSource: rawOpDataSource,
+      outputCumulative: rawOpCumulative || 'Non cumulative',
+      outputPlannedBreakdown: rawOpPlannedBreakdown,
+      outputReportingFrequency: rawOpReportingFreq || 'Annual',
+      outputBaseline: rawOpBase,
+      outputTarget: rawOpTarget,
+      outputUnit: rawOpUnit,
+      activityNumber: activityNumber || (activityName ? `Activity ${ocNum}.${opNum}` : ''),
+      activityCode: resolvedActCode,
+      activityName,
+      activityDescription,
+      activityAnticipatedInputs,
+      activityPlannedParticipants,
+      activityStartDate,
+      activityEndDate,
+      subActivityName: rawSubName,
+      subActivityPic: rawSubPic,
+      status: nothingNewInRow ? 'duplicate' : 'valid',
+      statusMessage: nothingNewInRow
+        ? 'Sudah terdaftar di Hirarki Program (Dilewati)'
+        : `Siap Diimpor: ${addedParts.join(' → ')}`,
+      isNewOutcome,
+      isNewOutcomeIndicator,
+      isNewOutput,
+      isNewOutputIndicator,
+      isNewActivity,
+      isNewSubActivity,
+    });
+  });
+
+  return previewRows;
+}
+
+
+
 

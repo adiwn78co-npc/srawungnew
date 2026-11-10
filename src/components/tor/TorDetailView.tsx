@@ -46,6 +46,7 @@ import {
   Unlock,
   KeyRound,
   Plus,
+  Trash2,
 } from 'lucide-react';
 import { TorPdfExportModal } from './TorPdfExportModal.js';
 import { TorFormModal } from './TorFormModal.js';
@@ -116,6 +117,23 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
   const [isRequestingEdit, setIsRequestingEdit] = useState(false);
   const [isReviewingEditRequest, setIsReviewingEditRequest] = useState(false);
   const [showEditTorModal, setShowEditTorModal] = useState(false);
+  const [confirmDeleteTor, setConfirmDeleteTor] = useState(false);
+  const [isDeletingTor, setIsDeletingTor] = useState(false);
+
+  const handleDeleteTorByDirector = async () => {
+    if (!isDirector) return;
+    setActionError(null);
+    setIsDeletingTor(true);
+    try {
+      await api.deleteTor(tor.id);
+      onRefresh();
+      onBack();
+    } catch (err: any) {
+      setActionError(err.message || 'Gagal menghapus dokumen TOR.');
+      setIsDeletingTor(false);
+      setConfirmDeleteTor(false);
+    }
+  };
 
   // Resubmit state for creator
   const [resubmitComment, setResubmitComment] = useState('');
@@ -246,6 +264,20 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
   const [caEditingRecord, setCaEditingRecord] = useState<CashAdvanceRecord | null>(null);
   const [caDetailOpen, setCaDetailOpen] = useState<CashAdvanceRecord | null>(null);
   const [autoOpenedTargetKey, setAutoOpenedTargetKey] = useState<string | null>(null);
+  const [torBudgetDraft, setTorBudgetDraft] = useState<string>(() =>
+    String(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000)
+  );
+  const [localApprovedTorBudget, setLocalApprovedTorBudget] = useState<number>(() =>
+    Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000)
+  );
+  const [isUpdatingTorBudget, setIsUpdatingTorBudget] = useState<boolean>(false);
+  const [showTorBudgetAudit, setShowTorBudgetAudit] = useState<boolean>(false);
+
+  useEffect(() => {
+    const resolved = Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000);
+    setTorBudgetDraft(String(resolved));
+    setLocalApprovedTorBudget(resolved);
+  }, [tor?.id, tor?.budgetApproved]);
 
   const loadTorCashAdvances = useCallback(async () => {
     if (!tor?.id) return;
@@ -527,6 +559,40 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                     <span>Terkunci (Read-Only)</span>
                   </div>
                 )}
+                {/* Tombol Hapus TOR (Hanya muncul untuk Direktur) */}
+                {isDirector && (
+                  confirmDeleteTor ? (
+                    <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-50 border border-rose-300 text-xs">
+                      <span className="text-rose-900 font-semibold text-[11px]">Hapus TOR ini?</span>
+                      <button
+                        type="button"
+                        disabled={isDeletingTor}
+                        onClick={handleDeleteTorByDirector}
+                        className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-semibold text-[11px] cursor-pointer disabled:opacity-50"
+                      >
+                        {isDeletingTor ? 'Menghapus...' : 'Ya, Hapus'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isDeletingTor}
+                        onClick={() => setConfirmDeleteTor(false)}
+                        className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-medium text-[11px] cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteTor(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-700 transition-colors font-semibold cursor-pointer"
+                      title="Hanya Direktur yang memiliki kewenangan menghapus dokumen ToR"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Hapus TOR</span>
+                    </button>
+                  )
+                )}
               </>
             )}
           </div>
@@ -712,14 +778,33 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                     <span aria-hidden="true">·</span>
                     <span>Pelaporan maks. H+7</span>
                     <span aria-hidden="true">·</span>
-                    <span>
-                      Pagu TOR:{' '}
-                      <strong className="font-mono text-[#2F3437]">
-                        {tor.budgetApproved != null || tor.budgetRequested != null
-                          ? formatRupiahFull(tor.budgetApproved ?? tor.budgetRequested ?? 0)
-                          : 'Not Available in Source TOR'}
-                      </strong>
-                    </span>
+                    {(() => {
+                      const approvedPag = Number(tor.budgetApproved ?? tor.budgetRequested ?? 0);
+                      const reportedCaSum = torCashAdvances
+                        .filter((c) => Boolean(c.isReported) && c.status !== 'Ditolak')
+                        .reduce(
+                          (sum, c) => sum + (Number(c.realizedAmount ?? c.totalAmount) || 0),
+                          0
+                        );
+                      const remainingPag = approvedPag - reportedCaSum;
+                      return (
+                        <>
+                          <span>
+                            Disetujui:{' '}
+                            <strong className="font-mono text-[#2F3437]">
+                              {formatRupiahFull(approvedPag)}
+                            </strong>
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            Sisa Anggaran:{' '}
+                            <strong className="font-mono text-[#16654E]">
+                              {formatRupiahFull(remainingPag)}
+                            </strong>
+                          </span>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -972,21 +1057,181 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                 return `Outcome ${firstNum} ; Activity ${codeStr}`;
               })();
 
-              const activeCashAdvances = torCashAdvances.filter((c) => c.status !== 'Ditolak');
-              const totalCaRequested = activeCashAdvances.reduce(
+              // Gambar 2 (Budget request USD/IDR di dalam tabel ToR): berasal dari Cash Advance yang telah di-ACC (Disetujui / Dicairkan)
+              const approvedCashAdvances = torCashAdvances.filter(
+                (c) => c.status === 'Disetujui' || c.status === 'Dicairkan'
+              );
+              const totalApprovedCaRequested = approvedCashAdvances.reduce(
                 (sum, c) => sum + (Number(c.totalAmount) || 0),
                 0
               );
-              const effectiveBudgetRequested =
-                activeCashAdvances.length > 0 ? totalCaRequested : tor.budgetRequested;
 
-              const compactBudget =
-                effectiveBudgetRequested != null && !isNaN(Number(effectiveBudgetRequested))
-                  ? `Rp${Number(effectiveBudgetRequested).toLocaleString('id-ID')}`
-                  : 'Not Available in Source TOR';
+              const reportedCashAdvancesForTor = torCashAdvances.filter(
+                (c) => Boolean(c.isReported) && c.status !== 'Ditolak'
+              );
+              const totalReportedCaForTor = reportedCashAdvancesForTor.reduce(
+                (sum, c) => sum + (Number(c.realizedAmount ?? c.totalAmount) || 0),
+                0
+              );
+              const approvedTorBudgetVal = Number(localApprovedTorBudget || 0);
+              const remainingTorBudgetVal = approvedTorBudgetVal - totalReportedCaForTor;
+
+              const compactBudget = `Rp${Number(totalApprovedCaRequested).toLocaleString('id-ID')}`;
+
+              const isA2OrFinanceForTor =
+                currentUser?.role === 'finance' ||
+                (currentUser?.roleTitle || '').toLowerCase().includes('finance') ||
+                outputRaci?.accountableFinanceUserId === currentUser?.id;
+
+              const handleDetailBudgetAction = async (
+                action: 'finance_determine' | 'a2_update' | 'director_acc'
+              ) => {
+                setActionError(null);
+                setIsUpdatingTorBudget(true);
+                try {
+                  const numVal = Number(torBudgetDraft) || 0;
+                  setLocalApprovedTorBudget(numVal);
+                  await api.updateTorBudgetEstimate(tor.id, {
+                    action,
+                    budgetRequested: numVal,
+                  });
+                  setActionSuccess(
+                    action === 'director_acc'
+                      ? `Budget yang disetujui untuk ini adalah Rp ${numVal.toLocaleString('id-ID')} (Telah di-ACC oleh Direktur).`
+                      : `Budget berhasil di-update oleh Finance / A2 menjadi Rp ${numVal.toLocaleString('id-ID')}.`
+                  );
+                  onRefresh();
+                } catch (err: any) {
+                  setActionError(err?.message || 'Gagal memperbarui Estimasi Budget ToR.');
+                } finally {
+                  setIsUpdatingTorBudget(false);
+                }
+              };
 
               return (
                 <>
+                  {/* Panel Ringkas & Proporsional: Budget yang disetujui & Sisa Budget untuk ToR ini */}
+                  <div className="mb-3 px-3 py-2 rounded-lg border border-[#EAE8E1] bg-[#FAF9F6] text-xs font-sans print:hidden">
+                    {tor.budgetApprovalStatus === 'Disetujui Direktur' && !isA2OrFinanceForTor ? (
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-[#0F4C3A]">
+                            Budget yang disetujui untuk ini adalah :
+                          </span>
+                          <span className="font-mono text-sm font-bold text-[#16654E]">
+                            Rp {approvedTorBudgetVal.toLocaleString('id-ID')}
+                          </span>
+                          <span className="text-[#CBD5E1]">·</span>
+                          <span className="font-semibold text-[#0F4C3A]">
+                            Sisa Budget :
+                          </span>
+                          <span className="font-mono text-sm font-bold text-[#0F7B6C]">
+                            Rp {remainingTorBudgetVal.toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10.5px] font-semibold bg-[#F0FAF6] border border-[#B8E6D4] text-[#16654E]">
+                          ✓ Di-ACC Direktur
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-[#0F4C3A]">
+                              Budget yang disetujui untuk ini adalah :
+                            </span>
+                            <span className="font-mono text-sm font-bold text-[#16654E]">
+                              Rp {approvedTorBudgetVal.toLocaleString('id-ID')}
+                            </span>
+                            <span className="text-[#CBD5E1]">·</span>
+                            <span className="font-semibold text-[#0F4C3A]">
+                              Sisa Budget :
+                            </span>
+                            <span className="font-mono text-sm font-bold text-[#0F7B6C]">
+                              Rp {remainingTorBudgetVal.toLocaleString('id-ID')}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                tor.budgetApprovalStatus === 'Disetujui Direktur'
+                                  ? 'bg-[#F0FAF6] border-[#B8E6D4] text-[#16654E]'
+                                  : 'bg-amber-50 border-amber-300 text-amber-900'
+                              }`}
+                            >
+                              {tor.budgetApprovalStatus === 'Disetujui Direktur'
+                                ? '✓ Di-ACC Direktur'
+                                : 'Menunggu ACC Direktur'}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {(isA2OrFinanceForTor ||
+                              (isDirector && tor.budgetApprovalStatus !== 'Disetujui Direktur')) && (
+                              <input
+                                type="number"
+                                min="0"
+                                value={torBudgetDraft}
+                                onChange={(e) => setTorBudgetDraft(e.target.value)}
+                                className="h-7 px-2 w-36 rounded border border-[#CBD5E1] bg-white font-mono text-xs font-semibold text-[#0F172A] focus:outline-none focus:border-[#1F7A63]"
+                              />
+                            )}
+                            {isA2OrFinanceForTor && (
+                              <button
+                                type="button"
+                                disabled={isUpdatingTorBudget}
+                                onClick={() => handleDetailBudgetAction('a2_update')}
+                                className="h-7 px-2.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[11px] font-semibold cursor-pointer transition-colors"
+                              >
+                                Update Finance
+                              </button>
+                            )}
+                            {isDirector && tor.budgetApprovalStatus !== 'Disetujui Direktur' && (
+                              <button
+                                type="button"
+                                disabled={isUpdatingTorBudget}
+                                onClick={() => handleDetailBudgetAction('director_acc')}
+                                className="h-7 px-2.5 rounded bg-[#1F7A63] hover:bg-[#17614E] text-white text-[11px] font-semibold cursor-pointer transition-colors"
+                              >
+                                ACC Direktur
+                              </button>
+                            )}
+                            {isA2OrFinanceForTor && (tor.budgetAuditLogs || []).length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setShowTorBudgetAudit((p) => !p)}
+                                className="h-7 px-2 rounded border border-[#CBD5E1] bg-white hover:bg-[#F1F5F9] text-[#334155] text-[10.5px] font-medium cursor-pointer transition-colors"
+                              >
+                                Audit ({(tor.budgetAuditLogs || []).length})
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {showTorBudgetAudit && (tor.budgetAuditLogs || []).length > 0 && (
+                          <div className="border border-[#E2E8F0] rounded bg-white divide-y divide-[#F1F5F9] max-h-28 overflow-y-auto text-[10.5px]">
+                            {(tor.budgetAuditLogs || []).map((log) => (
+                              <div
+                                key={log.id}
+                                className="px-2 py-1 flex items-center justify-between gap-2"
+                              >
+                                <span className="text-[#334155] truncate">
+                                  <strong>{log.actorName}</strong>: {log.actionLabel}
+                                </span>
+                                <span className="font-mono text-[10px] text-[#64748B] shrink-0">
+                                  {new Date(log.timestamp).toLocaleString('id-ID', {
+                                    day: '2-digit',
+                                    month: 'short',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   <h1 className="text-center font-bold uppercase text-[15px] tracking-normal mb-4 text-black">
                     TERM OF REFERENCE
                   </h1>
@@ -2069,12 +2314,9 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
       <TorPdfExportModal
         tor={{
           ...tor,
-          budgetRequested:
-            torCashAdvances.filter((c) => c.status !== 'Ditolak').length > 0
-              ? torCashAdvances
-                  .filter((c) => c.status !== 'Ditolak')
-                  .reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0)
-              : tor.budgetRequested,
+          budgetRequested: torCashAdvances
+            .filter((c) => c.status === 'Disetujui' || c.status === 'Dicairkan')
+            .reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0),
         }}
         isOpen={showPdfExport}
         onClose={() => setShowPdfExport(false)}

@@ -347,6 +347,9 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
   const [loadingDocList, setLoadingDocList] = useState(false);
   const [docSearchQuery, setDocSearchQuery] = useState('');
   const [docViewMode, setDocViewMode] = useState<'list' | 'form' | 'preview'>('list');
+  const [stage8ViewMode, setStage8ViewMode] = useState<'work' | 'preview'>(
+    initialViewMode === 'preview' ? 'preview' : 'work'
+  );
   const [isApprovingFinalSummary, setIsApprovingFinalSummary] = useState(false);
 
   const handleApproveFinalSummary = async (stage: 'report' | 'finance' | 'director') => {
@@ -1766,9 +1769,11 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
     notesList: string[];
   }
 
+  // Hanya Cash Advance yang TELAH DITUTUP (isReported === true) yang masuk ke dalam tabel Laporan Keuangan Tahap 08
+  const closedCas = activeCas.filter((c) => Boolean(c.isReported));
   const accumulatedMap = new Map<string, AccumulatedBudgetCodeRow>();
 
-  activeCas.forEach((ca) => {
+  closedCas.forEach((ca) => {
     const items = ca.items && ca.items.length > 0 ? ca.items : [];
     if (items.length > 0) {
       items.forEach((item, idx) => {
@@ -1890,11 +1895,11 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
   const totalCashAdvance =
     accumulatedRows.length > 0
       ? accumulatedRows.reduce((sum, r) => sum + r.advanceAmount, 0)
-      : activeCas.reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0);
+      : closedCas.reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0);
   const totalRealizedSpent =
     accumulatedRows.length > 0
       ? accumulatedRows.reduce((sum, r) => sum + r.actualSpent, 0)
-      : activeCas.reduce(
+      : closedCas.reduce(
           (sum, c) =>
             sum +
             (c.realizedAmount !== undefined
@@ -1941,6 +1946,29 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           <button
             type="button"
             onClick={() =>
+              setStage8ViewMode((prev) => (prev === 'preview' ? 'work' : 'preview'))
+            }
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-semibold transition-colors cursor-pointer ${
+              stage8ViewMode === 'preview'
+                ? 'border-[#1E3A8A] bg-blue-50 text-[#1E3A8A] hover:bg-blue-100'
+                : 'border-slate-300 bg-white hover:bg-slate-50 text-slate-800'
+            }`}
+          >
+            {stage8ViewMode === 'preview' ? (
+              <>
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>Tampilan Rekonsiliasi</span>
+              </>
+            ) : (
+              <>
+                <Eye className="w-3.5 h-3.5 text-[#1E3A8A]" />
+                <span>Preview Dokumen</span>
+              </>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
               downloadElementAsPdf({
                 filename: `Laporan_Keuangan_${tor.torNumber}`,
               })
@@ -1954,9 +1982,551 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
       </div>
 
       {/* ========================================================================= */}
-      {/* TABEL LAPORAN KEUANGAN AKUMULASI PER KODE BUDGET & MASTER KODE (GAMBAR 2 & 3) */}
+      {/* FORMAL DOCUMENT PREVIEW MODE (SAMA SEPERTI PREVIEW DOKUMEN LAINNYA)       */}
       {/* ========================================================================= */}
-      <div className="tor-formal-print-sheet bg-white rounded-lg border border-[#EAEAEA] p-4 sm:p-6 space-y-4">
+      {stage8ViewMode === 'preview' ? (
+        (() => {
+          const reportedAdvances = activeCas.filter((c) => c.isReported);
+          const closedRowList: { adv: number; sp: number }[] = [];
+          reportedAdvances.forEach((ca) => {
+            if (ca.items && ca.items.length > 0) {
+              ca.items.forEach((item, idx) => {
+                const rowKey = `${ca.id}-${item.id || idx}`;
+                const matched = summaryRows.find((sr) => sr.id === rowKey);
+                const adv = Number(item.totalAmount) || 0;
+                const sp =
+                  matched !== undefined
+                    ? Number(matched.actualSpent) || 0
+                    : item.actualSpent !== undefined
+                    ? Number(item.actualSpent)
+                    : ca.realizedAmount !== undefined && ca.items.length === 1
+                    ? Number(ca.realizedAmount)
+                    : adv;
+                closedRowList.push({ adv, sp });
+              });
+            } else {
+              const rowKey = `${ca.id}-main`;
+              const matched = summaryRows.find((sr) => sr.id === rowKey);
+              const adv = Number(ca.totalAmount) || 0;
+              const sp =
+                matched !== undefined
+                  ? Number(matched.actualSpent) || 0
+                  : ca.realizedAmount !== undefined
+                  ? Number(ca.realizedAmount)
+                  : adv;
+              closedRowList.push({ adv, sp });
+            }
+          });
+
+          const closedTotalAdvance = closedRowList.reduce((s, r) => s + r.adv, 0);
+          const closedTotalSpent = closedRowList.reduce((s, r) => s + r.sp, 0);
+          const closedTotalRemaining = closedRowList.reduce(
+            (s, r) => s + Math.max(0, r.adv - r.sp),
+            0
+          );
+          const closedTotalShortage = closedRowList.reduce(
+            (s, r) => s + Math.max(0, r.sp - r.adv),
+            0
+          );
+          const closedPercentUsed =
+            closedTotalAdvance > 0
+              ? Math.round((closedTotalSpent / closedTotalAdvance) * 100)
+              : 0;
+
+          const finalStatusText = (() => {
+            if (reportedAdvances.length === 0) {
+              return 'Belum ada laporan Cash Advance yang telah ditutup';
+            }
+            if (closedTotalRemaining > 0 && closedTotalShortage > 0) {
+              return 'Sisa telah dikembalikan ke kas & kekurangan telah dibayarkan ke pemohon';
+            }
+            if (closedTotalRemaining > 0) return 'Telah dikembalikan ke kas';
+            if (closedTotalShortage > 0) return 'Telah dibayarkan ke pemohon';
+            return 'Tidak ada sisa / kurang (Nihil)';
+          })();
+
+          const summaryMeta = summaryData || {};
+          const effectiveSignDate =
+            summaryMeta.reportDate || new Date().toISOString().slice(0, 10);
+
+          const timelineItems = tor.timelineItems || [];
+          const coveredStageCount =
+            timelineItems.length === 0
+              ? activeCas.length > 0
+                ? 1
+                : 0
+              : timelineItems.filter(
+                  (tl) =>
+                    summaryRows.some((sr: any) => sr.timelineItemId === tl.id) ||
+                    activeCas.some(
+                      (c) =>
+                        c.implementationMode === 'all' ||
+                        (c.implementationTimelineIds || []).includes(tl.id) ||
+                        (c.items || []).some((it) => it.timelineItemId === tl.id)
+                    )
+                ).length;
+          const totalStageCount = Math.max(1, timelineItems.length);
+          const allStagesHaveCa =
+            activeCas.length > 0 && coveredStageCount >= totalStageCount;
+          const allCasReported =
+            activeCas.length > 0 && activeCas.every((c) => Boolean(c.isReported));
+          const canTriggerFinalFinancialClosure = allStagesHaveCa && allCasReported;
+
+          const lastReportedCa =
+            reportedAdvances.length > 0
+              ? reportedAdvances[reportedAdvances.length - 1]
+              : null;
+
+          const isFinalReported =
+            Boolean(summaryMeta.summaryReportedAt) ||
+            (canTriggerFinalFinancialClosure && Boolean(lastReportedCa?.isReported));
+          const isFinalVerifiedByFinance =
+            Boolean(summaryMeta.summaryVerifiedAt) ||
+            summaryMeta.summaryApprovalStatus === 'Menunggu Persetujuan Director' ||
+            summaryMeta.summaryApprovalStatus === 'Telah Disetujui' ||
+            (canTriggerFinalFinancialClosure &&
+              reportedAdvances.length > 0 &&
+              reportedAdvances.every(
+                (c) =>
+                  Boolean(c.reportVerifiedAt) ||
+                  c.reportApprovalStatus === 'Menunggu Persetujuan Director' ||
+                  c.reportApprovalStatus === 'Telah Disetujui'
+              ));
+          const isFinalApprovedByDirector =
+            Boolean(summaryMeta.summaryApprovedAt) ||
+            summaryMeta.summaryApprovalStatus === 'Telah Disetujui' ||
+            (canTriggerFinalFinancialClosure &&
+              reportedAdvances.length > 0 &&
+              reportedAdvances.every(
+                (c) =>
+                  Boolean(c.reportApprovedAt) ||
+                  c.reportApprovalStatus === 'Telah Disetujui'
+              ));
+
+          return (
+            <article
+              className="tor-formal-print-sheet bg-white rounded border border-slate-300 px-8 py-8 sm:px-14 sm:py-12 shadow-xs space-y-5 text-[13.5px] leading-[1.38] text-black"
+              style={{ fontFamily: '"Times New Roman", Times, Georgia, serif' }}
+            >
+              {/* Judul Dokumen Resmi */}
+              <div className="text-center pb-1">
+                <h1 className="text-[16px] font-bold uppercase tracking-normal text-black leading-snug">
+                  LAPORAN KEUANGAN &amp; REKAPITULASI AKUMULASI DANA PER KODE BUDGET
+                </h1>
+                <div className="text-[14px] font-bold uppercase text-black mt-0.5 leading-snug">
+                  {organizationName} — {tor.title}
+                </div>
+              </div>
+
+              {/* Informasi Referensi TOR & Cakupan Laporan */}
+              <table className="w-full text-left border-collapse border border-black text-[13px]">
+                <tbody>
+                  <tr className="align-top">
+                    <td className="w-56 font-bold py-1.5 px-2.5 border border-black">
+                      Nomor Referensi TOR
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black font-bold">
+                      {tor.torNumber}
+                    </td>
+                    <td className="w-52 font-bold py-1.5 px-2.5 border border-black">
+                      Cakupan Tahap Implementasi
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black">
+                      {coveredStageCount} / {totalStageCount} Tahap Memiliki CA
+                    </td>
+                  </tr>
+                  <tr className="align-top">
+                    <td className="font-bold py-1.5 px-2.5 border border-black">
+                      Program &amp; Kegiatan
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black">
+                      <strong>{tor.programName || organizationName}</strong> — {tor.title}
+                    </td>
+                    <td className="font-bold py-1.5 px-2.5 border border-black">
+                      Laporan Cash Advance Ditutup
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black font-bold">
+                      {reportedAdvances.length} / {activeCas.length} Cash Advance
+                    </td>
+                  </tr>
+                  <tr className="align-top">
+                    <td className="font-bold py-1.5 px-2.5 border border-black">
+                      Pemohon / Pelaksana Kegiatan
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black">
+                      {summaryMeta.summaryReportedByName ||
+                        lastReportedCa?.reportedByName ||
+                        activeCas[0]?.requesterName ||
+                        tor.picName ||
+                        tor.createdByName}
+                    </td>
+                    <td className="font-bold py-1.5 px-2.5 border border-black">
+                      Tanggal Laporan
+                    </td>
+                    <td className="py-1.5 px-2.5 border border-black">
+                      {formatIndonesianDate(effectiveSignDate)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              {/* 1. Rekapitulasi Akumulasi Dana per Kode Budget */}
+              <section>
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13.5px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  1. Rekapitulasi Akumulasi Dana per Kode Budget &amp; Master Kode Outcome
+                </div>
+                <table className="w-full table-fixed text-left border-collapse border border-black text-[12px]">
+                  <thead>
+                    <tr className="bg-[#EFEFEF] text-black font-bold">
+                      <th className="py-1.5 px-1.5 w-[4.5%] text-center border border-black">
+                        No
+                      </th>
+                      <th className="py-1.5 px-2 w-[9.5%] text-center border border-black">
+                        Kode Budget
+                      </th>
+                      <th className="py-1.5 px-2.5 w-[27%] border border-black">
+                        Jenis Kegiatan (berdasarkan Budget / Outcome)
+                      </th>
+                      <th className="py-1.5 px-2 w-[12%] text-right border border-black">
+                        Uang Muka Diterima (Rp)
+                      </th>
+                      <th className="py-1.5 px-2 w-[12%] text-right border border-black">
+                        Realisasi Belanja (Rp)
+                      </th>
+                      <th className="py-1.5 px-2 w-[10.5%] text-right border border-black">
+                        Sisa Uang Muka (Rp)
+                      </th>
+                      <th className="py-1.5 px-2 w-[8.5%] text-right border border-black">
+                        Minus (Rp)
+                      </th>
+                      <th className="py-1.5 px-1.5 w-[6%] text-center border border-black">
+                        %
+                      </th>
+                      <th className="py-1.5 px-2 w-[10%] text-center border border-black">
+                        Keterangan
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {accumulatedRows.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={9}
+                          className="py-4 px-3 text-center italic border border-black text-black"
+                        >
+                          Belum ada laporan Cash Advance yang telah ditutup pada Tahap 03 (Ringkasan Cash Advance). Data pada tabel ini hanya menampilkan data dari Cash Advance yang laporannya telah ditutup.
+                        </td>
+                      </tr>
+                    ) : (
+                      accumulatedRows.map((row, idx) => {
+                        const statusNote =
+                          row.remaining === 0 && row.shortage === 0
+                            ? 'Sesuai anggaran'
+                            : row.remaining > 0
+                            ? 'Sisa kembali ke kas'
+                            : 'Kurang bayar';
+                        return (
+                          <tr key={row.code} className="align-top">
+                            <td className="py-1.5 px-1.5 text-center border border-black">
+                              {idx + 1}
+                            </td>
+                            <td className="py-1.5 px-2 text-center font-bold border border-black break-words">
+                              {row.code}
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black leading-snug break-words">
+                              <div>
+                                <strong>{row.masterName}</strong> —{' '}
+                                <strong>{row.activityCode}:</strong>{' '}
+                                {row.outcomeName || row.activityDescription}
+                              </div>
+                              {row.activityDescription &&
+                                row.outcomeName &&
+                                row.activityDescription !== row.outcomeName && (
+                                  <div className="text-[11px] mt-0.5">
+                                    {row.activityDescription}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black break-words">
+                              {formatAccountingCell(row.advanceAmount)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-bold border border-black break-words">
+                              {formatAccountingCell(row.actualSpent)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black break-words">
+                              {formatAccountingCell(row.remaining)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black break-words">
+                              {formatAccountingCell(row.shortage)}
+                            </td>
+                            <td className="py-1.5 px-1.5 text-center font-bold border border-black">
+                              {row.percentUsed}%
+                            </td>
+                            <td className="py-1.5 px-2 text-center border border-black text-[11px] break-words">
+                              <div className="font-bold">{statusNote}</div>
+                              <div>({row.itemCount} pos)</div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#EFEFEF] font-bold text-black">
+                      <td
+                        colSpan={3}
+                        className="py-1.5 px-2.5 text-right uppercase border border-black"
+                      >
+                        TOTAL AKUMULASI DANA SELURUH KODE BUDGET
+                      </td>
+                      <td className="py-1.5 px-2 text-right border border-black break-words">
+                        {formatAccountingCell(totalCashAdvance)}
+                      </td>
+                      <td className="py-1.5 px-2 text-right border border-black break-words">
+                        {formatAccountingCell(totalRealizedSpent)}
+                      </td>
+                      <td className="py-1.5 px-2 text-right border border-black break-words">
+                        {formatAccountingCell(totalRemaining)}
+                      </td>
+                      <td className="py-1.5 px-2 text-right border border-black break-words">
+                        {formatAccountingCell(totalShortage)}
+                      </td>
+                      <td className="py-1.5 px-1.5 text-center border border-black">
+                        {totalPercentUsed}%
+                      </td>
+                      <td className="py-1.5 px-2 text-center border border-black">
+                        {accumulatedRows.length} Kode
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </section>
+
+              {/* 2. Ringkasan Akhir (Akumulasi Laporan yang Telah Ditutup) */}
+              <section className="space-y-2">
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13.5px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  2. Ringkasan Akhir (Akumulasi Laporan yang Telah Ditutup)
+                </div>
+                <table className="w-full table-fixed text-[12.5px] border-collapse border border-black">
+                  <tbody>
+                    <tr>
+                      <td className="py-1.5 px-2.5 w-[39%] border border-black text-black">
+                        Total Uang Muka yang Telah Diterima
+                      </td>
+                      <td className="py-1.5 px-3 w-[42.5%] border border-black text-right font-bold text-black">
+                        {formatAccountingCell(closedTotalAdvance)}
+                      </td>
+                      <td className="py-1.5 px-3 w-[18.5%] border border-black text-center font-bold text-black">
+                        {closedTotalAdvance > 0 ? '100%' : '0%'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2.5 border border-black text-black">
+                        Total Realisasi Belanja yang Telah Dilaporkan
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-right font-bold text-black">
+                        {formatAccountingCell(closedTotalSpent)}
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-center font-bold text-black">
+                        {closedPercentUsed}%
+                      </td>
+                    </tr>
+                    <tr className="bg-[#EFEFEF] font-bold">
+                      <td className="py-1.5 px-2.5 border border-black text-black">
+                        SISA uang muka (telah dikembalikan ke kas)
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-right text-black">
+                        {formatAccountingCell(closedTotalRemaining)}
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-center text-black">
+                        {closedTotalAdvance > 0 && closedTotalRemaining > 0
+                          ? `${Math.round((closedTotalRemaining / closedTotalAdvance) * 100)}%`
+                          : '0%'}
+                      </td>
+                    </tr>
+                    <tr className="bg-[#EFEFEF] font-bold">
+                      <td className="py-1.5 px-2.5 border border-black text-black">
+                        MINUS (telah dibayarkan kepada pemohon)
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-right text-black">
+                        {formatAccountingCell(closedTotalShortage)}
+                      </td>
+                      <td className="py-1.5 px-3 border border-black text-center text-black">
+                        {closedTotalAdvance > 0 && closedTotalShortage > 0
+                          ? `+${Math.round((closedTotalShortage / closedTotalAdvance) * 100)}%`
+                          : '0%'}
+                      </td>
+                    </tr>
+                    <tr className="font-bold">
+                      <td className="py-1.5 px-2.5 border border-black text-black">
+                        Status Laporan yang Telah Ditutup
+                      </td>
+                      <td
+                        colSpan={2}
+                        className="py-1.5 px-3 border border-black text-center text-black font-bold"
+                      >
+                        {finalStatusText}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 pt-1 text-[12px] italic text-black">
+                  <div className="sm:col-span-5 pr-2">Cek uang muka form vs laporan</div>
+                  <div className="sm:col-span-7">
+                    {reportedAdvances.length > 0
+                      ? 'OK – seluruh uang muka pada Form Permintaan Dana & Form Tambahan yang telah ditutup laporan telah tercakup di ringkasan akhir'
+                      : 'Menunggu penutupan laporan Cash Advance beserta lampiran Link PDF Expensify'}
+                  </div>
+                </div>
+              </section>
+
+              {/* 3. Lembar Pengesahan & Otorisasi Laporan Keuangan Akhir */}
+              <section className="pt-2">
+                <div
+                  className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13.5px]"
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                >
+                  3. Lembar Pengesahan &amp; Otorisasi Laporan Keuangan Akhir
+                </div>
+                <table className="w-full text-center border-collapse border border-black text-[12.5px]">
+                  <thead>
+                    <tr className="bg-[#EFEFEF] font-bold text-black">
+                      <th className="py-1.5 px-2 w-1/3 border border-black">
+                        Telah Dilaporkan oleh,
+                      </th>
+                      <th className="py-1.5 px-2 w-1/3 border border-black">
+                        Telah Diperiksa oleh,
+                      </th>
+                      <th className="py-1.5 px-2 w-1/3 border border-black">
+                        Telah Disetujui oleh,
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="align-top">
+                      <td className="py-3 px-2 border border-black">
+                        <div className="my-2 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            variant={isFinalReported ? 'authorized' : 'pending'}
+                            documentNumber={lastReportedCa?.advanceNumber || tor.torNumber}
+                            roleCode="REP"
+                            signerName={
+                              summaryMeta.summaryReportedByName ||
+                              lastReportedCa?.reportedByName ||
+                              activeCas[0]?.requesterName ||
+                              tor.picName ||
+                              tor.createdByName
+                            }
+                            signDate={
+                              summaryMeta.summaryReportedAt ||
+                              lastReportedCa?.reportedAt ||
+                              effectiveSignDate
+                            }
+                            statusLabel={
+                              isFinalReported
+                                ? `TELAH DILAPORKAN (${reportedAdvances.length}/${activeCas.length} CA)`
+                                : 'BELUM ADA LAPORAN DITUTUP'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {summaryMeta.summaryReportedByName ||
+                            lastReportedCa?.reportedByName ||
+                            activeCas[0]?.requesterName ||
+                            tor.picName ||
+                            tor.createdByName}
+                        </div>
+                        <div className="text-[11px]">Pemohon / Pelaksana Kegiatan</div>
+                      </td>
+
+                      <td className="py-3 px-2 border border-black">
+                        <div className="my-2 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            variant={isFinalVerifiedByFinance ? 'authorized' : 'pending'}
+                            documentNumber={lastReportedCa?.advanceNumber || tor.torNumber}
+                            roleCode="FIN"
+                            signerName={
+                              summaryMeta.summaryVerifiedByName ||
+                              lastReportedCa?.reportVerifiedByName ||
+                              activeCas[0]?.signatures?.verifiedBy?.name ||
+                              'Ratna Kusuma, S.E.'
+                            }
+                            signDate={
+                              summaryMeta.summaryVerifiedAt ||
+                              lastReportedCa?.reportVerifiedAt ||
+                              effectiveSignDate
+                            }
+                            statusLabel={
+                              isFinalVerifiedByFinance
+                                ? 'TERVERIFIKASI FINANCE'
+                                : isFinalReported
+                                ? 'MENUNGGU PEMERIKSAAN FINANCE'
+                                : 'MENUNGGU LAPORAN DITUTUP'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {summaryMeta.summaryVerifiedByName ||
+                            lastReportedCa?.reportVerifiedByName ||
+                            activeCas[0]?.signatures?.verifiedBy?.name ||
+                            'Ratna Kusuma, S.E.'}
+                        </div>
+                        <div className="text-[11px]">Finance &amp; Compliance</div>
+                      </td>
+
+                      <td className="py-3 px-2 border border-black">
+                        <div className="my-2 flex justify-center">
+                          <ApprovalBarcodeStamp
+                            variant={isFinalApprovedByDirector ? 'authorized' : 'pending'}
+                            documentNumber={lastReportedCa?.advanceNumber || tor.torNumber}
+                            roleCode="DIR"
+                            signerName={
+                              summaryMeta.summaryApprovedByName ||
+                              lastReportedCa?.reportApprovedByName ||
+                              activeCas[0]?.signatures?.approvedBy?.name ||
+                              'Dr. Hendra Wijaya'
+                            }
+                            signDate={
+                              summaryMeta.summaryApprovedAt ||
+                              lastReportedCa?.reportApprovedAt ||
+                              effectiveSignDate
+                            }
+                            statusLabel={
+                              isFinalApprovedByDirector
+                                ? 'DISETUJUI DIRECTOR (FINAL)'
+                                : isFinalVerifiedByFinance
+                                ? 'MENUNGGU PERSETUJUAN DIRECTOR'
+                                : 'MENUNGGU PEMERIKSAAN FINANCE'
+                            }
+                          />
+                        </div>
+                        <div className="font-bold underline">
+                          {summaryMeta.summaryApprovedByName ||
+                            lastReportedCa?.reportApprovedByName ||
+                            activeCas[0]?.signatures?.approvedBy?.name ||
+                            'Dr. Hendra Wijaya'}
+                        </div>
+                        <div className="text-[11px]">Executive Director</div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+            </article>
+          );
+        })()
+      ) : (
+        /* ========================================================================= */
+        /* TABEL LAPORAN KEUANGAN AKUMULASI PER KODE BUDGET & MASTER KODE (GAMBAR 2 & 3) */
+        /* ========================================================================= */
+        <div className="tor-formal-print-sheet bg-white rounded-lg border border-[#EAEAEA] p-4 sm:p-6 space-y-4">
         <div className="border-b-2 border-slate-900 pb-2 flex flex-col sm:flex-row sm:items-end justify-between gap-2">
           <div>
             <h2 className="text-sm sm:text-base font-extrabold tracking-wide uppercase text-slate-900">
@@ -1972,8 +2542,13 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
         </div>
 
         {accumulatedRows.length === 0 ? (
-          <div className="p-6 text-center text-[#787774] border border-slate-300 rounded text-xs">
-            Belum ada data Cash Advance pada Tahap 02 untuk diakumulasikan ke Laporan Keuangan.
+          <div className="p-6 text-center text-[#787774] border border-slate-300 rounded text-xs space-y-2">
+            <p className="font-medium text-slate-700">
+              Belum ada laporan Cash Advance yang telah ditutup pada Tahap 03 (Ringkasan Cash Advance).
+            </p>
+            <p className="text-[11px] text-slate-500">
+              Data pada tabel Laporan Keuangan &amp; Rekapitulasi Akumulasi Dana per Kode Budget ini hanya menampilkan data dari Cash Advance yang laporannya telah ditutup.
+            </p>
           </div>
         ) : (
           <div className="w-full overflow-hidden border border-slate-800">
@@ -2555,6 +3130,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           );
         })()}
       </div>
+      )}
     </div>
   );
 };

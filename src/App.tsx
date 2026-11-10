@@ -387,7 +387,7 @@ function MainAppContent() {
     attendance: 'Your Contribution',
     'employee-profile': 'Profil Karyawan — Output, Cuti & Multi Pelatihan',
     'work-recap': 'Rekap Kerja – WIJNA',
-    programs: 'Our Impact',
+    programs: 'Our Intervention',
     participants: 'People We Reach & Serve',
     'monitoring-tools': 'Your Missions',
     'my-tors': currentUser?.role === 'staff' ? 'TOR Saya' : 'Daftar Dokumen TOR',

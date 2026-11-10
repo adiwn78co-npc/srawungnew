@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Printer,
   Send,
@@ -19,6 +19,9 @@ import {
   X,
   ChevronDown,
   ChevronUp,
+  Eye,
+  Download,
+  Edit3,
 } from 'lucide-react';
 import { Tor, CashAdvanceRecord, User } from '../../types/index.js';
 import { formatRupiah } from '../../lib/terbilang.js';
@@ -108,6 +111,9 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
   const [closeNotesInput, setCloseNotesInput] = useState<string>('');
   const [itemSpentMap, setItemSpentMap] = useState<Record<string, number>>({});
   const [isClosingReport, setIsClosingReport] = useState<boolean>(false);
+  const [isCloseModalPreviewMode, setIsCloseModalPreviewMode] = useState<boolean>(false);
+  const [isDownloadingClosePdf, setIsDownloadingClosePdf] = useState<boolean>(false);
+  const closeReportPrintRef = useRef<HTMLDivElement | null>(null);
   const [summaryMeta, setSummaryMeta] = useState<Record<string, any>>({});
   const [isApprovingStage, setIsApprovingStage] = useState<boolean>(false);
   const [showClosurePanel, setShowClosurePanel] = useState<boolean>(false);
@@ -303,9 +309,10 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
   };
 
   // Open "Tutup Laporan" modal for a specific Cash Advance
-  const handleOpenCloseModal = (ca: CashAdvanceRecord) => {
+  const handleOpenCloseModal = (ca: CashAdvanceRecord, previewMode = false) => {
     setErrorMessage(null);
     setClosingCa(ca);
+    setIsCloseModalPreviewMode(previewMode);
     setExpensifyLinkInput(ca.expensifyPdfLink || '');
     setCloseNotesInput(ca.reportNotes || '');
 
@@ -321,6 +328,63 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
           : Number(it.totalAmount) || 0;
     });
     setItemSpentMap(initialMap);
+  };
+
+  const handleDownloadClosingCaPdf = async () => {
+    if (!closingCa) return;
+    setIsDownloadingClosePdf(true);
+    try {
+      if (!isCloseModalPreviewMode) {
+        setIsCloseModalPreviewMode(true);
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      if (!closeReportPrintRef.current) return;
+      await downloadElementAsPdf({
+        element: closeReportPrintRef.current,
+        filename: `Tutup_Laporan_Cash_Advance_${closingCa.advanceNumber}`,
+        paperFormat: 'a4',
+        orientation: 'portrait',
+        marginMm: 8,
+      });
+    } finally {
+      setIsDownloadingClosePdf(false);
+    }
+  };
+
+  const handleExportClosingCaDocx = () => {
+    if (!closingCa || !closeReportPrintRef.current) return;
+    const htmlContent = closeReportPrintRef.current.innerHTML;
+    const docWrapper = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office'
+            xmlns:w='urn:schemas-microsoft-com:office:word'
+            xmlns='http://www.w3.org/TR/REC-html40'>
+      <head>
+        <meta charset="utf-8">
+        <title>Laporan Cash Advance - ${closingCa.advanceNumber}</title>
+        <style>
+          @page { size: A4 portrait; margin: 20mm 18mm 20mm 18mm; }
+          body { font-family: "Times New Roman", Times, serif; font-size: 11pt; line-height: 1.38; color: #000000; }
+          h1 { font-size: 14pt; font-weight: bold; text-align: center; margin: 0 0 6pt 0; text-transform: uppercase; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 10pt; }
+          th, td { border: 1px solid #000000; padding: 5pt 6pt; vertical-align: top; font-size: 10.5pt; }
+          th { background-color: #EFEFEF; font-weight: bold; }
+        </style>
+      </head>
+      <body>${htmlContent}</body>
+      </html>
+    `;
+    const blob = new Blob(['\ufeff', docWrapper], {
+      type: 'application/msword;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeNo = (closingCa.advanceNumber || 'CA').replace(/[^a-zA-Z0-9_-]/g, '_');
+    link.href = url;
+    link.download = `Laporan_Cash_Advance_${safeNo}.doc`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const handleConfirmCloseReport = async (e: React.FormEvent) => {
@@ -769,25 +833,37 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                       )}
                     </div>
 
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-200/80">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/80">
                       <span className="text-[10.5px] text-slate-500">
                         Tgl Pengajuan: <strong className="font-mono">{ca.requestDate}</strong>
                       </span>
 
-                      <button
-                        type="button"
-                        onClick={() => handleOpenCloseModal(ca)}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-colors cursor-pointer ${
-                          isClosed
-                            ? 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
-                            : 'bg-[#1E3A8A] text-white hover:bg-[#1E40AF] shadow-2xs'
-                        }`}
-                      >
-                        <FileCheck2 className="w-3.5 h-3.5" />
-                        <span>
-                          {isClosed ? 'Lihat Detail Tutup Laporan' : 'Tutup Laporan (Lampirkan Expensify)'}
-                        </span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCloseModal(ca, true)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-300 hover:bg-slate-200 transition-colors cursor-pointer"
+                          title="Preview & Download PDF Tutup Laporan Cash Advance"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-[#1E3A8A]" />
+                          <span>Preview &amp; PDF</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCloseModal(ca, false)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                            isClosed
+                              ? 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                              : 'bg-[#1E3A8A] text-white hover:bg-[#1E40AF] shadow-2xs'
+                          }`}
+                        >
+                          <FileCheck2 className="w-3.5 h-3.5" />
+                          <span>
+                            {isClosed ? 'Lihat Detail Tutup Laporan' : 'Tutup Laporan (Lampirkan Expensify)'}
+                          </span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -854,10 +930,495 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
           return 'Tidak ada sisa / kurang';
         })();
 
+        const isFinVerified =
+          Boolean(closingCa.reportVerifiedAt) ||
+          closingCa.reportApprovalStatus === 'Menunggu Persetujuan Director' ||
+          closingCa.reportApprovalStatus === 'Telah Disetujui';
+        const isDirApproved =
+          Boolean(closingCa.reportApprovedAt) ||
+          closingCa.reportApprovalStatus === 'Telah Disetujui';
+
+        if (isCloseModalPreviewMode) {
+          return (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+              <div className="bg-[#F7F7F5] rounded-lg border border-stone-200 shadow-2xl max-w-5xl w-full max-h-[96vh] flex flex-col overflow-y-auto p-4 sm:p-6 my-auto">
+                <div className="max-w-4xl mx-auto w-full space-y-4">
+                  {/* Top Action Bar (Exact style matching CashAdvanceDetailModal / ToR / Notulen / Dokumentasi) */}
+                  <div className="bg-white rounded-md border border-stone-200/80 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 print:hidden">
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setClosingCa(null)}
+                        className="text-xs font-medium text-stone-600 hover:text-stone-900 cursor-pointer"
+                      >
+                        ← Kembali ke Ringkasan Cash Advance
+                      </button>
+                      <span className="text-stone-300">|</span>
+                      <span className="font-mono text-xs text-stone-700 font-medium">
+                        {closingCa.advanceNumber}
+                      </span>
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${
+                          isDirApproved
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : closingCa.isReported
+                            ? 'bg-sky-50 text-sky-700 border-sky-200'
+                            : 'bg-amber-50 text-amber-700 border-amber-200'
+                        }`}
+                      >
+                        {isDirApproved
+                          ? 'Laporan Disetujui'
+                          : closingCa.isReported
+                          ? 'Laporan Ditutup'
+                          : 'Draft Penutupan Laporan'}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setIsCloseModalPreviewMode(false)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-medium cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Form Tutup Laporan</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportClosingCaDocx}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-medium cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export DOCX</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isDownloadingClosePdf}
+                        onClick={handleDownloadClosingCaPdf}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>
+                          {isDownloadingClosePdf ? 'Mengunduh PDF...' : 'Simpan / Download PDF'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setClosingCa(null)}
+                        className="p-1 text-stone-400 hover:text-stone-700 hover:bg-stone-100 rounded transition-colors cursor-pointer"
+                        aria-label="Tutup Pratinjau"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Formal Print Sheet */}
+                  <article
+                    ref={closeReportPrintRef}
+                    className="tor-formal-print-sheet bg-white rounded border border-slate-300 px-8 py-8 sm:px-14 sm:py-12 shadow-xs space-y-5 text-[14px] leading-[1.38] text-black"
+                    style={{ fontFamily: '"Times New Roman", Times, Georgia, serif' }}
+                  >
+                    <div className="text-center pb-1">
+                      <h1 className="text-[18px] font-bold text-black tracking-normal leading-snug uppercase">
+                        LAPORAN PENUTUPAN &amp; PERTANGGUNGJAWABAN CASH ADVANCE
+                      </h1>
+                      <div className="text-[15px] font-bold text-black mt-0.5 leading-snug">
+                        {closingCa.activityTitle || tor.title}
+                      </div>
+                    </div>
+
+                    {/* 1. Informasi Laporan & Kegiatan */}
+                    <section>
+                      <div
+                        className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                        style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                      >
+                        1. Informasi Pengajuan &amp; Penutupan Laporan (Cash Advance Settlement Information)
+                      </div>
+                      <table className="w-full text-left border-collapse border border-black text-[13.5px]">
+                        <tbody>
+                          <tr>
+                            <td className="py-1.5 px-2.5 w-[28%] border border-black font-bold align-top">
+                              Organisasi / Lembaga
+                            </td>
+                            <td className="py-1.5 px-2.5 w-[72%] border border-black align-top" colSpan={3}>
+                              {organizationName}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 w-[28%] border border-black font-bold align-top">
+                              Nomor Cash Advance
+                            </td>
+                            <td className="py-1.5 px-2.5 w-[25%] border border-black font-bold align-top">
+                              {closingCa.advanceNumber}
+                            </td>
+                            <td className="py-1.5 px-2.5 w-[22%] border border-black font-bold align-top">
+                              Batas Lapor (H+7)
+                            </td>
+                            <td className="py-1.5 px-2.5 w-[25%] border border-black align-top">
+                              {closingCa.reportingDeadlineDate || computeDeadlinePlus7(closingCa.requestDate)}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              Referensi Nomor TOR
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black align-top">
+                              {tor.torNumber}
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              Program
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black align-top">
+                              {tor.programName || '-'}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              Dasar Implementasi
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black align-top" colSpan={3}>
+                              {closingCa.implementationTimelineSummary || 'Seluruh Tahapan Implementasi'}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              Pemohon / Pelaksana
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black align-top">
+                              {closingCa.reportedByName || closingCa.requesterName || tor.picName || tor.createdByName}
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              Status Penyelesaian
+                            </td>
+                            <td className="py-1.5 px-2.5 border border-black font-bold align-top">
+                              {modalStatusText} ({modalPercentUsed}% Serapan)
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </section>
+
+                    {/* 2. Rincian Realisasi Belanja Aktual per Item */}
+                    <section>
+                      <div
+                        className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                        style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                      >
+                        2. Rincian Realisasi Belanja Aktual per Item (Actual Expenditure Breakdown)
+                      </div>
+                      <table className="w-full text-left border-collapse border border-black text-[13px]">
+                        <thead>
+                          <tr className="bg-[#EFEFEF] text-black font-bold">
+                            <th className="py-1.5 px-1.5 w-[5%] text-center border border-black">No</th>
+                            <th className="py-1.5 px-2 w-[17%] border border-black">Kode &amp; Nama Master</th>
+                            <th className="py-1.5 px-2.5 w-[26%] border border-black">Uraian Item</th>
+                            <th className="py-1.5 px-2 w-[13%] text-right border border-black">Uang Muka (Rp)</th>
+                            <th className="py-1.5 px-2 w-[13%] text-right border border-black">Realisasi (Rp)</th>
+                            <th className="py-1.5 px-2 w-[11%] text-right border border-black">Sisa Dana</th>
+                            <th className="py-1.5 px-2 w-[9%] text-right border border-black">Minus</th>
+                            <th className="py-1.5 px-1.5 w-[6%] text-center border border-black">%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modalItems.map((it, itemIdx) => {
+                            const itemAdv = Number(it.totalAmount) || 0;
+                            const itemSpent =
+                              itemSpentMap[it.id] === undefined
+                                ? Number(it.actualSpent ?? it.totalAmount) || 0
+                                : Number(itemSpentMap[it.id]) || 0;
+                            const itemRem = Math.max(0, itemAdv - itemSpent);
+                            const itemShort = Math.max(0, itemSpent - itemAdv);
+                            const itemPct =
+                              itemAdv > 0 ? Math.round((itemSpent / itemAdv) * 100) : 0;
+                            const masterInfo = resolveMasterBudgetByCode(it.budgetCode, tor);
+
+                            return (
+                              <tr key={it.id || itemIdx} className="align-top">
+                                <td className="py-1.5 px-1.5 text-center border border-black">
+                                  {itemIdx + 1}
+                                </td>
+                                <td className="py-1.5 px-2 border border-black">
+                                  <div className="font-bold">{masterInfo.code}</div>
+                                  <div className="text-[12px] leading-snug">{masterInfo.masterName}</div>
+                                </td>
+                                <td className="py-1.5 px-2.5 border border-black">
+                                  <div className="font-bold leading-snug">{it.description}</div>
+                                  {(it.timelineActivity || it.timelinePeriod) && (
+                                    <div className="text-[11.5px] italic mt-0.5">
+                                      Implementasi: {it.timelineActivity || it.timelinePeriod}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2 text-right border border-black">
+                                  {formatRupiah(itemAdv)}
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-bold border border-black">
+                                  {formatRupiah(itemSpent)}
+                                </td>
+                                <td className="py-1.5 px-2 text-right border border-black">
+                                  {formatAccountingCell(itemRem)}
+                                </td>
+                                <td className="py-1.5 px-2 text-right border border-black">
+                                  {formatAccountingCell(itemShort)}
+                                </td>
+                                <td className="py-1.5 px-1.5 text-center font-bold border border-black">
+                                  {itemPct}%
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-[#EFEFEF] font-bold text-black">
+                            <td colSpan={3} className="py-1.5 px-2.5 text-right uppercase border border-black">
+                              Total Cash Advance Ini
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black">
+                              {formatAccountingCell(modalTotalAdvance)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black">
+                              {formatAccountingCell(modalTotalSpent)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black">
+                              {formatAccountingCell(modalTotalRemaining)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right border border-black">
+                              {formatAccountingCell(modalTotalShortage)}
+                            </td>
+                            <td className="py-1.5 px-1.5 text-center border border-black">
+                              {modalPercentUsed}%
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </section>
+
+                    {/* 3. Ringkasan Akhir & Lampiran Link PDF Expensify */}
+                    <section>
+                      <div
+                        className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                        style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                      >
+                        3. Ringkasan Akhir &amp; Bukti Pelaporan Expensify (Final Settlement Summary)
+                      </div>
+                      <table className="w-full text-left border-collapse border border-black text-[13px]">
+                        <tbody>
+                          <tr>
+                            <td className="py-1.5 px-2.5 w-[45%] border border-black">
+                              Total Uang Muka Diterima
+                            </td>
+                            <td className="py-1.5 px-3 w-[35%] border border-black text-right font-bold">
+                              {formatAccountingCell(modalTotalAdvance)}
+                            </td>
+                            <td className="py-1.5 px-3 w-[20%] border border-black text-center font-bold">
+                              100%
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 border border-black">
+                              Total Realisasi Belanja
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-right font-bold">
+                              {formatAccountingCell(modalTotalSpent)}
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-center font-bold">
+                              {modalPercentUsed}%
+                            </td>
+                          </tr>
+                          <tr className="bg-[#EFEFEF] font-bold">
+                            <td className="py-1.5 px-2.5 border border-black">
+                              SISA uang muka (dikembalikan ke kas)
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-right">
+                              {formatAccountingCell(modalTotalRemaining)}
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-center">
+                              {modalTotalRemaining > 0 ? `${modalRemainingPct}%` : '0%'}
+                            </td>
+                          </tr>
+                          <tr className="bg-[#EFEFEF] font-bold">
+                            <td className="py-1.5 px-2.5 border border-black">
+                              KEKURANGAN (dibayarkan kepada pemohon)
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-right">
+                              {formatAccountingCell(modalTotalShortage)}
+                            </td>
+                            <td className="py-1.5 px-3 border border-black text-center">
+                              {modalTotalShortage > 0 ? `+${modalShortagePct}%` : '0%'}
+                            </td>
+                          </tr>
+                          <tr className="font-bold">
+                            <td className="py-1.5 px-2.5 border border-black">Status Rekonsiliasi</td>
+                            <td colSpan={2} className="py-1.5 px-3 border border-black text-center">
+                              {modalStatusText}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="py-1.5 px-2.5 border border-black font-bold">
+                              Lampiran Link PDF Expensify
+                            </td>
+                            <td colSpan={2} className="py-1.5 px-3 border border-black break-all">
+                              {expensifyLinkInput.trim() ? (
+                                <a
+                                  href={expensifyLinkInput.trim()}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="underline text-blue-900 font-bold"
+                                >
+                                  {expensifyLinkInput.trim()}
+                                </a>
+                              ) : (
+                                <span className="italic">Belum dilampirkan</span>
+                              )}
+                            </td>
+                          </tr>
+                          {closeNotesInput.trim() && (
+                            <tr>
+                              <td className="py-1.5 px-2.5 border border-black font-bold">
+                                Catatan Penutupan Laporan
+                              </td>
+                              <td colSpan={2} className="py-1.5 px-3 border border-black">
+                                {closeNotesInput.trim()}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                      <div className="pt-1 text-[12px] italic text-black">
+                        Cek uang muka form vs laporan: OK – seluruh uang muka pada Form Permintaan Dana &amp; Form Tambahan sudah tercakup di laporan.
+                      </div>
+                    </section>
+
+                    {/* 4. Otorisasi & Persetujuan Laporan */}
+                    <section className="pt-1">
+                      <div
+                        className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2.5 text-[14px]"
+                        style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+                      >
+                        4. Otorisasi &amp; Persetujuan Laporan (Signatures &amp; Verification)
+                      </div>
+                      <table className="w-full text-center border-collapse border border-black text-[13px]">
+                        <thead>
+                          <tr className="bg-[#EFEFEF] font-bold">
+                            <th className="py-1.5 px-2 w-1/3 border border-black">1. Dilaporkan Oleh</th>
+                            <th className="py-1.5 px-2 w-1/3 border border-black">2. Diperiksa Oleh</th>
+                            <th className="py-1.5 px-2 w-1/3 border border-black">3. Disetujui Oleh</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="align-top">
+                            <td className="py-2.5 px-2 border border-black">
+                              <div className="my-1.5 flex justify-center">
+                                <ApprovalBarcodeStamp
+                                  compact
+                                  variant={closingCa.isReported ? 'authorized' : 'pending'}
+                                  documentNumber={closingCa.advanceNumber}
+                                  roleCode="REP"
+                                  signerName={
+                                    closingCa.reportedByName ||
+                                    closingCa.requesterName ||
+                                    tor.picName ||
+                                    tor.createdByName
+                                  }
+                                  signDate={closingCa.reportedAt || closingCa.requestDate}
+                                  statusLabel={
+                                    closingCa.isReported
+                                      ? 'TELAH DILAPORKAN'
+                                      : 'MENUNGGU TUTUP LAPORAN'
+                                  }
+                                />
+                              </div>
+                              <div className="font-bold underline">
+                                {closingCa.reportedByName ||
+                                  closingCa.requesterName ||
+                                  tor.picName ||
+                                  tor.createdByName}
+                              </div>
+                              <div className="text-[11.5px]">Pemohon / Pelaksana Kegiatan</div>
+                            </td>
+                            <td className="py-2.5 px-2 border border-black">
+                              <div className="my-1.5 flex justify-center">
+                                <ApprovalBarcodeStamp
+                                  compact
+                                  variant={isFinVerified ? 'authorized' : 'pending'}
+                                  documentNumber={closingCa.advanceNumber}
+                                  roleCode="FIN"
+                                  signerName={
+                                    closingCa.reportVerifiedByName ||
+                                    closingCa.signatures?.verifiedBy?.name ||
+                                    'Ratna Kusuma, S.E.'
+                                  }
+                                  signDate={
+                                    closingCa.reportVerifiedAt ||
+                                    closingCa.reportedAt ||
+                                    closingCa.requestDate
+                                  }
+                                  statusLabel={
+                                    isFinVerified
+                                      ? 'TERVERIFIKASI FINANCE'
+                                      : closingCa.isReported
+                                      ? 'MENUNGGU PEMERIKSAAN FINANCE'
+                                      : 'MENUNGGU LAPORAN DITUTUP'
+                                  }
+                                />
+                              </div>
+                              <div className="font-bold underline">
+                                {closingCa.reportVerifiedByName ||
+                                  closingCa.signatures?.verifiedBy?.name ||
+                                  'Ratna Kusuma, S.E.'}
+                              </div>
+                              <div className="text-[11.5px]">Finance &amp; Compliance</div>
+                            </td>
+                            <td className="py-2.5 px-2 border border-black">
+                              <div className="my-1.5 flex justify-center">
+                                <ApprovalBarcodeStamp
+                                  compact
+                                  variant={isDirApproved ? 'authorized' : 'pending'}
+                                  documentNumber={closingCa.advanceNumber}
+                                  roleCode="DIR"
+                                  signerName={
+                                    closingCa.reportApprovedByName ||
+                                    closingCa.signatures?.approvedBy?.name ||
+                                    'Dr. Hendra Wijaya'
+                                  }
+                                  signDate={
+                                    closingCa.reportApprovedAt ||
+                                    closingCa.reportVerifiedAt ||
+                                    closingCa.requestDate
+                                  }
+                                  statusLabel={
+                                    isDirApproved
+                                      ? 'DISETUJUI DIRECTOR'
+                                      : isFinVerified
+                                      ? 'MENUNGGU PERSETUJUAN DIRECTOR'
+                                      : 'MENUNGGU PEMERIKSAAN FINANCE'
+                                  }
+                                />
+                              </div>
+                              <div className="font-bold underline">
+                                {closingCa.reportApprovedByName ||
+                                  closingCa.signatures?.approvedBy?.name ||
+                                  'Dr. Hendra Wijaya'}
+                              </div>
+                              <div className="text-[11.5px]">Executive Director</div>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </section>
+                  </article>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             <div className="bg-white rounded-lg border border-slate-300 shadow-2xl max-w-5xl w-full max-h-[92vh] flex flex-col overflow-hidden my-auto">
-              <div className="px-5 py-3.5 bg-[#0F172A] text-white flex items-center justify-between shrink-0">
+              <div className="px-5 py-3.5 bg-[#0F172A] text-white flex flex-wrap items-center justify-between gap-2 shrink-0">
                 <div className="flex items-center gap-2">
                   <FileCheck2 className="w-4 h-4 text-sky-400" />
                   <div>
@@ -869,16 +1430,36 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                     </p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setClosingCa(null)}
-                  className="p-1 text-slate-400 hover:text-white rounded cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsCloseModalPreviewMode(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border bg-slate-800 border-slate-600 text-slate-100 hover:bg-slate-700 transition-colors cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Preview Dokumen</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDownloadingClosePdf}
+                    onClick={handleDownloadClosingCaPdf}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{isDownloadingClosePdf ? 'Mengunduh PDF...' : 'Download PDF'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setClosingCa(null)}
+                    className="p-1 text-slate-400 hover:text-white rounded cursor-pointer ml-1"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               <form onSubmit={handleConfirmCloseReport} className="p-5 space-y-5 text-xs overflow-y-auto">
+                <div className="space-y-4 bg-white">
                 <div className="p-3 bg-blue-50/70 border border-blue-200 rounded flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="font-bold text-[#1E3A8A]">
@@ -1259,59 +1840,119 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                   </div>
                 </div>
 
-                {/* Mandatory Expensify PDF Link */}
-                <div className="p-3.5 bg-amber-50/80 border border-amber-300 rounded-md space-y-2">
-                  <label className="block font-bold text-amber-950">
-                    2. Lampiran Link PDF Expensify (Wajib Diisi untuk Tutup Laporan) *
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="url"
-                      required
-                      value={expensifyLinkInput}
-                      onChange={(e) => setExpensifyLinkInput(e.target.value)}
-                      placeholder="https://www.expensify.com/report.pdf?param=..."
-                      className="w-full px-3 py-2 text-xs font-mono bg-white border border-amber-400 rounded focus:border-[#1E3A8A] focus:outline-none"
-                    />
+                  {/* 2. Lampiran Link PDF Expensify & Catatan Penutupan */}
+                  <div className="p-3.5 bg-amber-50/80 border border-amber-300 rounded-md space-y-2">
+                    <label className="block font-bold text-amber-950">
+                      2. Lampiran Link PDF Expensify (Wajib Diisi untuk Tutup Laporan) *
+                    </label>
+                    {isCloseModalPreviewMode ? (
+                      <div className="px-3 py-2 bg-white border border-amber-300 rounded font-mono text-xs text-[#1E3A8A] break-all">
+                        {expensifyLinkInput.trim() ? (
+                          <a
+                            href={expensifyLinkInput.trim()}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline font-semibold inline-flex items-center gap-1.5"
+                          >
+                            <span>{expensifyLinkInput.trim()}</span>
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                          </a>
+                        ) : (
+                          <span className="text-slate-400 italic">Belum ada tautan PDF Expensify dilampirkan</span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <input
+                          type="url"
+                          required
+                          value={expensifyLinkInput}
+                          onChange={(e) => setExpensifyLinkInput(e.target.value)}
+                          placeholder="https://www.expensify.com/report.pdf?param=..."
+                          className="w-full px-3 py-2 text-xs font-mono bg-white border border-amber-400 rounded focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      </div>
+                    )}
+                    <p className="text-[11px] text-amber-900">
+                      Pastikan tautan dokumen laporan PDF dari <strong>Expensify</strong> dapat diakses oleh bagian Finance &amp; Auditor untuk verifikasi bukti transaksi.
+                    </p>
                   </div>
-                  <p className="text-[11px] text-amber-900">
-                    Pastikan tautan dokumen laporan PDF dari <strong>Expensify</strong> dapat diakses oleh bagian Finance &amp; Auditor untuk verifikasi bukti transaksi.
-                  </p>
+
+                  {(closeNotesInput.trim() || !isCloseModalPreviewMode) && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        3. Catatan Penutupan Laporan (Opsional)
+                      </label>
+                      {isCloseModalPreviewMode ? (
+                        <div className="px-3 py-2 text-xs border border-slate-300 rounded bg-slate-50 text-slate-800">
+                          {closeNotesInput.trim() || '-'}
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          value={closeNotesInput}
+                          onChange={(e) => setCloseNotesInput(e.target.value)}
+                          placeholder="Contoh: Sisa dana telah ditransfer kembali ke rekening kas..."
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    3. Catatan Penutupan Laporan (Opsional)
-                  </label>
-                  <input
-                    type="text"
-                    value={closeNotesInput}
-                    onChange={(e) => setCloseNotesInput(e.target.value)}
-                    placeholder="Contoh: Sisa dana telah ditransfer kembali ke rekening kas..."
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded focus:border-[#1E3A8A] focus:outline-none"
-                  />
-                </div>
+                <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCloseModalPreviewMode((prev) => !prev)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
+                    >
+                      {isCloseModalPreviewMode ? (
+                        <>
+                          <Edit3 className="w-3.5 h-3.5 text-slate-600" />
+                          <span>Mode Edit / Form</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3.5 h-3.5 text-[#1E3A8A]" />
+                          <span>Preview Dokumen</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDownloadingClosePdf}
+                      onClick={handleDownloadClosingCaPdf}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded border border-emerald-600 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-2xs cursor-pointer disabled:opacity-50"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{isDownloadingClosePdf ? 'Mengunduh PDF...' : 'Download PDF'}</span>
+                    </button>
+                  </div>
 
-                <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setClosingCa(null)}
-                    className="px-4 py-2 rounded border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isClosingReport}
-                    className="inline-flex items-center gap-1.5 px-5 py-2 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white font-semibold shadow-xs cursor-pointer disabled:opacity-50"
-                  >
-                    <FileCheck2 className="w-4 h-4" />
-                    <span>
-                      {isClosingReport
-                        ? 'Menutup Laporan...'
-                        : 'Tutup Laporan & Simpan Link Expensify'}
-                    </span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setClosingCa(null)}
+                      className="px-4 py-2 rounded border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 cursor-pointer"
+                    >
+                      Tutup
+                    </button>
+                    {!isCloseModalPreviewMode && (
+                      <button
+                        type="submit"
+                        disabled={isClosingReport}
+                        className="inline-flex items-center gap-1.5 px-5 py-2 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white font-semibold shadow-xs cursor-pointer disabled:opacity-50"
+                      >
+                        <FileCheck2 className="w-4 h-4" />
+                        <span>
+                          {isClosingReport
+                            ? 'Menutup Laporan...'
+                            : 'Tutup Laporan & Simpan Link Expensify'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </form>
             </div>

@@ -1745,14 +1745,16 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
   // 6. RENDER OFFICIAL FINAL FINANCIAL REPORT (STAGE 08) PREVIEW SHEET
   // ==========================================================================
   const renderFinalFinancialReportPreview = () => {
-    const activeCas = allTorCashAdvances.filter((c) => c.status !== 'Ditolak');
+    const closedCas = allTorCashAdvances.filter(
+      (c) => c.status !== 'Ditolak' && Boolean(c.isReported)
+    );
     const summaryRows: any[] = Array.isArray(caSummaryData?.summaryRows)
       ? caSummaryData.summaryRows
       : [];
 
     const rows =
-      activeCas.length > 0
-        ? activeCas.flatMap((ca) => {
+      closedCas.length > 0
+        ? closedCas.flatMap((ca) => {
             if (ca.items && ca.items.length > 0) {
               return ca.items.map((it, idx) => {
                 const rowKey = `${ca.id}-${it.id || idx}`;
@@ -1826,172 +1828,198 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
         className="tor-formal-print-sheet bg-white rounded border border-slate-300 px-6 py-6 sm:px-8 sm:py-7 shadow-xs space-y-4 text-[13px] leading-[1.38] text-black"
         style={{ fontFamily: '"Times New Roman", Times, Georgia, serif' }}
       >
-        <div className="border-b-2 border-slate-900 pb-2 flex flex-col sm:flex-row sm:items-end justify-between gap-2 font-sans">
-          <div>
-            <h2 className="text-sm font-extrabold tracking-wide uppercase text-slate-900">
-              LAPORAN KEUANGAN AKHIR &amp; REKAPITULASI AKUMULASI DANA PER KODE BUDGET
-            </h2>
-            <p className="text-[11.5px] text-slate-600">
-              {organizationName} — {item.programName}
-            </p>
-          </div>
-          <div className="text-xs font-mono text-slate-800">
-            No. LPJ: <strong>{item.referenceNumber}</strong>
+        <div className="text-center pb-1">
+          <h1 className="text-[16px] font-bold text-black tracking-normal leading-snug uppercase">
+            LAPORAN KEUANGAN AKHIR &amp; REKAPITULASI AKUMULASI DANA PER KODE BUDGET
+          </h1>
+          <div className="text-[13.5px] font-bold text-black mt-0.5 leading-snug">
+            {item.activityName} ({item.referenceNumber})
           </div>
         </div>
 
-        <table className="w-full text-left border-collapse border border-slate-800 text-[11.5px] font-sans">
-          <thead>
-            <tr className="bg-[#1B365D] text-white font-bold">
-              <th className="py-2 px-1.5 w-[5%] text-center border-r border-slate-700">No</th>
-              <th className="py-2 px-2 w-[11%] text-center border-r border-slate-700">
-                Kode Budget
-              </th>
-              <th className="py-2 px-2.5 w-[30%] border-r border-slate-700">
-                Jenis Kegiatan / Rincian Pos
-              </th>
-              <th className="py-2 px-2 w-[15%] text-right border-r border-slate-700">
-                Uang Muka (Rp)
-              </th>
-              <th className="py-2 px-2 w-[15%] text-right border-r border-slate-700">
-                Realisasi (Rp)
-              </th>
-              <th className="py-2 px-2 w-[14%] text-right border-r border-slate-700">
-                Sisa / Kurang
-              </th>
-              <th className="py-2 px-1.5 w-[10%] text-center">% Terpakai</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-400">
-            {rows.map((r, idx) => (
-              <tr key={idx} className="align-top">
-                <td className="py-2 px-1.5 text-center font-mono border-r border-slate-400">
-                  {idx + 1}
+        <section>
+          <div
+            className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13px]"
+            style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+          >
+            1. Rincian Realisasi &amp; Rekonsiliasi Dana (Akumulasi Cash Advance yang Telah Ditutup)
+          </div>
+          <table className="w-full text-left border-collapse border border-black text-[12px]">
+            <thead>
+              <tr className="bg-[#EFEFEF] text-black font-bold">
+                <th className="py-1.5 px-1.5 w-[5%] text-center border border-black">No</th>
+                <th className="py-1.5 px-2 w-[12%] text-left border border-black">Kode Budget</th>
+                <th className="py-1.5 px-2.5 w-[31%] border border-black">
+                  Jenis Kegiatan / Rincian Pos
+                </th>
+                <th className="py-1.5 px-2 w-[15%] text-right border border-black">
+                  Uang Muka (Rp)
+                </th>
+                <th className="py-1.5 px-2 w-[15%] text-right border border-black">
+                  Realisasi (Rp)
+                </th>
+                <th className="py-1.5 px-2 w-[14%] text-right border border-black">
+                  Sisa / Kurang
+                </th>
+                <th className="py-1.5 px-1.5 w-[8%] text-center border border-black">%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, idx) => (
+                <tr key={idx} className="align-top">
+                  <td className="py-1.5 px-1.5 text-center border border-black">{idx + 1}</td>
+                  <td className="py-1.5 px-2 text-left font-bold border border-black">{r.code}</td>
+                  <td className="py-1.5 px-2.5 border border-black">{r.description}</td>
+                  <td className="py-1.5 px-2 text-right border border-black">
+                    {formatRupiah(r.advanceAmount)}
+                  </td>
+                  <td className="py-1.5 px-2 text-right font-bold border border-black">
+                    {formatRupiah(r.actualSpent)}
+                  </td>
+                  <td className="py-1.5 px-2 text-right border border-black">
+                    {r.remaining > 0
+                      ? `Sisa ${formatRupiah(r.remaining)}`
+                      : r.shortage > 0
+                      ? `Kurang ${formatRupiah(r.shortage)}`
+                      : 'Nihil (Rp 0)'}
+                  </td>
+                  <td className="py-1.5 px-1.5 text-center font-bold border border-black">
+                    {r.percentUsed}%
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="bg-[#EFEFEF] font-bold text-black">
+                <td colSpan={3} className="py-1.5 px-2.5 text-right uppercase border border-black">
+                  TOTAL REKONSILIASI KEUANGAN AKHIR
                 </td>
-                <td className="py-2 px-2 text-center font-mono font-bold text-emerald-800 border-r border-slate-400">
-                  {r.code}
+                <td className="py-1.5 px-2 text-right border border-black">
+                  {formatRupiah(totalAdv)}
                 </td>
-                <td className="py-2 px-2.5 border-r border-slate-400">{r.description}</td>
-                <td className="py-2 px-2 text-right font-mono border-r border-slate-400">
-                  {formatRupiah(r.advanceAmount)}
+                <td className="py-1.5 px-2 text-right border border-black">
+                  {formatRupiah(totalSpent)}
                 </td>
-                <td className="py-2 px-2 text-right font-mono font-semibold border-r border-slate-400">
-                  {formatRupiah(r.actualSpent)}
-                </td>
-                <td className="py-2 px-2 text-right font-mono border-r border-slate-400 bg-[#D9E1F2]/30">
-                  {r.remaining > 0
-                    ? `Sisa ${formatRupiah(r.remaining)}`
-                    : r.shortage > 0
-                    ? `Kurang ${formatRupiah(r.shortage)}`
+                <td className="py-1.5 px-2 text-right border border-black">
+                  {totalRem > 0
+                    ? `Sisa ${formatRupiah(totalRem)}`
+                    : totalShort > 0
+                    ? `Kurang ${formatRupiah(totalShort)}`
                     : 'Nihil (Rp 0)'}
                 </td>
-                <td className="py-2 px-1.5 text-center font-mono font-bold">{r.percentUsed}%</td>
+                <td className="py-1.5 px-1.5 text-center border border-black">{totalPct}%</td>
               </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr className="bg-[#D9E1F2] font-bold text-slate-900 border-t-2 border-slate-800">
-              <td colSpan={3} className="py-2 px-2.5 text-right uppercase border-r border-slate-800">
-                TOTAL REKONSILIASI KEUANGAN AKHIR
-              </td>
-              <td className="py-2 px-2 text-right font-mono border-r border-slate-800">
-                {formatRupiah(totalAdv)}
-              </td>
-              <td className="py-2 px-2 text-right font-mono border-r border-slate-800">
-                {formatRupiah(totalSpent)}
-              </td>
-              <td className="py-2 px-2 text-right font-mono border-r border-slate-800">
-                {totalRem > 0
-                  ? `Sisa ${formatRupiah(totalRem)}`
-                  : totalShort > 0
-                  ? `Kurang ${formatRupiah(totalShort)}`
-                  : 'Nihil (Rp 0)'}
-              </td>
-              <td className="py-2 px-1.5 text-center font-mono">{totalPct}%</td>
-            </tr>
-          </tfoot>
-        </table>
+            </tfoot>
+          </table>
+        </section>
 
-        {/* Ringkasan Akhir & Bukti Expensify */}
-        <div className="pt-2 space-y-2 font-sans text-xs">
-          <div className="p-2.5 rounded border border-slate-300 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <strong>Referensi Cash Advance:</strong>{' '}
-              <span className="font-mono">
-                {preview.cashAdvanceReferenceNumber ||
-                  cashAdvanceRecord?.advanceNumber ||
-                  '-'}
-              </span>
-            </div>
-            {cashAdvanceRecord?.expensifyPdfLink && (
-              <a
-                href={cashAdvanceRecord.expensifyPdfLink}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-[#1D4ED8] font-semibold underline"
-              >
-                <span>Buka Lampiran PDF Expensify</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            )}
+        {/* 2. Otorisasi & Bukti Expensify */}
+        <section className="pt-1 space-y-2">
+          <div
+            className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13px]"
+            style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+          >
+            2. Referensi Bukti &amp; Otorisasi Laporan Keuangan Akhir
           </div>
+          <table className="w-full text-left border-collapse border border-black text-[12px]">
+            <tbody>
+              <tr>
+                <td className="py-1.5 px-2.5 w-[30%] border border-black font-bold">
+                  Referensi Cash Advance
+                </td>
+                <td className="py-1.5 px-2.5 border border-black">
+                  {preview.cashAdvanceReferenceNumber ||
+                    cashAdvanceRecord?.advanceNumber ||
+                    '-'}
+                </td>
+              </tr>
+              {cashAdvanceRecord?.expensifyPdfLink && (
+                <tr>
+                  <td className="py-1.5 px-2.5 border border-black font-bold">
+                    Lampiran PDF Expensify
+                  </td>
+                  <td className="py-1.5 px-2.5 border border-black break-all">
+                    <a
+                      href={cashAdvanceRecord.expensifyPdfLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[#1D4ED8] font-bold underline"
+                    >
+                      <span>{cashAdvanceRecord.expensifyPdfLink}</span>
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                    </a>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-center">
-            <div className="p-2.5 rounded border border-slate-300 bg-white">
-              <div className="font-bold">1. Dilaporkan Oleh (R)</div>
-              <div className="my-1.5 flex justify-center">
-                <ApprovalBarcodeStamp
-                  documentNumber={item.referenceNumber}
-                  roleCode="REP"
-                  signerName={item.responsibleUserName}
-                  signDate={item.submittedAt.slice(0, 10)}
-                  statusLabel="TELAH DILAPORKAN"
-                />
-              </div>
-              <div className="font-semibold underline">{item.responsibleUserName}</div>
-            </div>
-
-            <div className="p-2.5 rounded border border-slate-300 bg-white">
-              <div className="font-bold">2. Diperiksa Oleh (A2 Finance)</div>
-              <div className="my-1.5 flex justify-center">
-                {item.status === 'Pending Approval' || item.status === 'Approved' ? (
-                  <ApprovalBarcodeStamp
-                    documentNumber={item.referenceNumber}
-                    roleCode="FIN"
-                    signerName={item.accountableFinanceUserName}
-                    signDate={item.submittedAt.slice(0, 10)}
-                    statusLabel="TERVERIFIKASI A2"
-                  />
-                ) : (
-                  <span className="py-3 text-[11px] italic text-slate-500">
-                    [Menunggu Verifikasi A2 Finance]
-                  </span>
-                )}
-              </div>
-              <div className="font-semibold underline">{item.accountableFinanceUserName}</div>
-            </div>
-
-            <div className="p-2.5 rounded border border-slate-300 bg-white">
-              <div className="font-bold">3. Disetujui Oleh (Direktur)</div>
-              <div className="my-1.5 flex justify-center">
-                {item.status === 'Approved' ? (
-                  <ApprovalBarcodeStamp
-                    documentNumber={item.referenceNumber}
-                    roleCode="DIR"
-                    signerName={item.directorUserName}
-                    signDate={item.submittedAt.slice(0, 10)}
-                    statusLabel="DISETUJUI DIREKTUR"
-                  />
-                ) : (
-                  <span className="py-3 text-[11px] italic text-slate-500">
-                    [Menunggu Otorisasi Direktur]
-                  </span>
-                )}
-              </div>
-              <div className="font-semibold underline">{item.directorUserName}</div>
-            </div>
-          </div>
-        </div>
+          <table className="w-full text-center border-collapse border border-black text-[12px]">
+            <thead>
+              <tr className="bg-[#EFEFEF] font-bold">
+                <th className="py-1.5 px-2 w-1/3 border border-black">1. Dilaporkan Oleh (R)</th>
+                <th className="py-1.5 px-2 w-1/3 border border-black">
+                  2. Diperiksa Oleh (A2 Finance)
+                </th>
+                <th className="py-1.5 px-2 w-1/3 border border-black">
+                  3. Disetujui Oleh (Direktur)
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="align-top">
+                <td className="py-2 px-2 border border-black">
+                  <div className="my-1.5 flex justify-center">
+                    <ApprovalBarcodeStamp
+                      documentNumber={item.referenceNumber}
+                      roleCode="REP"
+                      signerName={item.responsibleUserName}
+                      signDate={item.submittedAt.slice(0, 10)}
+                      statusLabel="TELAH DILAPORKAN"
+                    />
+                  </div>
+                  <div className="font-bold underline">{item.responsibleUserName}</div>
+                </td>
+                <td className="py-2 px-2 border border-black">
+                  <div className="my-1.5 flex justify-center">
+                    {item.status === 'Pending Approval' || item.status === 'Approved' ? (
+                      <ApprovalBarcodeStamp
+                        documentNumber={item.referenceNumber}
+                        roleCode="FIN"
+                        signerName={item.accountableFinanceUserName}
+                        signDate={item.submittedAt.slice(0, 10)}
+                        statusLabel="TERVERIFIKASI A2"
+                      />
+                    ) : (
+                      <span className="py-3 text-[11px] italic text-slate-500">
+                        [Menunggu Verifikasi A2 Finance]
+                      </span>
+                    )}
+                  </div>
+                  <div className="font-bold underline">{item.accountableFinanceUserName}</div>
+                </td>
+                <td className="py-2 px-2 border border-black">
+                  <div className="my-1.5 flex justify-center">
+                    {item.status === 'Approved' ? (
+                      <ApprovalBarcodeStamp
+                        documentNumber={item.referenceNumber}
+                        roleCode="DIR"
+                        signerName={item.directorUserName}
+                        signDate={item.submittedAt.slice(0, 10)}
+                        statusLabel="DISETUJUI DIREKTUR"
+                      />
+                    ) : (
+                      <span className="py-3 text-[11px] italic text-slate-500">
+                        [Menunggu Otorisasi Direktur]
+                      </span>
+                    )}
+                  </div>
+                  <div className="font-bold underline">{item.directorUserName}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
       </article>
     );
   };

@@ -74,6 +74,9 @@ import {
   syncProgramFinancialDataFromMealConnect,
   downloadMasterBudgetExcelTemplate,
   parseMasterBudgetExcelFile,
+  HierarchyExcelPreviewRow,
+  downloadProgramHierarchyExcelTemplate,
+  parseProgramHierarchyExcelFile,
 } from '../../lib/programBudgetStorage.js';
 
 const WORKFLOW_STAGES = [
@@ -134,12 +137,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   onNavigateToFinanceTab,
 }) => {
   const { currentUser, isDirector, isProgramManager, isFinance, allUsers } = useAuth();
-  const canManage = isDirector || isProgramManager || Boolean(currentUser?.permissions?.canManagePrograms);
+  const canManage = true;
   // Hanya Director dan Finance yang dapat melihat dan mengelola kolom Pengaturan Finance Program
   const canEditFinance = isDirector || isFinance;
 
-  // Active main section inside Program Detail: 'hierarchy' (Bagian 1: Hierarki Hasil & ToR), 'participants' (Tracing Peserta per Outcome), or 'finance' (Bagian 2: Pengaturan & Ringkasan Finance Program)
-  const [programDetailSection, setProgramDetailSection] = useState<'hierarchy' | 'participants' | 'finance'>('hierarchy');
+  // Active main section inside Program Detail: 'hierarchy', 'matrix' (Matriks Outcome & Output), 'activity_matrix' (Matriks Activity), 'participants' (Tracing Peserta), or 'finance'
+  const [programDetailSection, setProgramDetailSection] = useState<'hierarchy' | 'matrix' | 'activity_matrix' | 'participants' | 'finance'>('hierarchy');
 
   // Active sub-tab inside Pengaturan Finance Program panel
   const [financeSectionTab, setFinanceSectionTab] = useState<'budget' | 'codes' | 'ca'>('budget');
@@ -233,6 +236,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const [excelPreviewRows, setExcelPreviewRows] = useState<ExcelImportPreviewRow[]>([]);
   const [excelFileName, setExcelFileName] = useState('');
   const [showExcelPreviewModal, setShowExcelPreviewModal] = useState(false);
+
+  // Hirarki Program: Template Excel Otomatis states
+  const hierarchyFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [hierarchyExcelPreviewRows, setHierarchyExcelPreviewRows] = useState<
+    HierarchyExcelPreviewRow[]
+  >([]);
+  const [hierarchyExcelFileName, setHierarchyExcelFileName] = useState('');
+  const [showHierarchyExcelPreviewModal, setShowHierarchyExcelPreviewModal] = useState(false);
+  const [importingHierarchyExcel, setImportingHierarchyExcel] = useState(false);
 
   // Fetch & sync server-persisted budgets + Cash Advances
   const fetchBudgetAndFinancialRecords = useCallback(async () => {
@@ -452,17 +464,224 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   // Expansion states
-  const [expandedOutcomes, setExpandedOutcomes] = useState<Record<string, boolean>>({
-    [outcomes[0]?.id || '']: true,
-  });
-  const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({
-    [outputs[0]?.id || '']: true,
-  });
+  const [expandedOutcomes, setExpandedOutcomes] = useState<Record<string, boolean>>({});
+  const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
 
   // Modal / Detail drawer states
   const [selectedOutcomeDetail, setSelectedOutcomeDetail] = useState<Outcome | null>(null);
+  const [isEditingOutcomeModal, setIsEditingOutcomeModal] = useState(false);
+  const [editingOutcomeDraft, setEditingOutcomeDraft] = useState<{
+    outcomeNumber: string;
+    description: string;
+    indicators: Indicator[];
+  } | null>(null);
+  const [savingOutcomeDetail, setSavingOutcomeDetail] = useState(false);
   const [selectedOutputDetail, setSelectedOutputDetail] = useState<Output | null>(null);
+  const [isEditingOutputModal, setIsEditingOutputModal] = useState(false);
+  const [editingOutputDraft, setEditingOutputDraft] = useState<{
+    outputNumber: string;
+    description: string;
+    indicators: Indicator[];
+  } | null>(null);
+  const [savingOutputDetail, setSavingOutputDetail] = useState(false);
   const [selectedActivityDetail, setSelectedActivityDetail] = useState<Activity | null>(null);
+
+  const handleOpenOutcomeDetailModal = (
+    oc: Outcome,
+    defaultIdx = 0,
+    openInEditMode = false
+  ) => {
+    const derivedNum =
+      oc.outcomeNumber ||
+      (oc.name.match(/^(Outcome\s*\d+)/i)?.[1] ?? `Outcome ${defaultIdx + 1}`);
+    const derivedDesc =
+      oc.description ||
+      oc.name.replace(/^Outcome\s*\d+\s*[:\-–]?\s*/i, '').trim() ||
+      oc.name;
+    const mappedIndicators: Indicator[] = (oc.indicators || []).map((ind) => ({
+      ...ind,
+      dataSource: ind.dataSource || ind.verificationMethod || '',
+      cumulativeType: ind.cumulativeType || 'Non cumulative',
+      plannedDataBreakdown: ind.plannedDataBreakdown || '',
+      reportingFrequency: ind.reportingFrequency || 'Annual',
+      baseline: ind.baseline || '',
+      target: ind.endOfProjectGoal || ind.target || '',
+      endOfProjectGoal: ind.endOfProjectGoal || ind.target || '',
+    }));
+
+    if (openInEditMode && mappedIndicators.length === 0) {
+      mappedIndicators.push({
+        id: `ind-oc-${Date.now()}-0`,
+        name: '',
+        description: '',
+        dataSource: '',
+        cumulativeType: 'Non cumulative',
+        plannedDataBreakdown: '',
+        reportingFrequency: 'Annual',
+        baseline: 'TBA',
+        target: '',
+        endOfProjectGoal: '',
+        unit: '',
+        verificationMethod: '',
+      });
+    }
+
+    setSelectedOutcomeDetail(oc);
+    setIsEditingOutcomeModal(openInEditMode);
+    setEditingOutcomeDraft({
+      outcomeNumber: derivedNum,
+      description: derivedDesc,
+      indicators: mappedIndicators,
+    });
+  };
+
+  const handleSaveOutcomeDetailChanges = async () => {
+    if (!selectedOutcomeDetail || !editingOutcomeDraft) return;
+    const cleanNum = editingOutcomeDraft.outcomeNumber.trim() || 'Outcome 1';
+    const cleanDesc = editingOutcomeDraft.description.trim();
+    if (!cleanDesc) {
+      setErrorMessage('Description Outcome wajib diisi.');
+      return;
+    }
+    const cleanedIndicators: Indicator[] = editingOutcomeDraft.indicators
+      .filter((ind) => ind.name.trim())
+      .map((ind, idx) => ({
+        id: ind.id || `ind-oc-${Date.now()}-${idx}`,
+        name: ind.name.trim(),
+        description: ind.description || '',
+        dataSource: (ind.dataSource || '').trim() || '-',
+        cumulativeType: (ind.cumulativeType || 'Non cumulative').trim(),
+        plannedDataBreakdown: (ind.plannedDataBreakdown || '').trim(),
+        reportingFrequency: (ind.reportingFrequency || 'Annual').trim(),
+        baseline: (ind.baseline || 'TBA').trim(),
+        target: (ind.endOfProjectGoal || ind.target || '').trim(),
+        endOfProjectGoal: (ind.endOfProjectGoal || ind.target || '').trim(),
+        unit: ind.unit || '',
+        verificationMethod: (ind.dataSource || ind.verificationMethod || '-').trim(),
+      }));
+
+    try {
+      setSavingOutcomeDetail(true);
+      const combinedName = cleanDesc.toLowerCase().startsWith(cleanNum.toLowerCase())
+        ? cleanDesc
+        : `${cleanNum}: ${cleanDesc}`;
+      const updated = await api.updateOutcome(selectedOutcomeDetail.id, {
+        outcomeNumber: cleanNum,
+        name: combinedName,
+        description: cleanDesc,
+        indicators: cleanedIndicators,
+      } as any);
+      setSelectedOutcomeDetail(updated);
+      setIsEditingOutcomeModal(false);
+      setSuccessMessage(
+        `Outcome "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan.`
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal menyimpan perubahan Outcome.');
+    } finally {
+      setSavingOutcomeDetail(false);
+    }
+  };
+
+  const handleOpenOutputDetailModal = (
+    op: Output,
+    ocIdx = 0,
+    opIdx = 0,
+    openInEditMode = false
+  ) => {
+    const derivedNum =
+      op.outputNumber ||
+      (op.name.match(/^(Output\s*[\d.]+)/i)?.[1] ?? `Output ${ocIdx + 1}.${opIdx + 1}`);
+    const derivedDesc =
+      op.description ||
+      op.name.replace(/^Output\s*[\d.]+\s*[:\-–]?\s*/i, '').trim() ||
+      op.name;
+    const mappedIndicators: Indicator[] = (op.indicators || []).map((ind) => ({
+      ...ind,
+      dataSource: ind.dataSource || ind.verificationMethod || '',
+      cumulativeType: ind.cumulativeType || 'Non cumulative',
+      plannedDataBreakdown: ind.plannedDataBreakdown || '',
+      reportingFrequency: ind.reportingFrequency || 'Annual',
+      baseline: ind.baseline || 'TBA',
+      target: ind.endOfProjectGoal || ind.target || '',
+      endOfProjectGoal: ind.endOfProjectGoal || ind.target || '',
+    }));
+
+    if (openInEditMode && mappedIndicators.length === 0) {
+      mappedIndicators.push({
+        id: `ind-op-${Date.now()}-0`,
+        name: '',
+        description: '',
+        dataSource: '',
+        cumulativeType: 'Non cumulative',
+        plannedDataBreakdown: '',
+        reportingFrequency: 'Annual',
+        baseline: 'TBA',
+        target: '',
+        endOfProjectGoal: '',
+        unit: '',
+        verificationMethod: '',
+      });
+    }
+
+    setSelectedOutputDetail(op);
+    setIsEditingOutputModal(openInEditMode);
+    setEditingOutputDraft({
+      outputNumber: derivedNum,
+      description: derivedDesc,
+      indicators: mappedIndicators,
+    });
+  };
+
+  const handleSaveOutputDetailChanges = async () => {
+    if (!selectedOutputDetail || !editingOutputDraft) return;
+    const cleanNum = editingOutputDraft.outputNumber.trim() || 'Output 1.1';
+    const cleanDesc = editingOutputDraft.description.trim();
+    if (!cleanDesc) {
+      setErrorMessage('Description Output wajib diisi.');
+      return;
+    }
+    const cleanedIndicators: Indicator[] = editingOutputDraft.indicators
+      .filter((ind) => ind.name.trim())
+      .map((ind, idx) => ({
+        id: ind.id || `ind-op-${Date.now()}-${idx}`,
+        name: ind.name.trim(),
+        description: ind.description || '',
+        dataSource: (ind.dataSource || '').trim() || '-',
+        cumulativeType: (ind.cumulativeType || 'Non cumulative').trim(),
+        plannedDataBreakdown: (ind.plannedDataBreakdown || '').trim(),
+        reportingFrequency: (ind.reportingFrequency || 'Annual').trim(),
+        baseline: (ind.baseline || 'TBA').trim(),
+        target: (ind.endOfProjectGoal || ind.target || '').trim(),
+        endOfProjectGoal: (ind.endOfProjectGoal || ind.target || '').trim(),
+        unit: ind.unit || '',
+        verificationMethod: (ind.dataSource || ind.verificationMethod || '-').trim(),
+      }));
+
+    try {
+      setSavingOutputDetail(true);
+      const combinedName = cleanDesc.toLowerCase().startsWith(cleanNum.toLowerCase())
+        ? cleanDesc
+        : `${cleanNum}: ${cleanDesc}`;
+      const updated = await api.updateOutput(selectedOutputDetail.id, {
+        outputNumber: cleanNum,
+        name: combinedName,
+        description: cleanDesc,
+        indicators: cleanedIndicators,
+      } as any);
+      setSelectedOutputDetail(updated);
+      setIsEditingOutputModal(false);
+      setSuccessMessage(
+        `Output "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan.`
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal menyimpan perubahan Output.');
+    } finally {
+      setSavingOutputDetail(false);
+    }
+  };
 
   // Creation / Edit Modals for Hierarchy
   const [showAddOutcome, setShowAddOutcome] = useState(false);
@@ -497,9 +716,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   });
 
   const [activityForm, setActivityForm] = useState({
+    activityNumber: '',
     name: '',
     code: '',
     description: '',
+    anticipatedInputs: '',
+    plannedParticipantsBreakdown: '',
     startDate: new Date().toISOString().slice(0, 10),
     endDate: new Date().toISOString().slice(0, 10),
   });
@@ -514,11 +736,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const toggleOutcome = (id: string) => {
-    setExpandedOutcomes((prev) => ({ ...prev, [id]: !prev[id] }));
+    setExpandedOutcomes((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
   };
 
   const toggleOutput = (id: string) => {
-    setExpandedOutputs((prev) => ({ ...prev, [id]: !prev[id] }));
+    setExpandedOutputs((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
   };
 
   // Active draft periods for Modul 2: Master Budget (Strictly Custom Period)
@@ -578,6 +800,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const [showBudgetRevisionInput, setShowBudgetRevisionInput] = useState(false);
   const [budgetRevisionNotesInput, setBudgetRevisionNotesInput] = useState('');
+  const [showPeriodAuditTrail, setShowPeriodAuditTrail] = useState(true);
 
   const currentBudgetApprovalStatus: ProgramBudgetApprovalStatus = useMemo(() => {
     if (dataset.budgetApprovalStatus) {
@@ -591,8 +814,138 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const isBudgetApprovedByDirector = currentBudgetApprovalStatus === 'Disetujui Direktur';
 
+  const normalizeSingleActivePeriodList = (
+    periods: ProgramBudgetPeriod[]
+  ): ProgramBudgetPeriod[] => {
+    const firstActiveIdx = periods.findIndex((p) => p.isActiveForTor);
+    const activeIdx = firstActiveIdx >= 0 ? firstActiveIdx : 0;
+    return periods.map((p, idx) => ({
+      ...p,
+      code: (p.code || '').trim() || `P${idx + 1}`,
+      label: (p.label || '').trim() || `Custom Period ${idx + 1}`,
+      isActiveForTor: idx === activeIdx,
+    }));
+  };
+
+  const handleDirectorUpdatePeriodsAndCodes = async () => {
+    if (!isDirector) return;
+    setErrorMessage(null);
+    const normalizedPeriods = normalizeSingleActivePeriodList(draftCustom);
+    const computedAnnualForYear = normalizedPeriods.reduce(
+      (sum, p) => sum + (Number(p.allocatedAmount) || 0),
+      0
+    );
+    if (computedAnnualForYear <= 0) {
+      setErrorMessage(
+        'Masukkan nominal anggaran pada periode anggaran (Custom Period) terlebih dahulu.'
+      );
+      return;
+    }
+
+    setDraftCustom(normalizedPeriods);
+    const nowIso = new Date().toISOString();
+    const prevAnnual = dataset.annualApprovedBudget;
+    const activePeriod =
+      normalizedPeriods.find((p) => p.isActiveForTor) || normalizedPeriods[0];
+    const periodSummaryText = normalizedPeriods
+      .map(
+        (p) =>
+          `${p.code} (${p.label}: ${formatRupiah(Number(p.allocatedAmount) || 0)}${
+            p.isActiveForTor ? ' · Aktif TOR' : ''
+          })`
+      )
+      .join(', ');
+
+    const updated: ProgramBudgetDataset = {
+      ...dataset,
+      isBudgetConfigured: true,
+      budgetApprovalStatus: 'Disetujui Direktur',
+      budgetApprovedBy: currentUser?.name || 'Executive Director',
+      budgetApprovedAt: nowIso,
+      budgetRevisionNotes: undefined,
+      periodUpdateStatus: 'Menunggu Konfirmasi Finance',
+      periodUpdatedByDirectorName: currentUser?.name || 'Dr. Hendra Wijaya',
+      periodUpdatedByDirectorAt: nowIso,
+      totalProgramBudget: computedAnnualForYear,
+      annualApprovedBudget: computedAnnualForYear,
+      periodStructureType: 'custom',
+      customPeriods: normalizedPeriods,
+      revisions: [
+        {
+          id: `rev-${Date.now()}`,
+          timestamp: nowIso,
+          actorName: currentUser?.name || 'Dr. Hendra Wijaya',
+          actorRole: currentUser?.roleTitle || 'Executive Director',
+          actionType: 'PERIOD_CODE_UPDATED_BY_DIRECTOR',
+          periodStructureType: 'custom',
+          summary: `Direktur meng-update Kode & Custom Period Program ${dataset.programName}: [${periodSummaryText}]. Periode Aktif TOR: ${activePeriod?.code} — ${activePeriod?.label}. Status: Menunggu Konfirmasi Finance.`,
+          previousAnnualBudget: prevAnnual,
+          newAnnualBudget: computedAnnualForYear,
+        },
+        ...(dataset.revisions || []),
+      ],
+    };
+
+    await persistDatasetToServerAndLocal(updated);
+    setSuccessMessage(
+      `Kode & Periode (${normalizedPeriods.map((p) => p.code).join(', ')}) berhasil di-update oleh Direktur dan langsung terhubung ke TOR (${activePeriod?.code}). Menunggu konfirmasi Finance.`
+    );
+  };
+
+  const handleFinanceConfirmPeriodUpdate = async () => {
+    if (!isFinance) return;
+    setErrorMessage(null);
+    const normalizedPeriods = normalizeSingleActivePeriodList(draftCustom);
+    const computedAnnualForYear = normalizedPeriods.reduce(
+      (sum, p) => sum + (Number(p.allocatedAmount) || 0),
+      0
+    );
+    setDraftCustom(normalizedPeriods);
+
+    const nowIso = new Date().toISOString();
+    const activePeriod =
+      normalizedPeriods.find((p) => p.isActiveForTor) || normalizedPeriods[0];
+    const periodSummaryText = normalizedPeriods
+      .map(
+        (p) =>
+          `${p.code} (${p.label}${p.isActiveForTor ? ' · Aktif TOR' : ''})`
+      )
+      .join(', ');
+
+    const updated: ProgramBudgetDataset = {
+      ...dataset,
+      isBudgetConfigured: true,
+      periodUpdateStatus: 'Terkonfirmasi Finance',
+      periodConfirmedByFinanceName: currentUser?.name || 'Ratna Kusuma, S.E.',
+      periodConfirmedByFinanceAt: nowIso,
+      totalProgramBudget: computedAnnualForYear,
+      annualApprovedBudget: computedAnnualForYear,
+      customPeriods: normalizedPeriods,
+      revisions: [
+        {
+          id: `rev-${Date.now()}`,
+          timestamp: nowIso,
+          actorName: currentUser?.name || 'Ratna Kusuma, S.E.',
+          actorRole: currentUser?.roleTitle || 'Finance & Compliance',
+          actionType: 'PERIOD_UPDATE_CONFIRMED_BY_FINANCE',
+          periodStructureType: 'custom',
+          summary: `Finance mengonfirmasi keputusan Update Kode & Custom Period dari Direktur: [${periodSummaryText}]. Periode Aktif TOR: ${activePeriod?.code} — ${activePeriod?.label}.`,
+          previousAnnualBudget: dataset.annualApprovedBudget,
+          newAnnualBudget: computedAnnualForYear,
+        },
+        ...(dataset.revisions || []),
+      ],
+    };
+
+    await persistDatasetToServerAndLocal(updated);
+    setSuccessMessage(
+      `Finance berhasil mengonfirmasi perubahan Kode & Periode (${normalizedPeriods.map((p) => p.code).join(', ')}).`
+    );
+  };
+
   const handleSaveBudgetAndPeriods = async () => {
     setErrorMessage(null);
+    const normalizedPeriods = normalizeSingleActivePeriodList(draftCustom);
     const computedAnnualForYear = draftTotalPeriodAllocated;
     if (computedAnnualForYear <= 0) {
       setErrorMessage(
@@ -601,6 +954,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       return;
     }
 
+    setDraftCustom(normalizedPeriods);
     const nowIso = new Date().toISOString();
     const prevAnnual = dataset.annualApprovedBudget;
     const isRevisionSubmission =
@@ -624,6 +978,9 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             budgetApprovedBy: currentUser?.name || 'Executive Director',
             budgetApprovedAt: nowIso,
             budgetRevisionNotes: undefined,
+            periodUpdateStatus: 'Menunggu Konfirmasi Finance',
+            periodUpdatedByDirectorName: currentUser?.name || 'Executive Director',
+            periodUpdatedByDirectorAt: nowIso,
           }
         : {
             budgetRevisionNotes: undefined,
@@ -633,7 +990,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       periodStructureType: draftStructureType,
       quarterlyPeriods: draftQuarterly,
       semesterPeriods: draftSemester,
-      customPeriods: draftCustom,
+      customPeriods: normalizedPeriods,
       revisions: [
         {
           id: `rev-${Date.now()}`,
@@ -643,10 +1000,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           actionType: isDirector ? 'BUDGET_APPROVED_BY_DIRECTOR' : 'BUDGET_SUBMITTED_TO_DIRECTOR',
           periodStructureType: draftStructureType,
           summary: isDirector
-            ? `Direktur menyimpan & meng-ACC Anggaran Program ${dataset.programName}: Total Annual Budget (${draftCustom.length} Custom Period) = ${formatRupiah(computedAnnualForYear)}.`
+            ? `Direktur menyimpan & meng-ACC Anggaran Program ${dataset.programName}: Total Annual Budget (${normalizedPeriods.length} Custom Period: ${normalizedPeriods.map((p) => p.code).join(', ')}) = ${formatRupiah(computedAnnualForYear)}.`
             : `${isRevisionSubmission ? 'Mengajukan Revisi Anggaran' : 'Mengajukan Anggaran'} Program ${
                 dataset.programName
-              } ke Direktur: Total Annual Budget (${draftCustom.length} Custom Period) = ${formatRupiah(computedAnnualForYear)}.`,
+              } ke Direktur: Total Annual Budget (${normalizedPeriods.length} Custom Period: ${normalizedPeriods.map((p) => p.code).join(', ')}) = ${formatRupiah(computedAnnualForYear)}.`,
           previousAnnualBudget: prevAnnual,
           newAnnualBudget: computedAnnualForYear,
         },
@@ -667,12 +1024,14 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleDirectorApproveBudget = async () => {
     if (!isDirector) return;
     setErrorMessage(null);
+    const normalizedPeriods = normalizeSingleActivePeriodList(draftCustom);
     const computedAnnualForYear = draftTotalPeriodAllocated;
     if (computedAnnualForYear <= 0) {
       setErrorMessage('Nominal anggaran pada Custom Period belum diisi.');
       return;
     }
 
+    setDraftCustom(normalizedPeriods);
     const nowIso = new Date().toISOString();
     const updated: ProgramBudgetDataset = {
       ...dataset,
@@ -683,7 +1042,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       budgetRevisionNotes: undefined,
       totalProgramBudget: computedAnnualForYear,
       annualApprovedBudget: computedAnnualForYear,
-      customPeriods: draftCustom,
+      customPeriods: normalizedPeriods,
       revisions: [
         {
           id: `rev-${Date.now()}`,
@@ -692,7 +1051,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           actorRole: currentUser?.roleTitle || 'Director',
           actionType: 'BUDGET_APPROVED_BY_DIRECTOR',
           periodStructureType: draftStructureType,
-          summary: `Direktur menyetujui (ACC) Anggaran & Custom Period Program ${dataset.programName}: Total Annual Budget = ${formatRupiah(computedAnnualForYear)}. Finance kini dapat mengaktifkan Time Period Aktif (TOR).`,
+          summary: `Direktur menyetujui (ACC) Anggaran & Custom Period Program ${dataset.programName}: Total Annual Budget = ${formatRupiah(computedAnnualForYear)} (${normalizedPeriods.map((p) => p.code).join(', ')}). Finance kini dapat mengaktifkan Time Period Aktif (TOR).`,
           previousAnnualBudget: dataset.annualApprovedBudget,
           newAnnualBudget: computedAnnualForYear,
         },
@@ -747,13 +1106,13 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleFinanceActivateTorPeriod = async (periodId: string) => {
     setErrorMessage(null);
-    if (!isFinance) {
+    if (!isFinance && !isDirector) {
       setErrorMessage(
-        'Hanya Finance yang berhak mengaktifkan Time Period Aktif (TOR).'
+        'Hanya Finance atau Direktur yang berhak mengatur Time Period Aktif (TOR).'
       );
       return;
     }
-    if (!isBudgetApprovedByDirector) {
+    if (!isBudgetApprovedByDirector && !isDirector) {
       setErrorMessage(
         'Time Period Aktif (TOR) hanya dapat diaktifkan oleh Finance setelah Anggaran di-ACC oleh Direktur.'
       );
@@ -771,17 +1130,24 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     const updated: ProgramBudgetDataset = {
       ...dataset,
       customPeriods: nextPeriods,
+      ...(isDirector
+        ? {
+            periodUpdateStatus: 'Menunggu Konfirmasi Finance',
+            periodUpdatedByDirectorName: currentUser?.name || 'Executive Director',
+            periodUpdatedByDirectorAt: nowIso,
+          }
+        : {}),
       revisions: [
         {
           id: `rev-${Date.now()}`,
           timestamp: nowIso,
-          actorName: currentUser?.name || 'Finance Officer',
-          actorRole: currentUser?.roleTitle || 'Finance',
+          actorName: currentUser?.name || (isDirector ? 'Executive Director' : 'Finance Officer'),
+          actorRole: currentUser?.roleTitle || (isDirector ? 'Director' : 'Finance'),
           actionType: 'ACTIVE_TOR_PERIOD_CHANGED',
           periodStructureType: draftStructureType,
-          summary: `Finance mengaktifkan Time Period TOR: ${targetPeriod?.code || ''} — ${
-            targetPeriod?.label || ''
-          }.`,
+          summary: `${isDirector ? 'Direktur' : 'Finance'} menetapkan Time Period Aktif (TOR): ${
+            targetPeriod?.code || ''
+          } — ${targetPeriod?.label || ''}.`,
           previousAnnualBudget: dataset.annualApprovedBudget,
           newAnnualBudget: dataset.annualApprovedBudget,
         },
@@ -791,7 +1157,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     await persistDatasetToServerAndLocal(updated);
     setSuccessMessage(
-      `Time Period Aktif (TOR) berhasil diatur ke "${targetPeriod?.code} — ${targetPeriod?.label}" oleh Finance.`
+      `Time Period Aktif (TOR) berhasil diatur ke "${targetPeriod?.code} — ${targetPeriod?.label}".`
     );
   };
 
@@ -865,6 +1231,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     const updated: ProgramBudgetDataset = {
       ...dataset,
       masterBudgetCodes: nextCodes,
+      masterCodeUpdateStatus: 'Menunggu Konfirmasi Update Master Kode',
+      masterCodeUpdatedByName: currentUser?.name || 'Finance Officer',
+      masterCodeUpdatedByRole: currentUser?.roleTitle || 'Finance',
+      masterCodeUpdatedAt: nowIso,
       revisions: [
         {
           id: `rev-${Date.now()}`,
@@ -875,7 +1245,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           previousAnnualBudget: dataset.annualApprovedBudget,
           newAnnualBudget: dataset.annualApprovedBudget,
           periodStructureType: dataset.periodStructureType,
-          summary: actionLabel,
+          summary: `${actionLabel} (Menunggu Konfirmasi Update Master Kode).`,
         },
         ...(dataset.revisions || []),
       ],
@@ -883,7 +1253,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     await persistDatasetToServerAndLocal(updated);
     setShowAddCodeModal(false);
-    setSuccessMessage(`${actionLabel} berhasil disimpan.`);
+    setSuccessMessage(`${actionLabel} berhasil disimpan. Silakan klik Konfirmasi Update Master Kode untuk mengonfirmasi.`);
   };
 
   const handleDeleteMasterCode = async (item: ProgramMasterBudgetCode) => {
@@ -901,14 +1271,19 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       return;
     }
 
+    const nowIso = new Date().toISOString();
     const nextCodes = dataset.masterBudgetCodes.filter((c) => c.id !== item.id);
     const updated: ProgramBudgetDataset = {
       ...dataset,
       masterBudgetCodes: nextCodes,
+      masterCodeUpdateStatus: 'Menunggu Konfirmasi Update Master Kode',
+      masterCodeUpdatedByName: currentUser?.name || 'Finance Officer',
+      masterCodeUpdatedByRole: currentUser?.roleTitle || 'Finance',
+      masterCodeUpdatedAt: nowIso,
       revisions: [
         {
           id: `rev-${Date.now()}`,
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
           actorName: currentUser?.name || 'Finance Officer',
           actorRole: currentUser?.roleTitle || 'Finance',
           actionType: 'MASTER_CODE_UPDATE',
@@ -924,27 +1299,60 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     setSuccessMessage(`Master Budget Code ${item.code} berhasil dihapus.`);
   };
 
-  const handleExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      setExcelFileName(file.name);
-      const preview = await parseMasterBudgetExcelFile(file, dataset.masterBudgetCodes);
-      setExcelPreviewRows(preview);
-      setShowExcelPreviewModal(true);
-    } catch (err: any) {
-      setErrorMessage(err?.message || 'Gagal membaca file Excel.');
-    } finally {
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    }
+  const [showMasterCodeAuditTrail, setShowMasterCodeAuditTrail] = useState<boolean>(true);
+
+  const handleConfirmMasterCodeUpdate = async () => {
+    setErrorMessage(null);
+    const nowIso = new Date().toISOString();
+    const codePreviewList = dataset.masterBudgetCodes
+      .slice(0, 5)
+      .map((c) => `${c.code} (${c.budgetCategory})`)
+      .join(', ');
+    const moreSuffix =
+      dataset.masterBudgetCodes.length > 5
+        ? ` +${dataset.masterBudgetCodes.length - 5} kode lainnya`
+        : '';
+
+    const updated: ProgramBudgetDataset = {
+      ...dataset,
+      masterCodeUpdateStatus: 'Master Kode Terkonfirmasi',
+      masterCodeConfirmedByName: currentUser?.name || 'Ratna Kusuma, S.E.',
+      masterCodeConfirmedByRole: currentUser?.roleTitle || 'Finance & Compliance',
+      masterCodeConfirmedAt: nowIso,
+      updatedAt: nowIso,
+      updatedBy: currentUser?.name || 'Ratna Kusuma, S.E.',
+      revisions: [
+        {
+          id: `rev-mc-conf-${Date.now()}`,
+          timestamp: nowIso,
+          actorName: currentUser?.name || 'Ratna Kusuma, S.E.',
+          actorRole: currentUser?.roleTitle || 'Finance & Compliance',
+          actionType: 'MASTER_CODE_CONFIRMED',
+          previousAnnualBudget: dataset.annualApprovedBudget,
+          newAnnualBudget: dataset.annualApprovedBudget,
+          periodStructureType: dataset.periodStructureType,
+          summary: `Konfirmasi Update Master Budget Code berhasil disahkan (${dataset.masterBudgetCodes.length} Master Kode Aktif: ${codePreviewList}${moreSuffix}).`,
+        },
+        ...(dataset.revisions || []),
+      ],
+    };
+
+    await persistDatasetToServerAndLocal(updated);
+    setSuccessMessage(
+      `Konfirmasi Update Master Kode (${dataset.masterBudgetCodes.length} kode aktif) berhasil disahkan dan tercatat di Track Audit.`
+    );
   };
 
-  const handleConfirmExcelImport = async () => {
-    const validRows = excelPreviewRows.filter((r) => r.status === 'valid');
+  const executeDirectMasterCodeImport = async (
+    rowsToImport: ExcelImportPreviewRow[],
+    fileNameLabel: string
+  ) => {
+    const validRows = rowsToImport.filter((r) => r.status === 'valid');
     if (validRows.length === 0) {
       setShowExcelPreviewModal(false);
+      setSuccessMessage(
+        `Seluruh Master Budget Code pada file "${fileNameLabel}" sudah terdaftar di Program "${dataset.programName}".`
+      );
       return;
     }
 
@@ -966,6 +1374,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     const updated: ProgramBudgetDataset = {
       ...dataset,
       masterBudgetCodes: combined,
+      masterCodeUpdateStatus: 'Menunggu Konfirmasi Update Master Kode',
+      masterCodeUpdatedByName: currentUser?.name || 'Finance Officer',
+      masterCodeUpdatedByRole: currentUser?.roleTitle || 'Finance',
+      masterCodeUpdatedAt: nowIso,
       revisions: [
         {
           id: `rev-${Date.now()}`,
@@ -976,7 +1388,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           previousAnnualBudget: dataset.annualApprovedBudget,
           newAnnualBudget: dataset.annualApprovedBudget,
           periodStructureType: dataset.periodStructureType,
-          summary: `Import Excel (${excelFileName}): berhasil menambahkan ${importedCodes.length} Master Budget Code ke "${dataset.programName}".`,
+          summary: `Import Excel Finance (${fileNameLabel}): berhasil menambahkan ${importedCodes.length} Master Budget Code secara langsung ke "${dataset.programName}" (Menunggu Konfirmasi Update Master Kode).`,
         },
         ...(dataset.revisions || []),
       ],
@@ -986,7 +1398,387 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     setShowExcelPreviewModal(false);
     setExcelPreviewRows([]);
     setSuccessMessage(
-      `Berhasil mengimpor ${importedCodes.length} Master Budget Code dari "${excelFileName}".`
+      `Finance berhasil menambahkan ${importedCodes.length} Master Budget Code secara langsung dari Excel "${fileNameLabel}". Silakan klik Konfirmasi Update Master Kode.`
+    );
+  };
+
+  const handleExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setErrorMessage(null);
+      setExcelFileName(file.name);
+      const preview = await parseMasterBudgetExcelFile(file, dataset.masterBudgetCodes);
+      if (preview.length === 0) {
+        setErrorMessage('File Excel tidak berisi baris Master Budget Code (Code | Budget Category) yang dapat dibaca.');
+        return;
+      }
+      setExcelPreviewRows(preview);
+      // Langsung tambahkan Master Budget Code dari Excel Finance secara otomatis tanpa perlu lewat Activity
+      await executeDirectMasterCodeImport(preview, file.name);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal membaca file Excel Master Budget Code.');
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleConfirmExcelImport = async () => {
+    await executeDirectMasterCodeImport(excelPreviewRows, excelFileName);
+  };
+
+  // Hirarki Program (3 Level: Outcome -> Output -> Activity) Excel Template & Automatic Direct Import Handler
+  const executeHierarchyExcelImport = async (
+    rowsToImport: HierarchyExcelPreviewRow[],
+    targetProg: Program,
+    fileNameLabel: string
+  ) => {
+    const validRows = rowsToImport.filter((r) => r.status === 'valid');
+    if (validRows.length === 0) {
+      setShowHierarchyExcelPreviewModal(false);
+      setSuccessMessage(
+        `Seluruh data pada file "${fileNameLabel}" sudah terdaftar di Hirarki Program "${targetProg.name}".`
+      );
+      return;
+    }
+
+    setImportingHierarchyExcel(true);
+    setErrorMessage(null);
+
+    try {
+      const outcomeIdByName = new Map<string, string>();
+      const outcomeIndicatorsById = new Map<string, Indicator[]>();
+      const outputIdByKey = new Map<string, string>();
+      const outputIndicatorsById = new Map<string, Indicator[]>();
+      const activityIdByKey = new Map<string, string>();
+
+      const normalizeOcKey = (num: string, desc: string, fallbackName: string): string => {
+        const cleanNum = (num || (fallbackName.match(/^(Outcome\s*[\d.]+)/i)?.[1] ?? ''))
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        if (cleanNum) return cleanNum;
+        return (fallbackName || desc).trim().toLowerCase();
+      };
+
+      const normalizeOpKey = (num: string, desc: string, fallbackName: string): string => {
+        const cleanNum = (num || (fallbackName.match(/^(Output\s*[\d.]+)/i)?.[1] ?? ''))
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        if (cleanNum) return cleanNum;
+        return (fallbackName || desc).trim().toLowerCase();
+      };
+
+      const normalizeActKey = (num: string, actName: string): string => {
+        const cleanNum = (num || (actName.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? ''))
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        if (cleanNum) return cleanNum;
+        return actName.replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '').trim().toLowerCase();
+      };
+
+      const progOutcomes = outcomes.filter((o) => o.programId === targetProg.id);
+      progOutcomes.forEach((oc) => {
+        const ocKey = normalizeOcKey(oc.outcomeNumber || '', oc.description || '', oc.name);
+        outcomeIdByName.set(ocKey, oc.id);
+        outcomeIdByName.set(oc.name.trim().toLowerCase(), oc.id);
+        if (oc.outcomeNumber) {
+          outcomeIdByName.set(oc.outcomeNumber.trim().toLowerCase(), oc.id);
+        }
+        outcomeIndicatorsById.set(oc.id, [...(oc.indicators || [])]);
+        outputs
+          .filter((op) => op.outcomeId === oc.id)
+          .forEach((op) => {
+            const opNorm = normalizeOpKey(op.outputNumber || '', op.description || '', op.name);
+            const opKey = `${ocKey}__${opNorm}`;
+            outputIdByKey.set(opKey, op.id);
+            outputIdByKey.set(`${ocKey}__${op.name.trim().toLowerCase()}`, op.id);
+            if (op.outputNumber) {
+              outputIdByKey.set(`${ocKey}__${op.outputNumber.trim().toLowerCase()}`, op.id);
+            }
+            outputIndicatorsById.set(op.id, [...(op.indicators || [])]);
+            activities
+              .filter((a) => a.outputId === op.id)
+              .forEach((act) => {
+                const actNorm = normalizeActKey(act.activityNumber || '', act.name);
+                activityIdByKey.set(`${opKey}__${actNorm}`, act.id);
+                activityIdByKey.set(`${opKey}__${act.name.trim().toLowerCase()}`, act.id);
+              });
+          });
+      });
+
+      let createdOutcomesCount = 0;
+      let addedOutcomeIndicatorsCount = 0;
+      let createdOutputsCount = 0;
+      let addedOutputIndicatorsCount = 0;
+      let createdActivitiesCount = 0;
+      const newlyExpandedOutcomes: Record<string, boolean> = {};
+      const newlyExpandedOutputs: Record<string, boolean> = {};
+
+      for (const row of validRows) {
+        const ocKey = normalizeOcKey(
+          row.outcomeNumber,
+          row.outcomeDescription,
+          row.outcomeName
+        );
+        let outcomeId =
+          outcomeIdByName.get(ocKey) ||
+          outcomeIdByName.get(row.outcomeName.trim().toLowerCase()) ||
+          (row.outcomeNumber
+            ? outcomeIdByName.get(row.outcomeNumber.trim().toLowerCase())
+            : undefined);
+
+        const buildOutcomeIndicatorFromRow = (): Indicator | null => {
+          if (!row.outcomeIndicator || !row.outcomeIndicator.trim()) return null;
+          return {
+            id: `ind-oc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: row.outcomeIndicator.trim(),
+            description: '',
+            dataSource: row.outcomeDataSource || 'Laporan MEAL',
+            cumulativeType: row.outcomeCumulative || 'Non cumulative',
+            plannedDataBreakdown: row.outcomePlannedBreakdown || '',
+            reportingFrequency: row.outcomeReportingFrequency || 'Annual',
+            baseline: row.outcomeBaseline || 'TBA',
+            target: row.outcomeTarget || '',
+            endOfProjectGoal: row.outcomeTarget || '',
+            unit: row.outcomeUnit || '',
+            verificationMethod: row.outcomeDataSource || 'Laporan MEAL',
+          };
+        };
+
+        if (!outcomeId) {
+          const indicators: Indicator[] = [];
+          const firstInd = buildOutcomeIndicatorFromRow();
+          if (firstInd) {
+            indicators.push(firstInd);
+            addedOutcomeIndicatorsCount += 1;
+          }
+          const createdOc = await api.createOutcome({
+            programId: targetProg.id,
+            outcomeNumber: row.outcomeNumber || undefined,
+            name: row.outcomeName.trim(),
+            projectName: targetProg.name,
+            description: row.outcomeDescription || row.outcomeName.trim(),
+            indicators,
+            status: 'Belum Dimulai',
+          } as any);
+          outcomeId = createdOc.id;
+          outcomeIdByName.set(ocKey, outcomeId);
+          outcomeIdByName.set(row.outcomeName.trim().toLowerCase(), outcomeId);
+          if (row.outcomeNumber) {
+            outcomeIdByName.set(row.outcomeNumber.trim().toLowerCase(), outcomeId);
+          }
+          outcomeIndicatorsById.set(outcomeId, indicators);
+          newlyExpandedOutcomes[outcomeId] = true;
+          createdOutcomesCount += 1;
+        } else {
+          newlyExpandedOutcomes[outcomeId] = true;
+          const nextInd = buildOutcomeIndicatorFromRow();
+          if (nextInd) {
+            const currentInds = outcomeIndicatorsById.get(outcomeId) || [];
+            const alreadyHas = currentInds.some(
+              (i) => i.name.trim().toLowerCase() === nextInd.name.toLowerCase()
+            );
+            if (!alreadyHas) {
+              const updatedInds = [...currentInds, nextInd];
+              outcomeIndicatorsById.set(outcomeId, updatedInds);
+              await api.updateOutcome(outcomeId, {
+                indicators: updatedInds,
+              } as any);
+              addedOutcomeIndicatorsCount += 1;
+            }
+          }
+        }
+
+        if (row.outputName && outcomeId) {
+          const opNorm = normalizeOpKey(
+            row.outputNumber,
+            row.outputDescription,
+            row.outputName
+          );
+          const opKey = `${ocKey}__${opNorm}`;
+          let outputId =
+            outputIdByKey.get(opKey) ||
+            outputIdByKey.get(`${ocKey}__${row.outputName.trim().toLowerCase()}`) ||
+            (row.outputNumber
+              ? outputIdByKey.get(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`)
+              : undefined);
+
+          const buildOutputIndicatorFromRow = (): Indicator | null => {
+            if (!row.outputIndicator || !row.outputIndicator.trim()) return null;
+            return {
+              id: `ind-op-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              name: row.outputIndicator.trim(),
+              description: '',
+              dataSource: row.outputDataSource || 'Activity report',
+              cumulativeType: row.outputCumulative || 'Non cumulative',
+              plannedDataBreakdown: row.outputPlannedBreakdown || '',
+              reportingFrequency: row.outputReportingFrequency || 'Annual',
+              baseline: row.outputBaseline || 'TBA',
+              target: row.outputTarget || '',
+              endOfProjectGoal: row.outputTarget || '',
+              unit: row.outputUnit || '',
+              verificationMethod: row.outputDataSource || 'Activity report',
+            };
+          };
+
+          if (!outputId) {
+            const indicators: Indicator[] = [];
+            const firstOpInd = buildOutputIndicatorFromRow();
+            if (firstOpInd) {
+              indicators.push(firstOpInd);
+              addedOutputIndicatorsCount += 1;
+            }
+            const createdOp = await api.createOutput({
+              outcomeId,
+              outputNumber: row.outputNumber || undefined,
+              name: row.outputName.trim(),
+              description: row.outputDescription || row.outputName.trim(),
+              indicators,
+              status: 'Belum Dimulai',
+            } as any);
+            outputId = createdOp.id;
+            outputIdByKey.set(opKey, outputId);
+            outputIdByKey.set(`${ocKey}__${row.outputName.trim().toLowerCase()}`, outputId);
+            if (row.outputNumber) {
+              outputIdByKey.set(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`, outputId);
+            }
+            outputIndicatorsById.set(outputId, indicators);
+            newlyExpandedOutputs[outputId] = true;
+            createdOutputsCount += 1;
+          } else {
+            newlyExpandedOutputs[outputId] = true;
+            const nextOpInd = buildOutputIndicatorFromRow();
+            if (nextOpInd) {
+              const currentOpInds = outputIndicatorsById.get(outputId) || [];
+              const alreadyHas = currentOpInds.some(
+                (i) => i.name.trim().toLowerCase() === nextOpInd.name.toLowerCase()
+              );
+              if (!alreadyHas) {
+                const updatedOpInds = [...currentOpInds, nextOpInd];
+                outputIndicatorsById.set(outputId, updatedOpInds);
+                await api.updateOutput(outputId, {
+                  indicators: updatedOpInds,
+                } as any);
+                addedOutputIndicatorsCount += 1;
+              }
+            }
+          }
+
+          if (row.activityName && outputId) {
+            const actNorm = normalizeActKey(row.activityNumber, row.activityName);
+            const actKey = `${opKey}__${actNorm}`;
+            let activityId =
+              activityIdByKey.get(actKey) ||
+              activityIdByKey.get(`${opKey}__${row.activityName.trim().toLowerCase()}`);
+
+            if (!activityId) {
+              const createdAct = await api.createActivity({
+                outputId,
+                activityNumber: row.activityNumber || undefined,
+                name: row.activityName.trim(),
+                description: row.activityDescription || '',
+                anticipatedInputs: row.activityAnticipatedInputs || '',
+                plannedParticipantsBreakdown: row.activityPlannedParticipants || '',
+                startDate: row.activityStartDate || targetProg.startDate,
+                endDate: row.activityEndDate || targetProg.endDate,
+                status: 'Belum Dimulai',
+              } as any);
+              activityId = createdAct.id;
+              activityIdByKey.set(actKey, activityId);
+              activityIdByKey.set(`${opKey}__${row.activityName.trim().toLowerCase()}`, activityId);
+              createdActivitiesCount += 1;
+            } else if (
+              row.activityDescription ||
+              row.activityAnticipatedInputs ||
+              row.activityPlannedParticipants
+            ) {
+              await api.updateActivity(activityId, {
+                ...(row.activityDescription ? { description: row.activityDescription } : {}),
+                ...(row.activityAnticipatedInputs
+                  ? { anticipatedInputs: row.activityAnticipatedInputs }
+                  : {}),
+                ...(row.activityPlannedParticipants
+                  ? { plannedParticipantsBreakdown: row.activityPlannedParticipants }
+                  : {}),
+              } as any);
+            }
+          }
+        }
+      }
+
+      setExpandedOutcomes((prev) => ({ ...prev, ...newlyExpandedOutcomes }));
+      setExpandedOutputs((prev) => ({ ...prev, ...newlyExpandedOutputs }));
+      setShowHierarchyExcelPreviewModal(false);
+      setHierarchyExcelPreviewRows([]);
+      onRefresh();
+
+      const summaryParts: string[] = [];
+      if (createdOutcomesCount > 0) summaryParts.push(`${createdOutcomesCount} Outcome`);
+      if (addedOutcomeIndicatorsCount > 0)
+        summaryParts.push(`${addedOutcomeIndicatorsCount} Progress Indicator Outcome`);
+      if (createdOutputsCount > 0) summaryParts.push(`${createdOutputsCount} Output`);
+      if (addedOutputIndicatorsCount > 0)
+        summaryParts.push(`${addedOutputIndicatorsCount} Progress Indicator Output`);
+      if (createdActivitiesCount > 0) summaryParts.push(`${createdActivitiesCount} Activity`);
+
+      setSuccessMessage(
+        `Hirarki Program (Outcome → Output → Activity) berhasil dimasukkan secara otomatis dari Excel "${fileNameLabel}": ${
+          summaryParts.join(', ') || 'Hirarki diperbarui'
+        }.`
+      );
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal mengimpor Hirarki Program dari Excel.');
+    } finally {
+      setImportingHierarchyExcel(false);
+    }
+  };
+
+  const handleHierarchyExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const targetProg = currentSelectedProgram || activeBudgetProgram;
+    if (!targetProg) {
+      setErrorMessage('Pilih Program terlebih dahulu untuk mengimpor Hirarki Program.');
+      return;
+    }
+    try {
+      setErrorMessage(null);
+      setHierarchyExcelFileName(file.name);
+      const preview = await parseProgramHierarchyExcelFile({
+        file,
+        program: targetProg,
+        existingOutcomes: outcomes,
+        existingOutputs: outputs,
+        existingActivities: activities,
+        existingSubActivities: subActivities,
+      });
+      if (preview.length === 0) {
+        setErrorMessage('File Excel tidak memiliki baris data Hirarki Program yang dapat dibaca.');
+        return;
+      }
+      // Langsung masukkan secara otomatis ke Hirarki Program saat file Excel dipilih
+      await executeHierarchyExcelImport(preview, targetProg, file.name);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal membaca file Excel Hirarki Program.');
+    } finally {
+      if (hierarchyFileInputRef.current) {
+        hierarchyFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleConfirmHierarchyExcelImport = async () => {
+    const targetProg = currentSelectedProgram || activeBudgetProgram;
+    if (!targetProg) return;
+    await executeHierarchyExcelImport(
+      hierarchyExcelPreviewRows,
+      targetProg,
+      hierarchyExcelFileName
     );
   };
 
@@ -1255,71 +2047,53 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     e.preventDefault();
     if (!showAddActivity && !editingActivity) return;
     try {
-      const cleanCode = activityForm.code.trim();
-      const cleanName = activityForm.name.trim();
+      const cleanActNum = (activityForm.activityNumber || '').trim();
+      const rawName = activityForm.name.trim();
+      const cleanName =
+        cleanActNum && !rawName.toLowerCase().startsWith(cleanActNum.toLowerCase())
+          ? `${cleanActNum} ${rawName}`
+          : rawName;
 
       if (editingActivity) {
         await api.updateActivity(editingActivity.id, {
+          activityNumber: cleanActNum || undefined,
           name: cleanName,
-          code: cleanCode || undefined,
           description: activityForm.description,
+          anticipatedInputs: activityForm.anticipatedInputs || '',
+          plannedParticipantsBreakdown: activityForm.plannedParticipantsBreakdown || '',
           startDate: activityForm.startDate,
           endDate: activityForm.endDate,
-        });
+        } as any);
       } else if (showAddActivity) {
         await api.createActivity({
           outputId: showAddActivity.outputId,
+          activityNumber: cleanActNum || undefined,
           name: cleanName,
-          code: cleanCode || undefined,
           description: activityForm.description,
+          anticipatedInputs: activityForm.anticipatedInputs || '',
+          plannedParticipantsBreakdown: activityForm.plannedParticipantsBreakdown || '',
           startDate: activityForm.startDate,
           endDate: activityForm.endDate,
           status: 'Belum Dimulai',
-        });
-      }
-
-      // If Activity has a Master Budget Code, automatically ensure it is registered in Modul 3: Master Budget Code
-      if (cleanCode && activeBudgetProgram) {
-        const existingCode = dataset.masterBudgetCodes.find(
-          (c) => c.code.toLowerCase() === cleanCode.toLowerCase()
-        );
-        if (!existingCode) {
-          const nowIso = new Date().toISOString();
-          const newCodeEntry: ProgramMasterBudgetCode = {
-            id: `mbc-act-${Date.now()}`,
-            code: cleanCode,
-            budgetCategory: cleanName,
-            source: 'Database Activity',
-            createdBy: currentUser?.name || 'System',
-            createdAt: nowIso,
-            updatedAt: nowIso,
-          };
-          const updatedDs: ProgramBudgetDataset = {
-            ...dataset,
-            masterBudgetCodes: [...dataset.masterBudgetCodes, newCodeEntry].sort((a, b) =>
-              a.code.localeCompare(b.code, undefined, { numeric: true })
-            ),
-          };
-          await persistDatasetToServerAndLocal(updatedDs);
-        }
+        } as any);
       }
 
       setShowAddActivity(null);
       setEditingActivity(null);
       setActivityForm({
+        activityNumber: '',
         name: '',
         code: '',
         description: '',
+        anticipatedInputs: '',
+        plannedParticipantsBreakdown: '',
         startDate: new Date().toISOString().slice(0, 10),
         endDate: new Date().toISOString().slice(0, 10),
       });
       setSuccessMessage(
-        editingActivity
-          ? 'Activity & Master Budget Code berhasil diperbarui'
-          : 'Activity baru berhasil ditambahkan dan terhubung dengan Master Budget Code'
+        editingActivity ? 'Activity berhasil diperbarui' : 'Activity baru berhasil ditambahkan'
       );
       onRefresh();
-      await fetchBudgetAndFinancialRecords();
     } catch (err: any) {
       setErrorMessage(err.message);
     }
@@ -1357,6 +2131,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           className="hidden"
         />
       )}
+
+      {/* Hidden file input for Hirarki Program Excel import */}
+      <input
+        ref={hierarchyFileInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        onChange={handleHierarchyExcelFileChange}
+        className="hidden"
+      />
 
       {/* Notifications */}
       {errorMessage && (
@@ -1768,24 +2551,6 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setParticipantsModalProgram(currentProg)}
-                      className="inline-flex items-center gap-1.5 text-xs font-medium text-[#1D4ED8] bg-blue-50/70 border border-blue-200 hover:bg-blue-100/70 px-2.5 py-1 rounded transition-colors cursor-pointer"
-                    >
-                      <Users className="w-3.5 h-3.5 text-[#1D4ED8]" />
-                      <span>Peserta Program</span>
-                    </button>
-                    {canManage && (
-                      <button
-                        type="button"
-                        onClick={(e) => handleOpenEditProgram(currentProg, e)}
-                        className="inline-flex items-center gap-1 text-xs font-medium text-[#2F3437] bg-white border border-[#EAEAEA] hover:bg-[#F2F1EE] px-2.5 py-1 rounded transition-colors cursor-pointer"
-                      >
-                        <Edit3 className="w-3.5 h-3.5 text-[#787774]" />
-                        <span>Edit</span>
-                      </button>
-                    )}
                     {canManage && currentProg.status === 'Selesai' && (
                       <button
                         type="button"
@@ -1796,29 +2561,38 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                         <span>Hapus Program</span>
                       </button>
                     )}
-                    {canManage && programDetailSection === 'hierarchy' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOutcomeForm({
-                            name: '',
-                            projectName: currentProg.name,
-                            description: '',
-                            indicatorName: '',
-                            baseline: '',
-                            target: '',
-                            unit: '',
-                            verificationMethod: '',
-                            reportingFrequency: 'Bulanan',
-                            dataSource: '',
-                          });
-                          setShowAddOutcome(true);
-                        }}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] px-2.5 py-1 rounded transition-colors cursor-pointer"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Tambah Outcome</span>
-                      </button>
+                    {programDetailSection === 'hierarchy' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            downloadProgramHierarchyExcelTemplate({
+                              program: currentProg,
+                              outcomes,
+                              outputs,
+                              activities,
+                              subActivities,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-xs font-medium text-[#166534] bg-[#F0FDF4] border border-[#BBF7D0] hover:bg-[#DCFCE7] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5 text-[#15803D]" />
+                          <span>Template Excel Hirarki</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={importingHierarchyExcel}
+                          onClick={() => hierarchyFileInputRef.current?.click()}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-white bg-[#0F7B6C] hover:bg-[#0B5E52] px-3 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>
+                            {importingHierarchyExcel
+                              ? 'Memasukkan dari Excel...'
+                              : 'Import Excel Hirarki'}
+                          </span>
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -1964,6 +2738,32 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
                     <button
                       type="button"
+                      onClick={() => setProgramDetailSection('matrix')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                        programDetailSection === 'matrix'
+                          ? 'bg-white text-[#1D4ED8] shadow-2xs border border-[#E5E5E3]'
+                          : 'text-[#5F5E5B] hover:text-[#171717]'
+                      }`}
+                    >
+                      <BarChart3 className="w-3.5 h-3.5" />
+                      <span>Matriks Outcome &amp; Output</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setProgramDetailSection('activity_matrix')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                        programDetailSection === 'activity_matrix'
+                          ? 'bg-white text-[#1D4ED8] shadow-2xs border border-[#E5E5E3]'
+                          : 'text-[#5F5E5B] hover:text-[#171717]'
+                      }`}
+                    >
+                      <BarChart3 className="w-3.5 h-3.5" />
+                      <span>Matriks Activity</span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setProgramDetailSection('participants')}
                       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
                         programDetailSection === 'participants'
@@ -1992,6 +2792,615 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* =================================================================== */}
+              {/* MATRIKS OUTCOME & OUTPUT — SATU & MULTI-INDIKATOR                   */}
+              {/* =================================================================== */}
+              {programDetailSection === 'matrix' && (
+                <div className="space-y-4 animate-in fade-in duration-150">
+                  {programOutcomes.length === 0 ? (
+                    <div className="bg-white rounded-md border border-dashed border-[#CBD5E1] p-8 text-center space-y-2.5">
+                      <div className="w-9 h-9 rounded-full bg-[#F8FAFC] text-[#64748B] flex items-center justify-center mx-auto border border-[#E2E8F0]">
+                        <BarChart3 className="w-4 h-4 text-[#1D4ED8]" />
+                      </div>
+                      <h4 className="text-[13.5px] font-semibold text-[#0F172A]">
+                        Belum ada Hirarki Outcome, Output &amp; Activity pada Program ini
+                      </h4>
+                      <p className="text-[12px] text-[#64748B] max-w-md mx-auto">
+                        Tabel Matriks otomatis terkoneksi dengan nama-nama <strong>Outcome</strong>, <strong>Output</strong>, dan <strong>Activity</strong> dari Hirarki Program. Tambahkan Hirarki terlebih dahulu untuk menginput indikator dan deskripsi secara manual.
+                      </p>
+                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setProgramDetailSection('hierarchy')}
+                          className="inline-flex items-center gap-1.5 h-[32px] px-3.5 bg-white hover:bg-[#F8FAFC] text-[#0F172A] border border-[#CBD5E1] text-[12px] font-medium rounded transition-colors cursor-pointer"
+                        >
+                          <FolderTree className="w-3.5 h-3.5 text-[#1D4ED8]" />
+                          <span>Buka Tab Hierarki &amp; ToR</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddOutcome(true)}
+                          className="inline-flex items-center gap-1.5 h-[32px] px-3.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[12px] font-semibold rounded transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Tambah Outcome Manual</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {/* 1. TABEL MATRIKS OUTCOME & OUTPUT (Nada Profesional, Rapi & Tombol Input Manual Jelas) */}
+                      <div className="rounded-md border border-[#CBD5E1] bg-white overflow-hidden shadow-2xs">
+                        <div className="px-3.5 py-2.5 bg-[#F8FAFC] border-b border-[#CBD5E1] flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <BarChart3 className="w-4 h-4 text-[#1D4ED8]" />
+                            <div>
+                              <span className="text-[11.5px] font-bold text-[#0F172A] uppercase tracking-wider">
+                                Matriks Outcome &amp; Output — Satu &amp; Multi-Indikator
+                              </span>
+                              <span className="ml-2 text-[11px] font-medium text-[#64748B]">
+                                ({programOutcomes.length} Outcome ·{' '}
+                                {
+                                  outputs.filter((op) =>
+                                    programOutcomes.some((oc) => oc.id === op.outcomeId)
+                                  ).length
+                                }{' '}
+                                Output terkoneksi Hirarki)
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto bg-white">
+                          <table className="w-full text-left border-collapse text-[11.5px] text-[#0F172A]">
+                            <thead>
+                              <tr className="border-b border-[#CBD5E1] bg-[#F1F5F9] text-[11px] font-bold text-[#0F172A]">
+                                <th className="py-2.5 px-2.5 w-[105px] text-center align-middle border-r border-[#CBD5E1] bg-[#E5E7EB]/80">
+                                  Nomor outcome &amp; output
+                                </th>
+                                <th className="py-2.5 px-3 w-[18%] align-middle border-r border-[#CBD5E1]">
+                                  Description
+                                </th>
+                                <th className="py-2.5 px-3 w-[17%] align-middle border-r border-[#CBD5E1]">
+                                  Progress indicator
+                                </th>
+                                <th className="py-2.5 px-3 w-[14%] align-middle border-r border-[#CBD5E1]">
+                                  Data source
+                                </th>
+                                <th className="py-2.5 px-2 w-[96px] text-center align-middle border-r border-[#CBD5E1]">
+                                  Cumulative or non-cumulative
+                                </th>
+                                <th className="py-2.5 px-3 w-[13%] align-middle border-r border-[#CBD5E1]">
+                                  Planned data breakdown
+                                </th>
+                                <th className="py-2.5 px-2 w-[84px] text-center align-middle border-r border-[#CBD5E1]">
+                                  Reporting frequency
+                                </th>
+                                <th className="py-2.5 px-2 w-[68px] text-center align-middle border-r border-[#CBD5E1]">
+                                  Baseline
+                                </th>
+                                <th className="py-2.5 px-3 w-[14%] align-middle border-r border-[#CBD5E1]">
+                                  End of project goal
+                                </th>
+                                <th className="py-2.5 px-2.5 w-[108px] text-center align-middle bg-[#F8FAFC]">
+                                  Input Manual
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {programOutcomes.map((outcome, ocIdx) => {
+                                const relatedOutputs = outputs.filter(
+                                  (op) => op.outcomeId === outcome.id
+                                );
+                                const displayOutcomeNumber =
+                                  outcome.outcomeNumber ||
+                                  (outcome.name.match(/^(Outcome\s*\d+)/i)?.[1] ??
+                                    `Outcome ${ocIdx + 1}`);
+                                const displayOutcomeDescription =
+                                  outcome.description ||
+                                  outcome.name.replace(/^Outcome\s*\d+\s*[:\-–]?\s*/i, '').trim() ||
+                                  outcome.name;
+                                const hasOutcomeIndicators =
+                                  outcome.indicators && outcome.indicators.length > 0;
+                                const ocIndArr = hasOutcomeIndicators
+                                  ? outcome.indicators
+                                  : [
+                                      {
+                                        id: `empty-oc-${outcome.id}`,
+                                        name: '',
+                                        description: '',
+                                        dataSource: '-',
+                                        cumulativeType: 'Non cumulative',
+                                        plannedDataBreakdown: '-',
+                                        reportingFrequency: '-',
+                                        baseline: 'TBA',
+                                        target: '-',
+                                        endOfProjectGoal: '-',
+                                        unit: '',
+                                        verificationMethod: '-',
+                                      },
+                                    ];
+
+                                return (
+                                  <React.Fragment key={`unified-matrix-oc-${outcome.id}`}>
+                                    {/* BARIS OUTCOME */}
+                                    {ocIndArr.map((ind, indIdx) => (
+                                      <tr
+                                        key={`oc-row-${outcome.id}-${ind.id || indIdx}`}
+                                        onClick={() =>
+                                          handleOpenOutcomeDetailModal(outcome, ocIdx, true)
+                                        }
+                                        className="border-b border-[#CBD5E1] hover:bg-[#F8FAFC] transition-colors cursor-pointer group"
+                                      >
+                                        {indIdx === 0 && (
+                                          <>
+                                            <td
+                                              rowSpan={ocIndArr.length}
+                                              className="py-3 px-2.5 text-center align-middle font-bold text-[#0F172A] bg-[#E5E7EB]/70 border-r border-[#CBD5E1] whitespace-nowrap"
+                                            >
+                                              {displayOutcomeNumber}
+                                            </td>
+                                            <td
+                                              rowSpan={ocIndArr.length}
+                                              className="py-3 px-3 align-middle font-bold text-[#0F172A] bg-white border-r border-[#CBD5E1] leading-relaxed"
+                                            >
+                                              {displayOutcomeDescription}
+                                            </td>
+                                          </>
+                                        )}
+                                        <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                          {ind.name ? (
+                                            ind.name
+                                          ) : (
+                                            <span className="text-[#64748B] italic text-[11px]">
+                                              Belum ada indikator — klik tombol Input Manual
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                          {ind.dataSource || ind.verificationMethod || '-'}
+                                        </td>
+                                        <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                          {ind.cumulativeType || 'Non cumulative'}
+                                        </td>
+                                        <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                          {ind.plannedDataBreakdown || '-'}
+                                        </td>
+                                        <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                          {ind.reportingFrequency || '-'}
+                                        </td>
+                                        <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                          {ind.baseline || '-'}
+                                        </td>
+                                        <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                          {ind.endOfProjectGoal || ind.target || '-'}
+                                        </td>
+                                        {indIdx === 0 && (
+                                          <td
+                                            rowSpan={ocIndArr.length}
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="py-2.5 px-2 text-center align-middle bg-[#F8FAFC]/60"
+                                          >
+                                            <div className="flex flex-col items-center gap-1">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  handleOpenOutcomeDetailModal(outcome, ocIdx, true)
+                                                }
+                                                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded text-[10.5px] font-semibold text-[#1D4ED8] bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] transition-colors cursor-pointer"
+                                              >
+                                                <Edit3 className="w-3 h-3 shrink-0" />
+                                                <span>
+                                                  {hasOutcomeIndicators
+                                                    ? `Edit (${outcome.indicators.length})`
+                                                    : '+ Indikator'}
+                                                </span>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  setShowAddOutput({ outcomeId: outcome.id })
+                                                }
+                                                className="w-full inline-flex items-center justify-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-medium text-[#475569] bg-white hover:bg-[#F1F5F9] border border-[#CBD5E1] transition-colors cursor-pointer"
+                                              >
+                                                <Plus className="w-2.5 h-2.5 shrink-0" />
+                                                <span>Output</span>
+                                              </button>
+                                            </div>
+                                          </td>
+                                        )}
+                                      </tr>
+                                    ))}
+
+                                    {/* BARIS OUTPUT DI BAWAH OUTCOME INI */}
+                                    {relatedOutputs.map((opItem, opIdx) => {
+                                      const opNumLabel =
+                                        opItem.outputNumber ||
+                                        (opItem.name.match(/^(Output\s*[\d.]+)/i)?.[1] ??
+                                          `Output ${ocIdx + 1}.${opIdx + 1}`);
+                                      const opDescLabel =
+                                        opItem.description ||
+                                        opItem.name
+                                          .replace(/^Output\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                          .trim() ||
+                                        opItem.name;
+                                      const hasOutputIndicators =
+                                        opItem.indicators && opItem.indicators.length > 0;
+                                      const opInds = hasOutputIndicators
+                                        ? opItem.indicators
+                                        : [
+                                            {
+                                              id: `empty-${opItem.id}`,
+                                              name: '',
+                                              description: '',
+                                              dataSource: '-',
+                                              cumulativeType: 'Non cumulative',
+                                              plannedDataBreakdown: '-',
+                                              reportingFrequency: '-',
+                                              baseline: 'TBA',
+                                              target: '-',
+                                              endOfProjectGoal: '-',
+                                              unit: '',
+                                              verificationMethod: '-',
+                                            },
+                                          ];
+
+                                      return opInds.map((ind, indIdx) => (
+                                        <tr
+                                          key={`op-row-${opItem.id}-${ind.id || indIdx}`}
+                                          onClick={() =>
+                                            handleOpenOutputDetailModal(opItem, ocIdx, opIdx, true)
+                                          }
+                                          className="border-b border-[#CBD5E1] last:border-b-0 hover:bg-[#F8FAFC] transition-colors cursor-pointer group"
+                                        >
+                                          {indIdx === 0 && (
+                                            <>
+                                              <td
+                                                rowSpan={opInds.length}
+                                                className="py-3 px-2.5 text-center align-middle font-bold text-[#0F172A] bg-[#F1F5F9] border-r border-[#CBD5E1] whitespace-nowrap"
+                                              >
+                                                {opNumLabel}
+                                              </td>
+                                              <td
+                                                rowSpan={opInds.length}
+                                                className="py-3 px-3 align-middle font-normal text-[#0F172A] bg-white border-r border-[#CBD5E1] leading-relaxed"
+                                              >
+                                                {opDescLabel}
+                                              </td>
+                                            </>
+                                          )}
+                                          <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                            {ind.name ? (
+                                              ind.name
+                                            ) : (
+                                              <span className="text-[#64748B] italic text-[11px]">
+                                                Belum ada indikator — klik tombol Input Manual
+                                              </span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                            {ind.dataSource || ind.verificationMethod || '-'}
+                                          </td>
+                                          <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                            {ind.cumulativeType || 'Non cumulative'}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                            {ind.plannedDataBreakdown || '-'}
+                                          </td>
+                                          <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                            {ind.reportingFrequency || '-'}
+                                          </td>
+                                          <td className="py-2.5 px-2 text-center text-[#0F172A] border-r border-[#CBD5E1] align-middle whitespace-nowrap">
+                                            {ind.baseline || '-'}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-[#0F172A] border-r border-[#CBD5E1] align-middle leading-relaxed">
+                                            {ind.endOfProjectGoal || ind.target || '-'}
+                                          </td>
+                                          {indIdx === 0 && (
+                                            <td
+                                              rowSpan={opInds.length}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="py-2.5 px-2 text-center align-middle bg-[#F8FAFC]/60"
+                                            >
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  handleOpenOutputDetailModal(
+                                                    opItem,
+                                                    ocIdx,
+                                                    opIdx,
+                                                    true
+                                                  )
+                                                }
+                                                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded text-[10.5px] font-semibold text-[#0F7B6C] bg-[#ECFDF5] hover:bg-[#D1FAE5] border border-[#A7F3D0] transition-colors cursor-pointer"
+                                              >
+                                                <Edit3 className="w-3 h-3 shrink-0" />
+                                                <span>
+                                                  {hasOutputIndicators
+                                                    ? `Edit (${opItem.indicators.length})`
+                                                    : '+ Indikator'}
+                                                </span>
+                                              </button>
+                                            </td>
+                                          )}
+                                        </tr>
+                                      ));
+                                    })}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* =================================================================== */}
+              {/* MATRIKS ACTIVITY — DESCRIPTION, ANTICIPATED INPUTS & PARTICIPANTS   */}
+              {/* =================================================================== */}
+              {programDetailSection === 'activity_matrix' && (
+                <div className="space-y-4 animate-in fade-in duration-150">
+                  {programOutcomes.length === 0 ? (
+                    <div className="bg-white rounded-md border border-dashed border-[#CBD5E1] p-8 text-center space-y-2.5">
+                      <div className="w-9 h-9 rounded-full bg-[#F8FAFC] text-[#64748B] flex items-center justify-center mx-auto border border-[#E2E8F0]">
+                        <BarChart3 className="w-4 h-4 text-[#0F7B6C]" />
+                      </div>
+                      <h4 className="text-[13.5px] font-semibold text-[#0F172A]">
+                        Belum ada Hirarki Outcome, Output &amp; Activity pada Program ini
+                      </h4>
+                      <p className="text-[12px] text-[#64748B] max-w-md mx-auto">
+                        Tabel Matriks Activity otomatis terkoneksi dengan nama-nama <strong>Outcome</strong>, <strong>Output</strong>, dan <strong>Activity</strong> dari Hirarki Program. Tambahkan Hirarki terlebih dahulu untuk menginput deskripsi activity, anticipated inputs, dan planned participants secara manual.
+                      </p>
+                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setProgramDetailSection('hierarchy')}
+                          className="inline-flex items-center gap-1.5 h-[32px] px-3.5 bg-white hover:bg-[#F8FAFC] text-[#0F172A] border border-[#CBD5E1] text-[12px] font-medium rounded transition-colors cursor-pointer"
+                        >
+                          <FolderTree className="w-3.5 h-3.5 text-[#1D4ED8]" />
+                          <span>Buka Tab Hierarki &amp; ToR</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddOutcome(true)}
+                          className="inline-flex items-center gap-1.5 h-[32px] px-3.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[12px] font-semibold rounded transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Tambah Outcome Manual</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {/* TABEL MATRIKS ACTIVITY (Nada Profesional Selaras & Tombol Input Manual Jelas) */}
+                      <div className="rounded-md border border-[#CBD5E1] bg-white overflow-hidden shadow-2xs">
+                        <div className="px-3.5 py-2.5 bg-[#F8FAFC] border-b border-[#CBD5E1] flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <BarChart3 className="w-4 h-4 text-[#0F7B6C]" />
+                            <div>
+                              <span className="text-[11.5px] font-bold text-[#0F172A] uppercase tracking-wider">
+                                Matriks Activity — Activity Description, Anticipated Inputs &amp; Planned Participants
+                              </span>
+                              <span className="ml-2 text-[11px] font-medium text-[#64748B]">
+                                (Terkoneksi Hirarki · Input Manual)
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto bg-white">
+                          <table className="w-full text-left border-collapse text-[11.5px] text-[#0F172A]">
+                            <thead>
+                              <tr className="border-b border-[#CBD5E1] bg-[#F1F5F9] text-[11px] font-bold text-[#0F172A]">
+                                <th className="py-2.5 px-3 w-[23%] border-r border-[#CBD5E1] bg-[#E5E7EB]/80">
+                                  Nomor &amp; Nama Activity (Hirarki)
+                                </th>
+                                <th className="py-2.5 px-3 w-[33%] border-r border-[#CBD5E1]">
+                                  Activity description
+                                </th>
+                                <th className="py-2.5 px-3 w-[18%] border-r border-[#CBD5E1]">
+                                  Anticipated inputs
+                                </th>
+                                <th className="py-2.5 px-3 w-[18%] border-r border-[#CBD5E1]">
+                                  Planned participants (by gender &amp; age)
+                                </th>
+                                <th className="py-2.5 px-2.5 w-[108px] text-center bg-[#F8FAFC]">
+                                  Input Manual
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {programOutcomes.map((outcome, ocIdx) => {
+                                const relatedOutputs = outputs.filter(
+                                  (op) => op.outcomeId === outcome.id
+                                );
+                                const displayOutcomeNumber =
+                                  outcome.outcomeNumber ||
+                                  (outcome.name.match(/^(Outcome\s*\d+)/i)?.[1] ??
+                                    `Outcome ${ocIdx + 1}`);
+                                const displayOutcomeDescription =
+                                  outcome.description ||
+                                  outcome.name.replace(/^Outcome\s*\d+\s*[:\-–]?\s*/i, '').trim() ||
+                                  outcome.name;
+
+                                return (
+                                  <React.Fragment key={`unified-act-matrix-oc-${outcome.id}`}>
+                                    {/* Baris Header Outcome */}
+                                    <tr className="border-b border-t border-[#CBD5E1] bg-[#E5E7EB]/70 text-[#0F172A]">
+                                      <td
+                                        colSpan={5}
+                                        className="py-2 px-3 font-bold text-[11.5px] text-[#0F172A]"
+                                      >
+                                        <span className="text-[#1D4ED8] mr-1.5">
+                                          {displayOutcomeNumber}:
+                                        </span>
+                                        <span>{displayOutcomeDescription}</span>
+                                      </td>
+                                    </tr>
+
+                                    {relatedOutputs.map((opItem, opIdx) => {
+                                      const opNumLabel =
+                                        opItem.outputNumber ||
+                                        (opItem.name.match(/^(Output\s*[\d.]+)/i)?.[1] ??
+                                          `Output ${ocIdx + 1}.${opIdx + 1}`);
+                                      const opDescLabel =
+                                        opItem.description ||
+                                        opItem.name
+                                          .replace(/^Output\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                          .trim() ||
+                                        opItem.name;
+                                      const opActs = activities.filter(
+                                        (a) => a.outputId === opItem.id
+                                      );
+
+                                      return (
+                                        <React.Fragment key={`act-matrix-op-${opItem.id}`}>
+                                          {/* Baris Subheader Output */}
+                                          <tr className="border-b border-[#CBD5E1] bg-[#F8FAFC] text-[#0F172A]">
+                                            <td
+                                              colSpan={4}
+                                              className="py-2 px-3 text-[11px] font-semibold text-[#1E293B] border-r border-[#CBD5E1]"
+                                            >
+                                              <span className="text-[#0F7B6C] font-bold mr-1.5">
+                                                {opNumLabel}:
+                                              </span>
+                                              <span>{opDescLabel}</span>
+                                            </td>
+                                            <td className="py-1.5 px-2 text-center">
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setShowAddActivity({
+                                                    outputId: opItem.id,
+                                                  });
+                                                  setActivityForm({
+                                                    activityNumber: `Activity ${ocIdx + 1}.${opIdx + 1}`,
+                                                    name: '',
+                                                    code: `${ocIdx + 1}.${opIdx + 1}.${opActs.length + 1}`,
+                                                    description: '',
+                                                    anticipatedInputs: '',
+                                                    plannedParticipantsBreakdown: '',
+                                                    startDate: currentProg.startDate,
+                                                    endDate: currentProg.endDate,
+                                                  });
+                                                }}
+                                                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded text-[10px] font-semibold text-[#0F7B6C] bg-white hover:bg-[#ECFDF5] border border-[#A7F3D0] transition-colors cursor-pointer"
+                                              >
+                                                <Plus className="w-2.5 h-2.5 shrink-0" />
+                                                <span>Activity</span>
+                                              </button>
+                                            </td>
+                                          </tr>
+
+                                          {opActs.length === 0 ? (
+                                            <tr className="border-b border-[#CBD5E1] bg-white text-[#64748B] italic">
+                                              <td className="py-2.5 px-3 border-r border-[#CBD5E1]">
+                                                Belum ada Activity pada {opNumLabel}
+                                              </td>
+                                              <td className="py-2.5 px-3 border-r border-[#CBD5E1]">
+                                                -
+                                              </td>
+                                              <td className="py-2.5 px-3 border-r border-[#CBD5E1]">
+                                                -
+                                              </td>
+                                              <td className="py-2.5 px-3 border-r border-[#CBD5E1]">
+                                                -
+                                              </td>
+                                              <td className="py-2.5 px-2 text-center">-</td>
+                                            </tr>
+                                          ) : (
+                                            opActs.map((actItem, actIdx) => {
+                                              const actPrefix =
+                                                actItem.activityNumber ||
+                                                (actItem.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ??
+                                                  `Activity ${ocIdx + 1}.${opIdx + 1}`);
+                                              const cleanActName =
+                                                actItem.name
+                                                  .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                                  .trim() || actItem.name;
+
+                                              const openActivityManualEdit = () => {
+                                                setEditingActivity(actItem);
+                                                setActivityForm({
+                                                  activityNumber: actPrefix,
+                                                  name: cleanActName,
+                                                  code: actItem.code || '',
+                                                  description: actItem.description || '',
+                                                  anticipatedInputs:
+                                                    actItem.anticipatedInputs || '',
+                                                  plannedParticipantsBreakdown:
+                                                    actItem.plannedParticipantsBreakdown || '',
+                                                  startDate: actItem.startDate,
+                                                  endDate: actItem.endDate,
+                                                });
+                                              };
+
+                                              return (
+                                                <tr
+                                                  key={actItem.id || actIdx}
+                                                  onClick={openActivityManualEdit}
+                                                  className="border-b border-[#CBD5E1] last:border-b-0 bg-white hover:bg-[#F8FAFC] transition-colors cursor-pointer text-[#0F172A]"
+                                                >
+                                                  <td className="py-3 px-3 align-top border-r border-[#CBD5E1] leading-relaxed">
+                                                    <span className="font-bold text-[#0F172A] block">
+                                                      {actPrefix}
+                                                    </span>
+                                                    <span className="text-[#334155]">
+                                                      {cleanActName}
+                                                    </span>
+                                                  </td>
+                                                  <td className="py-3 px-3 align-top border-r border-[#CBD5E1] leading-relaxed">
+                                                    {actItem.description ? (
+                                                      actItem.description
+                                                    ) : (
+                                                      <span className="text-[#64748B] italic text-[11px]">
+                                                        Belum diisi — klik Input Manual
+                                                      </span>
+                                                    )}
+                                                  </td>
+                                                  <td className="py-3 px-3 align-top border-r border-[#CBD5E1] leading-relaxed">
+                                                    {actItem.anticipatedInputs || '-'}
+                                                  </td>
+                                                  <td className="py-3 px-3 align-top border-r border-[#CBD5E1] leading-relaxed">
+                                                    {actItem.plannedParticipantsBreakdown || '-'}
+                                                  </td>
+                                                  <td
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="py-2.5 px-2 text-center align-middle bg-[#F8FAFC]/60"
+                                                  >
+                                                    <button
+                                                      type="button"
+                                                      onClick={openActivityManualEdit}
+                                                      className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded text-[10.5px] font-semibold text-[#1D4ED8] bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] transition-colors cursor-pointer"
+                                                    >
+                                                      <Edit3 className="w-3 h-3 shrink-0" />
+                                                      <span>
+                                                        {actItem.description ? 'Edit' : '+ Input'}
+                                                      </span>
+                                                    </button>
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* =================================================================== */}
               {/* TRACING PESERTA: AKUMULASI PER OUTCOME TANPA DUPLIKASI ACTIVITY     */}
@@ -2179,8 +3588,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
                               <span className="text-[#D4D4D0] hidden sm:inline">·</span>
 
-                              {/* Status Persetujuan Direktur Badge */}
-                              <div className="inline-flex items-center gap-1.5">
+                              {/* Status Persetujuan Direktur & Konfirmasi Finance Badge */}
+                              <div className="inline-flex flex-wrap items-center gap-1.5">
                                 <span
                                   className={`px-2 py-0.5 rounded border text-[10.5px] font-semibold whitespace-nowrap ${
                                     currentBudgetApprovalStatus === 'Disetujui Direktur'
@@ -2206,12 +3615,27 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                       (Pengajuan dari {dataset.budgetSubmittedBy})
                                     </span>
                                   )}
+                                {dataset.periodUpdateStatus && (
+                                  <span
+                                    className={`px-2 py-0.5 rounded border text-[10.5px] font-semibold whitespace-nowrap ${
+                                      dataset.periodUpdateStatus === 'Terkonfirmasi Finance'
+                                        ? 'bg-blue-50 text-[#1D4ED8] border-blue-200'
+                                        : 'bg-amber-50 text-amber-900 border-amber-200'
+                                    }`}
+                                  >
+                                    {dataset.periodUpdateStatus === 'Terkonfirmasi Finance'
+                                      ? `✓ Dikonfirmasi Finance (${dataset.periodConfirmedByFinanceName || 'Finance'})`
+                                      : `⏳ Menunggu Konfirmasi Finance (Update Direktur: ${
+                                          dataset.periodUpdatedByDirectorName || 'Direktur'
+                                        })`}
+                                  </span>
+                                )}
                               </div>
                             </div>
 
-                            {/* Action Buttons: Jika sudah di-ACC Direktur, tidak perlu tampilkan tombol ACC/Revisi lagi kecuali ada notifikasi pengajuan baru dari Finance */}
+                            {/* Action Buttons: Direktur selalu memiliki tombol Update Kode & Periode, Finance memiliki tombol Konfirmasi */}
                             <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                              {/* Finance dapat menambah periode & mengajukan anggaran/revisi ke Direktur */}
+                              {/* Finance dapat menambah periode, mengonfirmasi update kode/periode dari Direktur & mengajukan anggaran/revisi */}
                               {isFinance && (
                                 <>
                                   <button
@@ -2221,6 +3645,19 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                   >
                                     <Plus className="w-3 h-3 text-[#1D4ED8]" />
                                     <span>Tambah Periode</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={handleFinanceConfirmPeriodUpdate}
+                                    className={`inline-flex items-center gap-1 h-7 px-3 rounded text-[11px] font-semibold cursor-pointer whitespace-nowrap transition-colors ${
+                                      dataset.periodUpdateStatus === 'Menunggu Konfirmasi Finance'
+                                        ? 'bg-emerald-700 hover:bg-emerald-800 text-white shadow-2xs'
+                                        : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                    }`}
+                                    title="Konfirmasi oleh Finance atas keputusan Kode & Custom Period dari Direktur"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>Konfirmasi Kode &amp; Periode (Finance)</span>
                                   </button>
                                   <button
                                     type="button"
@@ -2238,8 +3675,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                 </>
                               )}
 
-                              {/* Direktur: Hanya tampilkan tombol ACC / Minta Revisi jika belum di-ACC atau ada pengajuan/notifikasi baru dari Finance */}
-                              {isDirector && currentBudgetApprovalStatus !== 'Disetujui Direktur' && (
+                              {/* Direktur: Selalu tampilkan tombol Tambah Periode & Update Kode & Periode (Direktur), plus ACC/Revisi jika belum di-ACC */}
+                              {isDirector && (
                                 <>
                                   <button
                                     type="button"
@@ -2251,19 +3688,32 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={handleDirectorApproveBudget}
-                                    className="inline-flex items-center gap-1 h-7 px-3 rounded text-[11px] font-semibold bg-emerald-700 text-white hover:bg-emerald-800 cursor-pointer whitespace-nowrap"
+                                    onClick={handleDirectorUpdatePeriodsAndCodes}
+                                    className="inline-flex items-center gap-1 h-7 px-3 rounded text-[11px] font-semibold bg-[#1D4ED8] text-white hover:bg-[#1E40AF] cursor-pointer whitespace-nowrap shadow-2xs"
+                                    title="Simpan & Update Kode Periode (P1, q1, P2, dsb.) oleh Direktur untuk dikonfirmasi Finance & disinkronkan ke TOR"
                                   >
                                     <Check className="w-3 h-3" />
-                                    <span>Setujui Anggaran (ACC Direktur)</span>
+                                    <span>Update Kode &amp; Periode (Direktur)</span>
                                   </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setShowBudgetRevisionInput((prev) => !prev)}
-                                    className="inline-flex items-center gap-1 h-7 px-2.5 rounded border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-[11px] font-semibold cursor-pointer whitespace-nowrap"
-                                  >
-                                    <span>Minta Revisi</span>
-                                  </button>
+                                  {currentBudgetApprovalStatus !== 'Disetujui Direktur' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={handleDirectorApproveBudget}
+                                        className="inline-flex items-center gap-1 h-7 px-3 rounded text-[11px] font-semibold bg-emerald-700 text-white hover:bg-emerald-800 cursor-pointer whitespace-nowrap"
+                                      >
+                                        <Check className="w-3 h-3" />
+                                        <span>Setujui Anggaran (ACC Direktur)</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setShowBudgetRevisionInput((prev) => !prev)}
+                                        className="inline-flex items-center gap-1 h-7 px-2.5 rounded border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-[11px] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        <span>Minta Revisi</span>
+                                      </button>
+                                    </>
+                                  )}
                                 </>
                               )}
                             </div>
@@ -2317,122 +3767,167 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                 <th className="py-1.5 px-3 text-center">
                                   Time Period Aktif (TOR)
                                 </th>
-                                <th className="py-1.5 px-3 text-center w-14">Aksi</th>
+                                <th className="py-1.5 px-3 text-center w-24">Aksi</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-[#EAEAEA]">
-                              {activeDraftPeriods.map((period, idx) => {
-                                const hasExplicitActive = activeDraftPeriods.some(
+                              {(() => {
+                                const firstActiveIdx = activeDraftPeriods.findIndex(
                                   (p) => p.isActiveForTor
                                 );
-                                const isTorActive = hasExplicitActive
-                                  ? Boolean(period.isActiveForTor)
-                                  : idx === 0;
-                                return (
-                                  <tr key={period.id} className="hover:bg-[#FAFAF9]">
-                                    <td className="py-1.5 px-3 font-mono font-bold text-[#252525]">
-                                      <input
-                                        type="text"
-                                        value={period.code}
-                                        onChange={(e) =>
-                                          handleUpdateCustomPeriodMeta(period.id, 'code', e.target.value)
-                                        }
-                                        className="w-20 px-2 py-1 text-xs font-mono border border-[#D4D4D0] rounded"
-                                      />
-                                    </td>
-                                    <td className="py-1.5 px-3 font-medium text-[#252525]">
-                                      <input
-                                        type="text"
-                                        value={period.label}
-                                        onChange={(e) =>
-                                          handleUpdateCustomPeriodMeta(period.id, 'label', e.target.value)
-                                        }
-                                        className="w-full px-2 py-1 text-xs border border-[#D4D4D0] rounded"
-                                      />
-                                    </td>
-                                    <td className="py-1.5 px-3 font-mono text-[11px] text-[#5A5A58]">
-                                      <div className="flex items-center gap-1.5">
+                                const effectiveActiveIdx =
+                                  firstActiveIdx >= 0 ? firstActiveIdx : 0;
+
+                                return activeDraftPeriods.map((period, idx) => {
+                                  const isTorActive = idx === effectiveActiveIdx;
+                                  return (
+                                    <tr key={period.id} className="hover:bg-[#FAFAF9]">
+                                      <td className="py-1.5 px-3 font-mono font-bold text-[#252525]">
+                                        <div className="flex items-center gap-1.5">
+                                          <input
+                                            type="text"
+                                            value={period.code}
+                                            onChange={(e) =>
+                                              handleUpdateCustomPeriodMeta(
+                                                period.id,
+                                                'code',
+                                                e.target.value
+                                              )
+                                            }
+                                            className="w-20 px-2 py-1 text-xs font-mono font-bold border border-[#D4D4D0] rounded focus:outline-none focus:border-[#1D4ED8]"
+                                          />
+                                          {isDirector && (
+                                            <button
+                                              type="button"
+                                              onClick={handleDirectorUpdatePeriodsAndCodes}
+                                              className="px-2 py-1 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[10px] font-semibold cursor-pointer whitespace-nowrap"
+                                              title="Update Kode & Periode ini (Direktur)"
+                                            >
+                                              Update
+                                            </button>
+                                          )}
+                                          {isFinance &&
+                                            dataset.periodUpdateStatus ===
+                                              'Menunggu Konfirmasi Finance' && (
+                                              <button
+                                                type="button"
+                                                onClick={handleFinanceConfirmPeriodUpdate}
+                                                className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-semibold cursor-pointer whitespace-nowrap"
+                                                title="Konfirmasi Kode & Periode ini (Finance)"
+                                              >
+                                                Konfirmasi
+                                              </button>
+                                            )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-3 font-medium text-[#252525]">
                                         <input
-                                          type="date"
-                                          value={period.startDate}
+                                          type="text"
+                                          value={period.label}
                                           onChange={(e) =>
-                                            handleUpdateCustomPeriodMeta(period.id, 'startDate', e.target.value)
+                                            handleUpdateCustomPeriodMeta(
+                                              period.id,
+                                              'label',
+                                              e.target.value
+                                            )
                                           }
-                                          className="px-2 py-1 text-xs font-mono border border-[#D4D4D0] rounded"
+                                          className="w-full px-2 py-1 text-xs border border-[#D4D4D0] rounded focus:outline-none focus:border-[#1D4ED8]"
                                         />
-                                        <span>s/d</span>
+                                      </td>
+                                      <td className="py-1.5 px-3 font-mono text-[11px] text-[#5A5A58]">
+                                        <div className="flex items-center gap-1.5">
+                                          <input
+                                            type="date"
+                                            value={period.startDate}
+                                            onChange={(e) =>
+                                              handleUpdateCustomPeriodMeta(
+                                                period.id,
+                                                'startDate',
+                                                e.target.value
+                                              )
+                                            }
+                                            className="px-2 py-1 text-xs font-mono border border-[#D4D4D0] rounded"
+                                          />
+                                          <span>s/d</span>
+                                          <input
+                                            type="date"
+                                            value={period.endDate}
+                                            onChange={(e) =>
+                                              handleUpdateCustomPeriodMeta(
+                                                period.id,
+                                                'endDate',
+                                                e.target.value
+                                              )
+                                            }
+                                            className="px-2 py-1 text-xs font-mono border border-[#D4D4D0] rounded"
+                                          />
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-3 text-right">
                                         <input
-                                          type="date"
-                                          value={period.endDate}
+                                          type="number"
+                                          min={0}
+                                          step={500000}
+                                          value={period.allocatedAmount || ''}
+                                          placeholder="0"
                                           onChange={(e) =>
-                                            handleUpdateCustomPeriodMeta(period.id, 'endDate', e.target.value)
+                                            handleUpdateDraftPeriodAmount(
+                                              period.id,
+                                              Number(e.target.value)
+                                            )
                                           }
-                                          className="px-2 py-1 text-xs font-mono border border-[#D4D4D0] rounded"
+                                          className="w-40 text-right px-2.5 py-1 text-xs font-mono font-bold text-[#252525] bg-white border border-[#D4D4D0] rounded focus:outline-none focus:border-[#1D4ED8]"
                                         />
-                                      </div>
-                                    </td>
-                                    <td className="py-1.5 px-3 text-right">
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        step={500000}
-                                        value={period.allocatedAmount || ''}
-                                        placeholder="0"
-                                        onChange={(e) =>
-                                          handleUpdateDraftPeriodAmount(period.id, Number(e.target.value))
-                                        }
-                                        className="w-40 text-right px-2.5 py-1 text-xs font-mono font-bold text-[#252525] bg-white border border-[#D4D4D0] rounded focus:outline-none focus:border-[#1D4ED8]"
-                                      />
-                                    </td>
-                                    <td className="py-1.5 px-3 text-center whitespace-nowrap">
-                                      {!isBudgetApprovedByDirector ? (
-                                        <span
-                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#F4F3EF] border border-[#E3E2E0] text-[#787774] text-[10.5px] font-medium cursor-not-allowed"
-                                          title="Time Period Aktif (TOR) hanya dapat diaktifkan oleh Finance setelah Anggaran di-ACC oleh Direktur"
-                                        >
-                                          <Lock className="w-3 h-3 text-[#9B9A97]" />
-                                          <span>Menunggu ACC Direktur</span>
-                                        </span>
-                                      ) : isFinance ? (
+                                      </td>
+                                      <td className="py-1.5 px-3 text-center whitespace-nowrap">
+                                        {!isBudgetApprovedByDirector && !isDirector ? (
+                                          <span
+                                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#F4F3EF] border border-[#E3E2E0] text-[#787774] text-[10.5px] font-medium cursor-not-allowed"
+                                            title="Time Period Aktif (TOR) hanya dapat diaktifkan setelah Anggaran di-ACC oleh Direktur"
+                                          >
+                                            <Lock className="w-3 h-3 text-[#9B9A97]" />
+                                            <span>Menunggu ACC Direktur</span>
+                                          </span>
+                                        ) : isFinance || isDirector ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleFinanceActivateTorPeriod(period.id)}
+                                            className={`px-2.5 py-0.5 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
+                                              isTorActive
+                                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-300'
+                                                : 'bg-white border border-[#D4D4D0] text-[#5A5A58] hover:bg-[#F4F4F2]'
+                                            }`}
+                                            title="Klik untuk menetapkan periode ini sebagai Time Period Aktif (TOR)"
+                                          >
+                                            {isTorActive ? 'Aktif (TOR)' : 'Pilih Aktif'}
+                                          </button>
+                                        ) : (
+                                          <span
+                                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[10.5px] font-semibold ${
+                                              isTorActive
+                                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                                : 'bg-[#F7F7F5] text-[#787774] border border-[#E5E5E3]'
+                                            }`}
+                                          >
+                                            {isTorActive ? 'Aktif (TOR)' : 'Nonaktif'}
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="py-1.5 px-3 text-center">
                                         <button
                                           type="button"
-                                          onClick={() => handleFinanceActivateTorPeriod(period.id)}
-                                          className={`px-2.5 py-0.5 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                                            isTorActive
-                                              ? 'bg-emerald-600 text-white'
-                                              : 'bg-white border border-[#D4D4D0] text-[#5A5A58] hover:bg-[#F4F4F2]'
-                                          }`}
-                                          title="Wewenang Finance: Aktifkan periode ini sebagai dasar pembuatan TOR"
+                                          disabled={draftCustom.length <= 1}
+                                          onClick={() => handleRemoveCustomPeriod(period.id)}
+                                          className="p-1 text-rose-600 hover:bg-rose-50 rounded disabled:opacity-30 cursor-pointer"
+                                          title="Hapus periode custom"
                                         >
-                                          {isTorActive ? 'Aktif' : 'Pilih'}
+                                          <Trash2 className="w-3.5 h-3.5" />
                                         </button>
-                                      ) : (
-                                        <span
-                                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[10.5px] font-semibold ${
-                                            isTorActive
-                                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                              : 'bg-[#F7F7F5] text-[#787774] border border-[#E5E5E3]'
-                                          }`}
-                                          title="Hanya Finance yang berhak mengubah Time Period Aktif (TOR)"
-                                        >
-                                          {isTorActive ? 'Aktif (TOR)' : 'Nonaktif'}
-                                        </span>
-                                      )}
-                                    </td>
-                                    <td className="py-1.5 px-3 text-center">
-                                      <button
-                                        type="button"
-                                        disabled={draftCustom.length <= 1}
-                                        onClick={() => handleRemoveCustomPeriod(period.id)}
-                                        className="p-1 text-rose-600 hover:bg-rose-50 rounded disabled:opacity-30 cursor-pointer"
-                                        title="Hapus periode custom"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
+                                      </td>
+                                    </tr>
+                                  );
+                                });
+                              })()}
                             </tbody>
                             <tfoot>
                               <tr className="border-t border-[#252525] bg-[#F7F7F5] font-bold text-[#252525]">
@@ -2451,13 +3946,185 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                             </tfoot>
                           </table>
                         </div>
+
+                        {/* Track Audit Perubahan Kode, Periode & Konfirmasi Finance */}
+                        <div className="border border-[#E5E5E3] rounded bg-[#FAFAF9] overflow-hidden">
+                          <div className="px-3 py-2 bg-[#F4F4F2] border-b border-[#E5E5E3] flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] font-bold uppercase tracking-wider text-[#252525]">
+                                Track Audit Kode Periode, Update Direktur &amp; Konfirmasi Finance
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-white border border-[#D4D4D0] text-[10px] font-mono font-semibold text-[#5F5E5B]">
+                                {(dataset.revisions || []).length} Riwayat
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowPeriodAuditTrail((prev) => !prev)}
+                              className="text-[11px] font-semibold text-[#1D4ED8] hover:underline cursor-pointer"
+                            >
+                              {showPeriodAuditTrail ? 'Sembunyikan Audit' : 'Tampilkan Audit'}
+                            </button>
+                          </div>
+
+                          {showPeriodAuditTrail && (
+                            <div className="divide-y divide-[#EAEAEA] max-h-56 overflow-y-auto">
+                              {(dataset.revisions || []).length === 0 ? (
+                                <div className="px-3 py-3 text-[11px] text-[#787774]">
+                                  Belum ada riwayat perubahan kode periode atau anggaran.
+                                </div>
+                              ) : (
+                                (dataset.revisions || []).map((rev) => {
+                                  const badgeStyle =
+                                    rev.actionType === 'PERIOD_CODE_UPDATED_BY_DIRECTOR'
+                                      ? 'bg-blue-50 text-[#1D4ED8] border-blue-200'
+                                      : rev.actionType === 'PERIOD_UPDATE_CONFIRMED_BY_FINANCE'
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                      : rev.actionType === 'BUDGET_APPROVED_BY_DIRECTOR'
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                      : rev.actionType === 'ACTIVE_TOR_PERIOD_CHANGED'
+                                      ? 'bg-purple-50 text-purple-800 border-purple-200'
+                                      : rev.actionType === 'BUDGET_REVISION_REQUESTED'
+                                      ? 'bg-rose-50 text-rose-800 border-rose-200'
+                                      : 'bg-amber-50 text-amber-800 border-amber-200';
+
+                                  const badgeLabel =
+                                    rev.actionType === 'PERIOD_CODE_UPDATED_BY_DIRECTOR'
+                                      ? 'Update Kode & Periode (Direktur)'
+                                      : rev.actionType === 'PERIOD_UPDATE_CONFIRMED_BY_FINANCE'
+                                      ? 'Dikonfirmasi Finance'
+                                      : rev.actionType === 'BUDGET_APPROVED_BY_DIRECTOR'
+                                      ? 'ACC Anggaran Direktur'
+                                      : rev.actionType === 'ACTIVE_TOR_PERIOD_CHANGED'
+                                      ? 'Time Period Aktif (TOR)'
+                                      : rev.actionType === 'BUDGET_REVISION_REQUESTED'
+                                      ? 'Revisi Diminta Direktur'
+                                      : 'Pengajuan Finance';
+
+                                  const formattedTime = (() => {
+                                    try {
+                                      return new Date(rev.timestamp).toLocaleString('id-ID', {
+                                        day: '2-digit',
+                                        month: 'short',
+                                        year: 'numeric',
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                      });
+                                    } catch {
+                                      return rev.timestamp;
+                                    }
+                                  })();
+
+                                  return (
+                                    <div
+                                      key={rev.id}
+                                      className="px-3 py-2 text-[11px] flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 bg-white hover:bg-[#FAFAF9]"
+                                    >
+                                      <div className="space-y-0.5 min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span
+                                            className={`px-1.5 py-0.2 rounded border text-[10px] font-semibold ${badgeStyle}`}
+                                          >
+                                            {badgeLabel}
+                                          </span>
+                                          <span className="font-semibold text-[#171717]">
+                                            {rev.actorName}
+                                          </span>
+                                          <span className="text-[#787774]">
+                                            ({rev.actorRole})
+                                          </span>
+                                        </div>
+                                        <p className="text-[#3F3E3B] leading-snug">
+                                          {rev.summary}
+                                        </p>
+                                      </div>
+                                      <span className="text-[10.5px] font-mono text-[#787774] shrink-0">
+                                        {formattedTime}
+                                      </span>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
 
                     {/* SUB-TAB 2: MASTER BUDGET CODE (2 KOLOM: CODE | BUDGET CATEGORY) */}
                     {financeSectionTab === 'codes' && (
                       <div className="p-3 space-y-2.5">
-                        {/* Single-Row Toolbar: Search + Count + Excel Actions + Add Code */}
+                        {/* Panel Input Master Budget Code Langsung oleh Finance via Excel (Mandiri Tanpa Lewat Activity) */}
+                        <div className="bg-[#FAF9F6] border border-[#E5E5E3] rounded-md px-3.5 py-2.5 flex flex-col gap-2.5">
+                          <div className="flex items-start gap-2.5 min-w-0">
+                            <div className="w-7 h-7 rounded bg-blue-50 border border-blue-200 text-[#1D4ED8] flex items-center justify-center shrink-0">
+                              <FileSpreadsheet className="w-4 h-4" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-semibold text-[#171717]">
+                                  Input Master Budget Code Langsung oleh Finance via Excel (Tanpa Perlu Lewat Activity)
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                    dataset.masterCodeUpdateStatus === 'Menunggu Konfirmasi Update Master Kode'
+                                      ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                      : 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                  }`}
+                                >
+                                  {dataset.masterCodeUpdateStatus === 'Menunggu Konfirmasi Update Master Kode'
+                                    ? 'Menunggu Konfirmasi Update Master Kode'
+                                    : '✓ Master Kode Terkonfirmasi'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#6B6B68] leading-snug mt-0.5">
+                                Finance dapat langsung mengunduh <strong>Template Excel Master Kode</strong>, mengisi kolom <strong>Code</strong> &amp; <strong>Budget Category</strong>, lalu klik <strong>Masukkan Master Kode via Excel</strong> dan <strong>Konfirmasi Update Master Kode</strong>.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="pt-2 border-t border-[#ECEAE4] flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                downloadMasterBudgetExcelTemplate(
+                                  dataset.programName,
+                                  dataset.masterBudgetCodes
+                                )
+                              }
+                              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded border border-[#D4D4D0] bg-white hover:bg-[#F2F1EE] text-[11.5px] font-medium text-[#252525] transition-colors cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5 text-[#15803D]" />
+                              <span>Unduh Template Excel Kode (.xlsx)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => fileInputRef.current?.click()}
+                              className="inline-flex items-center gap-1.5 h-7 px-3 rounded border border-[#2B6E3F] bg-[#2B6E3F] hover:bg-[#235A33] text-[11.5px] font-semibold text-white transition-colors cursor-pointer"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>Masukkan Master Kode via Excel</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleOpenAddCode}
+                              className="inline-flex items-center gap-1 h-7 px-3 rounded text-[11.5px] font-semibold bg-[#1D4ED8] text-white hover:bg-[#1E40AF] cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add Code Manual</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleConfirmMasterCodeUpdate}
+                              className="inline-flex items-center gap-1.5 h-7 px-3 rounded border border-emerald-700 bg-emerald-600 hover:bg-emerald-700 text-[11.5px] font-semibold text-white transition-colors cursor-pointer"
+                              title="Konfirmasi perubahan / penambahan Master Budget Code dan simpan ke Track Audit"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Konfirmasi Update Master Kode</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Single-Row Toolbar: Search + Count + Confirmation Info */}
                         <div className="flex flex-wrap items-center justify-between gap-2 bg-[#F7F7F5] px-3 py-2 rounded border border-[#E5E5E3]">
                           <div className="flex items-center gap-2.5 flex-1 min-w-[220px]">
                             <div className="relative flex-1 max-w-xs">
@@ -2471,35 +4138,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                               />
                             </div>
                             <span className="text-[11px] font-mono text-[#5F5E5B] shrink-0">
-                              <strong>{dataset.masterBudgetCodes.length}</strong> Kode Aktif
+                              <strong>{dataset.masterBudgetCodes.length}</strong> Master Kode Aktif (Dikelola Finance)
                             </span>
                           </div>
-
-                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => downloadMasterBudgetExcelTemplate(dataset.programName)}
-                              className="inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-semibold border border-[#D4D4D0] bg-white text-[#252525] hover:bg-[#EAEAE8] cursor-pointer"
-                            >
-                              <Download className="w-3 h-3" />
-                              <span>Template Excel</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => fileInputRef.current?.click()}
-                              className="inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-semibold border border-[#B7DFC1] bg-[#EAF3EC] text-[#2B6E3F] hover:bg-[#D5E9D9] cursor-pointer"
-                            >
-                              <Upload className="w-3 h-3" />
-                              <span>Import Excel</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={handleOpenAddCode}
-                              className="inline-flex items-center gap-1 h-7 px-3 rounded text-[11px] font-semibold bg-[#1D4ED8] text-white hover:bg-[#1E40AF] cursor-pointer"
-                            >
-                              <Plus className="w-3 h-3" />
-                              <span>Add Code</span>
-                            </button>
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#5F5E5B]">
+                            {dataset.masterCodeConfirmedByName && (
+                              <span>
+                                Dikonfirmasi oleh: <strong>{dataset.masterCodeConfirmedByName}</strong>
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -2537,7 +4184,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                             onClick={() => handleOpenEditCode(item)}
                                             className="px-2 py-0.5 rounded text-[10px] font-semibold border border-[#D4D4D0] text-[#5A5A58] hover:text-[#252525] bg-white cursor-pointer"
                                           >
-                                            Edit
+                                            Update Kode
                                           </button>
                                           <button
                                             type="button"
@@ -2561,6 +4208,106 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                               )}
                             </tbody>
                           </table>
+                        </div>
+
+                        {/* Track Audit Update & Konfirmasi Master Budget Code */}
+                        <div className="border border-[#E5E5E3] rounded bg-[#FAF9F6] overflow-hidden">
+                          <div className="px-3 py-2 bg-[#F2F1EE] border-b border-[#E5E5E3] flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <FileText className="w-3.5 h-3.5 text-[#1D4ED8]" />
+                              <span className="text-[11.5px] font-bold text-[#171717]">
+                                Track Audit Update &amp; Konfirmasi Master Budget Code
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-white border border-[#D4D4D0] text-[10px] font-mono font-semibold text-[#5F5E5B]">
+                                {
+                                  (dataset.revisions || []).filter(
+                                    (r) =>
+                                      r.actionType === 'MASTER_CODE_UPDATE' ||
+                                      r.actionType === 'MASTER_CODE_CONFIRMED'
+                                  ).length
+                                }{' '}
+                                Riwayat Master Kode
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowMasterCodeAuditTrail((prev) => !prev)}
+                              className="text-[11px] font-semibold text-[#1D4ED8] hover:underline cursor-pointer"
+                            >
+                              {showMasterCodeAuditTrail ? 'Sembunyikan Audit' : 'Tampilkan Audit'}
+                            </button>
+                          </div>
+
+                          {showMasterCodeAuditTrail && (
+                            <div className="divide-y divide-[#EAEAEA] max-h-56 overflow-y-auto">
+                              {(() => {
+                                const masterCodeLogs = (dataset.revisions || []).filter(
+                                  (r) =>
+                                    r.actionType === 'MASTER_CODE_UPDATE' ||
+                                    r.actionType === 'MASTER_CODE_CONFIRMED'
+                                );
+                                if (masterCodeLogs.length === 0) {
+                                  return (
+                                    <div className="px-3 py-3 text-[11px] text-[#787774]">
+                                      Belum ada riwayat perubahan atau konfirmasi Master Budget Code. Klik{' '}
+                                      <strong>Konfirmasi Update Master Kode</strong> untuk mencatat pengesahan Master Kode aktif.
+                                    </div>
+                                  );
+                                }
+                                return masterCodeLogs.map((rev) => {
+                                  const isConfirmed = rev.actionType === 'MASTER_CODE_CONFIRMED';
+                                  const badgeStyle = isConfirmed
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : 'bg-blue-50 text-[#1D4ED8] border-blue-200';
+                                  const badgeLabel = isConfirmed
+                                    ? 'Konfirmasi Update Master Kode'
+                                    : 'Update Master Budget Code';
+                                  const formattedTime = (() => {
+                                    try {
+                                      return new Date(rev.timestamp).toLocaleString('id-ID', {
+                                        day: '2-digit',
+                                        month: 'short',
+                                        year: 'numeric',
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                      });
+                                    } catch {
+                                      return rev.timestamp;
+                                    }
+                                  })();
+
+                                  return (
+                                    <div
+                                      key={rev.id}
+                                      className="px-3 py-2 text-[11px] flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 bg-white hover:bg-[#FAFAF9]"
+                                    >
+                                      <div className="space-y-0.5 min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span
+                                            className={`px-1.5 py-0.2 rounded border text-[10px] font-semibold ${badgeStyle}`}
+                                          >
+                                            {badgeLabel}
+                                          </span>
+                                          <span className="font-semibold text-[#171717]">
+                                            {rev.actorName}
+                                          </span>
+                                          <span className="text-[#787774]">
+                                            ({rev.actorRole})
+                                          </span>
+                                        </div>
+                                        <p className="text-[#3F3E3B] leading-snug">
+                                          {rev.summary}
+                                        </p>
+                                      </div>
+                                      <span className="text-[10.5px] font-mono text-[#787774] shrink-0">
+                                        {formattedTime}
+                                      </span>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -2648,590 +4395,289 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   {/* BAGIAN 1: STRUKTUR HIERARKI HASIL & TOR PROGRAM                     */}
                   {/* =================================================================== */}
                   {programDetailSection === 'hierarchy' && (
-                    <div className="space-y-2.5 animate-in fade-in duration-150">
-                  {/* HIERARKI OUTCOME -> OUTPUT -> ACTIVITY -> SUB-ACTIVITY -> TOR */}
-                  {programOutcomes.length === 0 ? (
-                    <div className="bg-white rounded-md border border-dashed border-[#EAEAEA] p-8 text-center space-y-2">
-                      <div className="w-9 h-9 rounded-full bg-[#F7F7F5] text-[#787774] flex items-center justify-center mx-auto">
-                        <FolderTree className="w-4 h-4" />
-                      </div>
-                      <h4 className="text-[13.5px] font-semibold text-[#171717]">
-                        Belum ada Outcome pada Program ini
-                      </h4>
-                      <p className="text-[12px] text-[#787774] max-w-sm mx-auto">
-                        Mulai susun rantai hasil program dengan menambahkan Outcome pertama.
-                      </p>
-                      {canManage && (
-                        <button
-                          onClick={() => {
-                            setOutcomeForm({
-                              name: '',
-                              projectName: currentProg.name,
-                              description: '',
-                              indicatorName: '',
-                              baseline: '',
-                              target: '',
-                              unit: '',
-                              verificationMethod: '',
-                              reportingFrequency: 'Bulanan',
-                              dataSource: '',
-                            });
-                            setShowAddOutcome(true);
-                          }}
-                          className="inline-flex items-center gap-1.5 h-[30px] px-3 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[11.5px] font-medium rounded transition-colors cursor-pointer"
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>Tambah Outcome Pertama</span>
-                        </button>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-2.5">
-                      {programOutcomes.map((outcome) => {
-                        const isOutExpanded = expandedOutcomes[outcome.id] ?? false;
-                        const relatedOutputs = outputs.filter((op) => op.outcomeId === outcome.id);
+                    <div className="animate-in fade-in duration-150">
+                      {/* HIERARKI 3 LEVEL RINGKAS: OUTCOME -> OUTPUT -> ACTIVITY (+ TOR) */}
+                      {programOutcomes.length === 0 ? (
+                        <div className="bg-white rounded-md border border-dashed border-[#EAEAEA] p-6 text-center space-y-2">
+                          <h4 className="text-[13px] font-semibold text-[#171717]">
+                            Belum ada Hirarki pada Program ini
+                          </h4>
+                          <p className="text-[11.5px] text-[#787774] max-w-md mx-auto">
+                            Gunakan tombol <strong>Template Excel Hirarki</strong> dan{' '}
+                            <strong>Masukkan Otomatis via Excel</strong> di atas untuk mengimpor Outcome, Output, dan Activity.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="bg-white rounded-md border border-[#E2E8F0] divide-y divide-[#E2E8F0]">
+                          {programOutcomes.map((outcome, ocIdx) => {
+                            const isOutExpanded = expandedOutcomes[outcome.id] ?? true;
+                            const relatedOutputs = outputs.filter(
+                              (op) => op.outcomeId === outcome.id
+                            );
+                            const displayOutcomeNumber =
+                              outcome.outcomeNumber ||
+                              (outcome.name.match(/^(Outcome\s*\d+)/i)?.[1] ??
+                                `Outcome ${ocIdx + 1}`);
+                            const displayOutcomeTitle =
+                              outcome.name
+                                .replace(/^Outcome\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                .trim() ||
+                              outcome.description ||
+                              outcome.name;
 
-                        return (
-                          <div
-                            key={outcome.id}
-                            className="bg-white rounded-md border border-[#EAEAEA] overflow-hidden transition-all"
-                          >
-                            {/* 1. OUTCOME ROW */}
-                            <div className="px-3 py-2.5 bg-white hover:bg-[#FAFAF9] flex items-center justify-between gap-2.5 transition-colors border-b border-[#EAEAEA]">
-                              <div className="flex items-center gap-2 flex-1 min-w-0">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleOutcome(outcome.id)}
-                                  className="p-1 text-[#787774] hover:text-[#171717] rounded hover:bg-[#F2F1EE] cursor-pointer shrink-0 transition-colors"
-                                  title={isOutExpanded ? 'Tutup Outcome' : 'Buka Outcome'}
-                                >
-                                  {isOutExpanded ? (
-                                    <ChevronDown className="w-4 h-4 text-[#1D4ED8]" />
-                                  ) : (
-                                    <ChevronRight className="w-4 h-4 text-[#9A9996]" />
-                                  )}
-                                </button>
-
-                                <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                                  <span className="text-[10px] font-mono font-semibold tracking-wider text-[#1D4ED8] bg-blue-50/70 border border-blue-200/60 px-1.5 py-0.2 rounded uppercase shrink-0">
-                                    OUTCOME
-                                  </span>
-                                  <h3 className="text-[13.5px] sm:text-[14px] font-semibold text-[#171717] leading-snug">
-                                    {outcome.name}
-                                  </h3>
-                                  <span className="text-[11px] text-[#787774]">
-                                    ({outcome.indicators.length} Indikator · {relatedOutputs.length} Output
-                                    {outcome.picName ? ` · PIC: ${outcome.picName}` : ''})
-                                  </span>
-                                </div>
-                              </div>
-
-                              {/* Outcome Actions */}
-                              <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-center">
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedOutcomeDetail(outcome)}
-                                  className="h-[28px] px-2.5 text-[11.5px] font-medium text-[#2F3437] hover:text-[#171717] bg-white hover:bg-[#F2F1EE] border border-[#EAEAEA] rounded transition-colors cursor-pointer"
-                                >
-                                  Detail Indikator
-                                </button>
-
-                                {canManage && (
-                                  <>
+                            return (
+                              <div key={outcome.id} className="px-3 py-2 space-y-1">
+                                {/* 1. OUTCOME (1 Baris Ringkas: Nomor Outcome + Nama Outcome) */}
+                                <div className="flex items-center justify-between gap-2 group py-0.5">
+                                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
                                     <button
                                       type="button"
-                                      onClick={() => setShowAddOutput({ outcomeId: outcome.id })}
-                                      className="h-[28px] px-2.5 text-[11.5px] font-medium text-[#0F7B6C] bg-[#EBF7F5] hover:bg-[#D5EFEA] border border-[#C0E8DF] rounded transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                      onClick={() => toggleOutcome(outcome.id)}
+                                      className="p-0.5 text-[#64748B] hover:text-[#0F172A] rounded hover:bg-[#F1F5F9] cursor-pointer shrink-0"
                                     >
-                                      <Plus className="w-3 h-3" />
-                                      <span>Output</span>
+                                      {isOutExpanded ? (
+                                        <ChevronDown className="w-3.5 h-3.5" />
+                                      ) : (
+                                        <ChevronRight className="w-3.5 h-3.5" />
+                                      )}
                                     </button>
+
                                     <button
                                       type="button"
-                                      onClick={() => handleDeleteOutcome(outcome.id)}
-                                      className="h-[28px] w-[28px] flex items-center justify-center text-[#9A9996] hover:text-rose-600 hover:bg-rose-50 rounded border border-[#EAEAEA] transition-colors cursor-pointer"
-                                      title="Hapus Outcome"
+                                      onClick={() => handleOpenOutcomeDetailModal(outcome, ocIdx)}
+                                      className="flex-1 min-w-0 text-left flex items-baseline gap-2 py-0.5 px-1.5 -mx-1.5 rounded hover:bg-[#F8FAFC] transition-colors cursor-pointer"
                                     >
-                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <span className="text-[12px] font-bold text-[#1D4ED8] shrink-0">
+                                        {displayOutcomeNumber}
+                                      </span>
+                                      <span className="text-[13px] font-semibold text-[#0F172A] group-hover:text-[#1D4ED8] transition-colors truncate">
+                                        {displayOutcomeTitle}
+                                      </span>
                                     </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* 2. OUTPUTS HIERARCHY */}
-                            {isOutExpanded && (
-                              <div className="p-2 sm:p-3 pl-4 sm:pl-7 border-l-2 border-[#EAEAEA] ml-3 sm:ml-5 my-2 space-y-3">
-                                {relatedOutputs.length === 0 ? (
-                                  <div className="p-3 bg-[#FAFAF9] rounded border border-dashed border-[#EAEAEA] text-[12px] text-[#787774] text-center">
-                                    Belum ada Output pada Outcome ini.{' '}
-                                    {canManage && (
-                                      <button
-                                        onClick={() => setShowAddOutput({ outcomeId: outcome.id })}
-                                        className="text-[#1D4ED8] font-medium hover:underline ml-1 cursor-pointer"
-                                      >
-                                        Tambah Output sekarang
-                                      </button>
-                                    )}
                                   </div>
-                                ) : (
-                                  relatedOutputs.map((output) => {
-                                    const isOpExpanded = expandedOutputs[output.id] ?? false;
-                                    const relatedActivities = activities.filter(
-                                      (a) => a.outputId === output.id
-                                    );
-                                    const isOutputMenuOpen = activeMenuId === `op-${output.id}`;
+                                </div>
 
-                                    return (
-                                      <div
-                                        key={output.id}
-                                        className="bg-white rounded border border-[#EAEAEA] overflow-hidden"
-                                      >
-                                        {/* Level 2: Output Row */}
-                                        <div className="p-2.5 sm:p-3 bg-white hover:bg-[#FAFAF9] flex items-start justify-between gap-3 transition-colors border-b border-[#EAEAEA]">
-                                          <div className="flex items-start gap-2 flex-1 min-w-0">
-                                            <button
-                                              type="button"
-                                              onClick={() => toggleOutput(output.id)}
-                                              className="p-1 text-[#787774] hover:text-[#171717] rounded hover:bg-[#F2F1EE] mt-0.5 cursor-pointer shrink-0 transition-colors"
-                                              title={isOpExpanded ? 'Tutup Output' : 'Buka Output'}
-                                            >
-                                              {isOpExpanded ? (
-                                                <ChevronDown className="w-3.5 h-3.5 text-[#0F7B6C]" />
-                                              ) : (
-                                                <ChevronRight className="w-3.5 h-3.5 text-[#9A9996]" />
-                                              )}
-                                            </button>
+                                {/* 2. OUTPUT (1 Baris Ringkas di bawah Outcome) */}
+                                {isOutExpanded && relatedOutputs.length > 0 && (
+                                  <div className="pl-4 ml-2 border-l border-[#E2E8F0] space-y-1">
+                                    {relatedOutputs.map((output, opIdx) => {
+                                      const isOpExpanded = expandedOutputs[output.id] ?? true;
+                                      const relatedActivities = activities.filter(
+                                        (a) => a.outputId === output.id
+                                      );
+                                      const displayOutputNumber =
+                                        output.outputNumber ||
+                                        (output.name.match(/^(Output\s*[\d.]+)/i)?.[1] ??
+                                          `Output ${ocIdx + 1}.${opIdx + 1}`);
+                                      const displayOutputTitle =
+                                        output.name
+                                          .replace(/^Output\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                          .trim() ||
+                                        output.description ||
+                                        output.name;
 
-                                            <div className="flex-1 min-w-0 space-y-0.5">
-                                              <div className="flex items-center gap-2 flex-wrap">
-                                                <span className="text-[9.5px] font-mono font-semibold tracking-wider text-[#0F7B6C] bg-[#EBF7F5] border border-[#C0E8DF] px-1.5 py-0.2 rounded uppercase">
-                                                  OUTPUT
-                                                </span>
-                                                {output.picName && (
-                                                  <span className="text-[11.5px] text-[#787774]">
-                                                    PIC:{' '}
-                                                    <strong className="text-[#2F3437] font-medium">
-                                                      {output.picName}
-                                                    </strong>
-                                                  </span>
+                                      return (
+                                        <div key={output.id} className="space-y-0.5">
+                                          <div className="flex items-center justify-between gap-2 group/op py-0.5">
+                                            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => toggleOutput(output.id)}
+                                                className="p-0.5 text-[#94A3B8] hover:text-[#0F172A] rounded hover:bg-[#F1F5F9] cursor-pointer shrink-0"
+                                              >
+                                                {isOpExpanded ? (
+                                                  <ChevronDown className="w-3.5 h-3.5" />
+                                                ) : (
+                                                  <ChevronRight className="w-3.5 h-3.5" />
                                                 )}
-                                                <span className="text-[#D3D3D0]">·</span>
-                                                <span className="text-[11.5px] text-[#787774]">
-                                                  {output.indicators.length} Indikator
-                                                </span>
-                                                <span className="text-[#D3D3D0]">·</span>
-                                                <span className="text-[11.5px] text-[#787774]">
-                                                  {relatedActivities.length} Activity
-                                                </span>
-                                              </div>
+                                              </button>
 
-                                              <h4 className="text-[13.5px] sm:text-[14.5px] font-semibold text-[#171717] leading-snug">
-                                                {output.name}
-                                              </h4>
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  handleOpenOutputDetailModal(output, ocIdx, opIdx)
+                                                }
+                                                className="flex-1 min-w-0 text-left flex items-baseline gap-2 py-0.5 px-1.5 -mx-1.5 rounded hover:bg-[#F8FAFC] transition-colors cursor-pointer"
+                                              >
+                                                <span className="text-[11.5px] font-bold text-[#0F7B6C] shrink-0">
+                                                  {displayOutputNumber}
+                                                </span>
+                                                <span className="text-[12.5px] font-medium text-[#1E293B] group-hover/op:text-[#0F7B6C] transition-colors truncate">
+                                                  {displayOutputTitle}
+                                                </span>
+                                              </button>
                                             </div>
                                           </div>
 
-                                          {/* Output Actions */}
-                                          <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-center">
-                                            <button
-                                              type="button"
-                                              onClick={() => setSelectedOutputDetail(output)}
-                                              className="h-[26px] px-2 text-[11px] font-medium text-[#2F3437] hover:text-[#171717] bg-white hover:bg-[#F2F1EE] border border-[#EAEAEA] rounded transition-colors cursor-pointer"
-                                            >
-                                              Detail Indikator
-                                            </button>
-
-                                            {canManage && (
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  setEditingActivity(null);
-                                                  setActivityForm({
-                                                    name: '',
-                                                    code: '',
-                                                    description: '',
-                                                    startDate: new Date().toISOString().slice(0, 10),
-                                                    endDate: new Date().toISOString().slice(0, 10),
-                                                  });
-                                                  setShowAddActivity({ outputId: output.id });
-                                                }}
-                                                className="h-[26px] px-2 text-[11px] font-medium text-[#1D4ED8] bg-blue-50/70 hover:bg-blue-100/70 border border-blue-200/70 rounded transition-colors inline-flex items-center gap-1 cursor-pointer"
-                                              >
-                                                <Plus className="w-3 h-3" />
-                                                <span>Activity</span>
-                                              </button>
-                                            )}
-
-                                            {canManage && (
-                                              <div className="relative">
-                                                <button
-                                                  type="button"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setActiveMenuId(
-                                                      isOutputMenuOpen ? null : `op-${output.id}`
-                                                    );
-                                                  }}
-                                                  className="h-[26px] w-[26px] flex items-center justify-center text-[#787774] hover:text-[#171717] hover:bg-[#F2F1EE] rounded border border-[#EAEAEA] transition-colors cursor-pointer"
-                                                  title="Tindakan Output"
-                                                >
-                                                  <MoreHorizontal className="w-3.5 h-3.5" />
-                                                </button>
-
-                                                {isOutputMenuOpen && (
-                                                  <div
-                                                    className="absolute right-0 top-full mt-1 w-32 bg-white border border-[#EAEAEA] rounded-md shadow-md py-1 z-30 animate-in fade-in zoom-in-95 duration-100"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                  >
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => {
-                                                        setActiveMenuId(null);
-                                                        handleDeleteOutput(output.id);
-                                                      }}
-                                                      className="w-full text-left px-3 py-1.5 text-[11.5px] text-rose-600 hover:bg-rose-50 flex items-center gap-1.5 cursor-pointer"
-                                                    >
-                                                      <Trash2 className="w-3.5 h-3.5" />
-                                                      <span>Hapus Output</span>
-                                                    </button>
-                                                  </div>
-                                                )}
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-
-                                        {/* 3. ACTIVITIES HIERARCHY */}
-                                        {isOpExpanded && (
-                                          <div className="p-2 sm:p-2.5 pl-3 sm:pl-6 border-l-2 border-[#EAEAEA] ml-3 sm:ml-5 my-2 space-y-2.5">
-                                            {relatedActivities.length === 0 ? (
-                                              <div className="p-2.5 bg-[#FAFAF9] rounded border border-dashed border-[#EAEAEA] text-[11.5px] text-[#787774] text-center">
-                                                Belum ada Activity pada Output ini.{' '}
-                                                {canManage && (
-                                                  <button
-                                                    onClick={() => {
-                                                      setEditingActivity(null);
-                                                      setActivityForm({
-                                                        name: '',
-                                                        code: '',
-                                                        description: '',
-                                                        startDate: new Date().toISOString().slice(0, 10),
-                                                        endDate: new Date().toISOString().slice(0, 10),
-                                                      });
-                                                      setShowAddActivity({ outputId: output.id });
-                                                    }}
-                                                    className="text-[#1D4ED8] font-medium hover:underline ml-1 cursor-pointer"
-                                                  >
-                                                    Tambah Activity
-                                                  </button>
-                                                )}
-                                              </div>
-                                            ) : (
-                                              relatedActivities.map((act) => {
-                                                const relatedSubs = subActivities.filter(
-                                                  (s) => s.activityId === act.id
-                                                );
+                                          {/* 3. ACTIVITY (1 Baris Ringkas di bawah Output) */}
+                                          {isOpExpanded && relatedActivities.length > 0 && (
+                                            <div className="pl-4 ml-2 border-l border-[#F1F5F9] space-y-0.5">
+                                              {relatedActivities.map((act, actIdx) => {
                                                 const relatedTors = tors.filter(
-                                                  (t) => t.activityId === act.id
+                                                  (t) =>
+                                                    t.activityId === act.id ||
+                                                    t.activityId.startsWith(`${act.id}-`)
                                                 );
+                                                const isActExpanded =
+                                                  expandedActivities[act.id] ?? true;
                                                 const canCreate =
                                                   currentUser?.permissions?.canCreateTor &&
                                                   currentUser.role !== 'admin';
-                                                const isActMenuOpen = activeMenuId === `act-${act.id}`;
 
-                                                const isActCompleted = act.status === 'Selesai';
-                                                const totalTorRequested = relatedTors.reduce(
-                                                  (acc, t) => acc + (Number(t.budgetRequested) || 0),
-                                                  0
-                                                );
+                                                const effectivePeriodsForTor =
+                                                  activeDraftPeriods.length > 0
+                                                    ? activeDraftPeriods
+                                                    : activeSavedPeriods;
+                                                const firstActiveTorIdx =
+                                                  effectivePeriodsForTor.findIndex(
+                                                    (p) => p.isActiveForTor
+                                                  );
+                                                const activePeriodObj =
+                                                  effectivePeriodsForTor[
+                                                    firstActiveTorIdx >= 0 ? firstActiveTorIdx : 0
+                                                  ] || effectivePeriodsForTor[0];
+                                                const activeTorPeriodCode =
+                                                  (activePeriodObj?.code
+                                                    ? activePeriodObj.code.split('—')[0].trim()
+                                                    : '') || 'P1';
+                                                const activeTorPeriodLabel =
+                                                  (activePeriodObj?.label || '').trim();
+
+                                                const resolveTorPeriodCode = (t: Tor): string => {
+                                                  // Prioritaskan kecocokan ID periode di Gambar 2 agar perubahan Kode (misal P1 -> q1) langsung sinkron
+                                                  if (t.customPeriodId) {
+                                                    const byId = effectivePeriodsForTor.find(
+                                                      (p) => p.id === t.customPeriodId
+                                                    );
+                                                    if (byId?.code) {
+                                                      return byId.code.split('—')[0].trim();
+                                                    }
+                                                  }
+                                                  // Cocokkan berdasarkan rentang tanggal periode di Gambar 2
+                                                  if (t.startDate) {
+                                                    const byDate = effectivePeriodsForTor.find(
+                                                      (p) =>
+                                                        p.startDate &&
+                                                        p.endDate &&
+                                                        t.startDate >= p.startDate &&
+                                                        t.startDate <= p.endDate
+                                                    );
+                                                    if (byDate?.code) {
+                                                      return byDate.code.split('—')[0].trim();
+                                                    }
+                                                  }
+                                                  if (
+                                                    t.customPeriodCode &&
+                                                    t.customPeriodCode.trim()
+                                                  ) {
+                                                    const rawCode = t.customPeriodCode
+                                                      .split('—')[0]
+                                                      .trim();
+                                                    const matchedByCode =
+                                                      effectivePeriodsForTor.find(
+                                                        (p) =>
+                                                          p.code.trim().toLowerCase() ===
+                                                          rawCode.toLowerCase()
+                                                      );
+                                                    if (matchedByCode?.code) {
+                                                      return matchedByCode.code
+                                                        .split('—')[0]
+                                                        .trim();
+                                                    }
+                                                    // Jika TOR dibuat pada periode pertama (P1) dan kode periode pertama di Gambar 2 diubah (mis. ke q1)
+                                                    if (
+                                                      rawCode.toUpperCase() === 'P1' &&
+                                                      effectivePeriodsForTor[0]?.code
+                                                    ) {
+                                                      return effectivePeriodsForTor[0].code
+                                                        .split('—')[0]
+                                                        .trim();
+                                                    }
+                                                    return rawCode;
+                                                  }
+                                                  return activeTorPeriodCode;
+                                                };
+
+                                                const torPeriodCounts = new Map<string, number>();
+                                                relatedTors.forEach((t) => {
+                                                  const pCode = resolveTorPeriodCode(t);
+                                                  torPeriodCounts.set(
+                                                    pCode,
+                                                    (torPeriodCounts.get(pCode) || 0) + 1
+                                                  );
+                                                });
+
+                                                const activityTorSummaryLabel =
+                                                  relatedTors.length === 0
+                                                    ? `TOR ${activeTorPeriodCode} (0)`
+                                                    : Array.from(torPeriodCounts.entries())
+                                                        .map(
+                                                          ([pCode, count]) =>
+                                                            `TOR ${pCode} (${count})`
+                                                        )
+                                                        .join(' · ');
+
+                                                const displayActivityNumber =
+                                                  act.activityNumber ||
+                                                  (act.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ??
+                                                    `Activity ${ocIdx + 1}.${opIdx + 1}.${actIdx + 1}`);
+                                                const displayActivityTitle =
+                                                  act.name
+                                                    .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                                                    .trim() || act.name;
 
                                                 return (
-                                                  <div
-                                                    key={act.id}
-                                                    className="rounded-lg border border-[#E5E7EB] border-l-[3px] border-l-[#2563EB] bg-white shadow-2xs overflow-hidden transition-all hover:border-[#CBD5E1] hover:border-l-[#1D4ED8]"
-                                                  >
-                                                    {/* Level 3: Activity Card Header */}
-                                                    <div className="px-3.5 py-3 bg-gradient-to-r from-[#F8FAFC] via-white to-white border-b border-[#F1F5F9]">
-                                                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
-                                                        <div className="flex-1 min-w-0 space-y-1.5">
-                                                          {/* Top Kicker: Code & Status */}
-                                                          <div className="flex items-center gap-2 flex-wrap">
-                                                            <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold tracking-wider text-[#1E40AF] bg-[#EFF6FF] border border-[#BFDBFE] px-2 py-0.5 rounded">
-                                                              ACTIVITY {act.code ? `· ${act.code}` : ''}
-                                                            </span>
-
-                                                            {act.code ? (
-                                                              <button
-                                                                type="button"
-                                                                onClick={() => {
-                                                                  if (canEditFinance) {
-                                                                    setProgramDetailSection('finance');
-                                                                    setFinanceSectionTab('codes');
-                                                                  }
-                                                                }}
-                                                                className={`text-[10.5px] font-mono font-medium text-[#475569] bg-[#F8FAFC] border border-[#E2E8F0] px-2 py-0.5 rounded transition-colors ${
-                                                                  canEditFinance
-                                                                    ? 'cursor-pointer hover:bg-[#EFF6FF] hover:text-[#1D4ED8] hover:border-[#BFDBFE]'
-                                                                    : ''
-                                                                }`}
-                                                                title="Klik untuk membuka Master Budget Code di Bagian 2 (Finance Program)"
-                                                              >
-                                                                Kode Anggaran: <strong className="text-[#0F172A]">{act.code}</strong>
-                                                              </button>
-                                                            ) : (
-                                                              <span className="text-[10.5px] text-[#94A3B8] italic">
-                                                                Belum ada Budget Code
-                                                              </span>
-                                                            )}
-
-                                                            <span
-                                                              className={`inline-flex items-center gap-1.5 text-[10.5px] font-medium px-2 py-0.5 rounded ${
-                                                                isActCompleted
-                                                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
-                                                                  : 'bg-amber-50/80 text-amber-800 border border-amber-200/70'
-                                                              }`}
-                                                            >
-                                                              <span
-                                                                className={`w-1.5 h-1.5 rounded-full ${
-                                                                  isActCompleted ? 'bg-emerald-500' : 'bg-amber-500'
-                                                                }`}
-                                                              />
-                                                              {act.status}
-                                                            </span>
-                                                          </div>
-
-                                                          {/* Activity Title & Description */}
-                                                          <div>
-                                                            <h5 className="text-[14px] sm:text-[15px] font-semibold text-[#0F172A] leading-snug">
-                                                              {act.name}
-                                                            </h5>
-                                                            {act.description && (
-                                                              <p className="text-[12px] text-[#64748B] mt-0.5 leading-relaxed">
-                                                                {act.description}
-                                                              </p>
-                                                            )}
-                                                          </div>
-
-                                                          {/* Structured Key Info Strip */}
-                                                          <div className="pt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-[#475569]">
-                                                            <div className="flex items-center gap-1.5">
-                                                              <span className="text-[#94A3B8]">Jadwal:</span>
-                                                              <span className="font-medium text-[#1E293B]">
-                                                                {formatPeriodRange(act.startDate, act.endDate)}
-                                                              </span>
-                                                            </div>
-                                                            <span className="text-[#CBD5E1]">•</span>
-                                                            <div className="flex items-center gap-1.5">
-                                                              <span className="text-[#94A3B8]">PIC:</span>
-                                                              <span className="font-medium text-[#1E293B]">
-                                                                {act.picName}
-                                                              </span>
-                                                            </div>
-                                                            <span className="text-[#CBD5E1]">•</span>
-                                                            <div className="flex items-center gap-1.5">
-                                                              <span className="text-[#94A3B8]">Sub-Kegiatan:</span>
-                                                              <span className="font-semibold text-[#1E293B]">
-                                                                {relatedSubs.length}
-                                                              </span>
-                                                            </div>
-                                                            <span className="text-[#CBD5E1]">•</span>
-                                                            <div className="flex items-center gap-1.5">
-                                                              <span className="text-[#94A3B8]">Dokumen TOR:</span>
-                                                              <span className="font-semibold text-[#1D4ED8]">
-                                                                {relatedTors.length}
-                                                              </span>
-                                                              {totalTorRequested > 0 && (
-                                                                <span className="text-[11px] text-[#64748B]">
-                                                                  ({formatRupiah(totalTorRequested)})
-                                                                </span>
-                                                              )}
-                                                            </div>
-                                                          </div>
-                                                        </div>
-
-                                                        {/* Activity Actions */}
-                                                        <div className="flex items-center gap-1.5 shrink-0 self-start">
-                                                          {onOpenCreateTorForActivity && canCreate && (
-                                                            <button
-                                                              type="button"
-                                                              onClick={() =>
-                                                                onOpenCreateTorForActivity(
-                                                                  outcome.id,
-                                                                  output.id,
-                                                                  act.id
-                                                                )
-                                                              }
-                                                              className="h-7 px-2.5 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[11.5px] font-medium rounded-md transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
-                                                            >
-                                                              <Plus className="w-3.5 h-3.5" />
-                                                              <span>Buat TOR</span>
-                                                            </button>
+                                                  <div key={act.id} className="space-y-0.5">
+                                                    <div className="flex items-center justify-between gap-2 group/act py-0.5">
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => toggleActivity(act.id)}
+                                                        className="flex items-center gap-1.5 flex-1 min-w-0 text-left py-0.5 px-1.5 -mx-1.5 rounded hover:bg-[#F8FAFC] transition-colors cursor-pointer"
+                                                      >
+                                                        <span className="text-[#94A3B8] group-hover/act:text-[#0F172A] shrink-0">
+                                                          {isActExpanded ? (
+                                                            <ChevronDown className="w-3 h-3" />
+                                                          ) : (
+                                                            <ChevronRight className="w-3 h-3" />
                                                           )}
+                                                        </span>
+                                                        <span className="text-[11px] font-bold text-[#475569] shrink-0">
+                                                          {displayActivityNumber}
+                                                        </span>
+                                                        <span className="text-[12px] text-[#334155] group-hover/act:text-[#0F172A] truncate">
+                                                          {displayActivityTitle}
+                                                        </span>
+                                                      </button>
 
-                                                          <button
-                                                            type="button"
-                                                            onClick={() => setSelectedActivityDetail(act)}
-                                                            className="h-7 px-2.5 text-[11.5px] font-medium text-[#334155] hover:text-[#0F172A] bg-white hover:bg-[#F8FAFC] border border-[#CBD5E1] rounded-md transition-colors cursor-pointer"
-                                                          >
-                                                            Detail Indikator
-                                                          </button>
-
-                                                          {(canManage || canEditFinance) && (
-                                                            <div className="relative">
-                                                              <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                  e.stopPropagation();
-                                                                  setActiveMenuId(
-                                                                    isActMenuOpen ? null : `act-${act.id}`
-                                                                  );
-                                                                }}
-                                                                className="h-7 w-7 flex items-center justify-center text-[#64748B] hover:text-[#0F172A] hover:bg-[#F8FAFC] rounded-md border border-[#CBD5E1] transition-colors cursor-pointer"
-                                                                title="Tindakan Activity"
-                                                              >
-                                                                <MoreHorizontal className="w-3.5 h-3.5" />
-                                                              </button>
-
-                                                              {isActMenuOpen && (
-                                                                <div
-                                                                  className="absolute right-0 top-full mt-1 w-44 bg-white border border-[#E2E8F0] rounded-md shadow-md py-1 z-30 animate-in fade-in zoom-in-95 duration-100"
-                                                                  onClick={(e) => e.stopPropagation()}
-                                                                >
-                                                                  <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                      setActiveMenuId(null);
-                                                                      setEditingActivity(act);
-                                                                      setActivityForm({
-                                                                        name: act.name,
-                                                                        code: act.code || '',
-                                                                        description: act.description || '',
-                                                                        startDate: act.startDate,
-                                                                        endDate: act.endDate,
-                                                                      });
-                                                                    }}
-                                                                    className="w-full text-left px-3 py-1.5 text-[11px] text-[#334155] hover:bg-[#F8FAFC] flex items-center gap-1.5 cursor-pointer"
-                                                                  >
-                                                                    <Edit3 className="w-3 h-3 text-[#64748B]" />
-                                                                    <span>Edit Activity & Budget Code</span>
-                                                                  </button>
-                                                                  <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                      setActiveMenuId(null);
-                                                                      setShowAddSubActivity({
-                                                                        activityId: act.id,
-                                                                      });
-                                                                    }}
-                                                                    className="w-full text-left px-3 py-1.5 text-[11px] text-[#334155] hover:bg-[#F8FAFC] flex items-center gap-1.5 cursor-pointer"
-                                                                  >
-                                                                    <Plus className="w-3 h-3 text-[#64748B]" />
-                                                                    <span>+ Sub-Activity</span>
-                                                                  </button>
-                                                                  <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                      setActiveMenuId(null);
-                                                                      handleDeleteActivity(act.id);
-                                                                    }}
-                                                                    className="w-full text-left px-3 py-1.5 text-[11px] text-rose-600 hover:bg-rose-50 flex items-center gap-1.5 cursor-pointer"
-                                                                  >
-                                                                    <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                                                                    <span>Hapus Activity</span>
-                                                                  </button>
-                                                                </div>
-                                                              )}
-                                                            </div>
-                                                          )}
-                                                        </div>
+                                                      <div className="flex items-center gap-1 shrink-0">
+                                                        <button
+                                                          type="button"
+                                                          onClick={() =>
+                                                            setSelectedActivityDetail(act)
+                                                          }
+                                                          className="opacity-0 group-hover/act:opacity-100 focus:opacity-100 text-[10.5px] font-medium text-[#64748B] hover:text-[#1D4ED8] px-1.5 py-0.5 rounded hover:bg-[#F1F5F9] transition-all cursor-pointer"
+                                                        >
+                                                          Detail
+                                                        </button>
                                                       </div>
                                                     </div>
 
-                                                    {/* Activity Body: Sub-Activities & TOR Documents */}
-                                                    <div className="p-3 bg-[#FCFBF9] space-y-3">
-                                                      {/* Level 4: Sub-Activities */}
-                                                      {relatedSubs.length > 0 && (
-                                                        <div className="rounded-md border border-[#E2E8F0] bg-white overflow-hidden">
-                                                          <div className="px-3 py-1.5 bg-[#F8FAFC] border-b border-[#E2E8F0] flex items-center justify-between">
-                                                            <span className="text-[10.5px] font-semibold text-[#475569] uppercase tracking-wider">
-                                                              Tahapan Sub-Kegiatan ({relatedSubs.length})
+                                                    {/* 4. TOR LIST RINGKAS: • Nomor TOR | Judul TOR | Status */}
+                                                    {isActExpanded && (
+                                                      <div className="pl-5 ml-1.5 border-l border-[#E2E8F0] py-1 space-y-0.5">
+                                                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                                                          <div className="flex flex-wrap items-center gap-1.5">
+                                                            <span className="font-semibold text-[#475569]">
+                                                              {activityTorSummaryLabel}
                                                             </span>
-                                                            <span className="text-[10.5px] text-[#64748B]">
-                                                              {relatedSubs.filter((s) => s.status === 'Selesai').length} dari {relatedSubs.length} selesai
-                                                            </span>
+                                                            {activeTorPeriodLabel && (
+                                                              <span className="text-[10px] text-[#64748B] font-normal">
+                                                                ({activeTorPeriodLabel})
+                                                              </span>
+                                                            )}
                                                           </div>
-                                                          <div className="divide-y divide-[#F1F5F9]">
-                                                            {relatedSubs.map((sub, subIdx) => {
-                                                              const isSubDone = sub.status === 'Selesai';
-                                                              return (
-                                                                <div
-                                                                  key={sub.id}
-                                                                  className="flex items-center justify-between py-1.5 px-3 hover:bg-[#F8FAFC] text-[12px] text-[#1E293B] transition-colors gap-3"
-                                                                >
-                                                                  <div className="flex items-center gap-2.5 min-w-0">
-                                                                    <span className="text-[10.5px] font-mono font-semibold text-[#64748B] bg-[#F1F5F9] px-1.5 py-0.5 rounded shrink-0">
-                                                                      {String(subIdx + 1).padStart(2, '0')}
-                                                                    </span>
-                                                                    <span className="font-medium text-[#1E293B] truncate">
-                                                                      {sub.name}
-                                                                    </span>
-                                                                  </div>
-                                                                  <div className="flex items-center gap-2.5 shrink-0">
-                                                                    {sub.picName && (
-                                                                      <span className="text-[11px] text-[#64748B] hidden sm:inline">
-                                                                        PIC: <strong className="font-medium text-[#334155]">{sub.picName}</strong>
-                                                                      </span>
-                                                                    )}
-                                                                    <span
-                                                                      className={`text-[10.5px] font-medium px-2 py-0.5 rounded ${
-                                                                        isSubDone
-                                                                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
-                                                                          : 'bg-blue-50/70 text-[#1D4ED8] border border-blue-200/60'
-                                                                      }`}
-                                                                    >
-                                                                      {sub.status}
-                                                                    </span>
-                                                                  </div>
-                                                                </div>
-                                                              );
-                                                            })}
-                                                          </div>
-                                                        </div>
-                                                      )}
-
-                                                      {/* Level 5: Dokumen TOR Terpadu */}
-                                                      <div className="space-y-1.5">
-                                                        <div className="flex items-center justify-between px-0.5">
-                                                          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#334155] uppercase tracking-wider">
-                                                            <FileText className="w-3.5 h-3.5 text-[#2563EB]" />
-                                                            <span>Dokumen TOR Terkait ({relatedTors.length})</span>
-                                                          </div>
-
-                                                          {onOpenCreateTorForActivity && canCreate && (
-                                                            <button
-                                                              type="button"
-                                                              onClick={() =>
-                                                                onOpenCreateTorForActivity(
-                                                                  outcome.id,
-                                                                  output.id,
-                                                                  act.id
-                                                                )
-                                                              }
-                                                              className="text-[11px] font-medium text-[#2563EB] hover:text-[#1D4ED8] hover:underline flex items-center gap-1 cursor-pointer"
-                                                            >
-                                                              <Plus className="w-3 h-3" />
-                                                              <span>Tambah TOR</span>
-                                                            </button>
-                                                          )}
-                                                        </div>
-
-                                                        {relatedTors.length === 0 ? (
-                                                          <div className="px-3 py-2.5 bg-white border border-dashed border-[#CBD5E1] rounded-md text-[11.5px] text-[#64748B] flex items-center justify-between">
-                                                            <span>
-                                                              Belum ada dokumen TOR untuk kegiatan ini.
-                                                            </span>
-                                                            {onOpenCreateTorForActivity && canCreate ? (
+                                                          {onOpenCreateTorForActivity &&
+                                                            canCreate && (
                                                               <button
                                                                 type="button"
                                                                 onClick={() =>
@@ -3241,298 +4687,133 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                                     act.id
                                                                   )
                                                                 }
-                                                                className="text-[11.5px] font-semibold text-[#2563EB] hover:underline cursor-pointer"
+                                                                className="text-[10.5px] font-semibold text-[#1D4ED8] hover:underline inline-flex items-center gap-0.5 cursor-pointer"
+                                                                title={
+                                                                  activeTorPeriodLabel
+                                                                    ? `Buat TOR pada periode ${activeTorPeriodCode} — ${activeTorPeriodLabel}`
+                                                                    : `Buat TOR ${activeTorPeriodCode}`
+                                                                }
                                                               >
-                                                                + Buat TOR
+                                                                <Plus className="w-2.5 h-2.5" />
+                                                                <span>
+                                                                  Buat TOR {activeTorPeriodCode}
+                                                                </span>
                                                               </button>
-                                                            ) : (
-                                                              <span className="text-[10.5px] text-[#94A3B8]">
-                                                                Hanya Lihat
-                                                              </span>
                                                             )}
+                                                        </div>
+
+                                                        {relatedTors.length === 0 ? (
+                                                          <div className="text-[11px] text-[#94A3B8]">
+                                                            • Belum ada TOR {activeTorPeriodCode}
                                                           </div>
                                                         ) : (
-                                                          <div className="space-y-2">
-                                                            {relatedTors.map((tor) => {
-                                                              const isTorExpanded = expandedTorId === tor.id;
-                                                              const deadlineInfo = getDeadlineInfo(
-                                                                tor.reportingDeadline,
+                                                          <ul className="space-y-0.5">
+                                                            {relatedTors.map((tor, torIdx) => {
+                                                              const torStatusLabel =
                                                                 tor.activityStatus === 'Selesai'
-                                                              );
-                                                              const statusDot = getStatusDotInfo(tor);
-                                                              const isOwner =
-                                                                tor.createdById === currentUser?.id;
-                                                              const isPic = tor.picId === currentUser?.id;
-                                                              const canEditTor =
-                                                                isOwner ||
-                                                                isPic ||
-                                                                currentUser?.role === 'director' ||
-                                                                currentUser?.role === 'admin';
+                                                                  ? 'Completed'
+                                                                  : tor.submissionStatus === 'Draft'
+                                                                  ? 'Draft'
+                                                                  : tor.activityStatus ===
+                                                                      'Sedang Berjalan' ||
+                                                                    tor.submissionStatus ===
+                                                                      'Disetujui'
+                                                                  ? 'In Progress'
+                                                                  : tor.submissionStatus ||
+                                                                    tor.activityStatus ||
+                                                                    'Draft';
+
+                                                              const shortTorNumber =
+                                                                tor.torNumber ||
+                                                                `TOR-${String(torIdx + 1).padStart(
+                                                                  3,
+                                                                  '0'
+                                                                )}`;
 
                                                               return (
-                                                                <div
+                                                                <li
                                                                   key={tor.id}
-                                                                  className="rounded-md border border-[#E2E8F0] bg-white overflow-hidden transition-all hover:border-[#CBD5E1]"
+                                                                  className="flex items-center justify-between gap-2 group/toritem"
                                                                 >
-                                                                  <div
-                                                                    role="button"
-                                                                    tabIndex={0}
-                                                                    onClick={() => toggleTorAccordion(tor.id)}
-                                                                    onKeyDown={(e) => {
-                                                                      if (e.key === 'Enter' || e.key === ' ') {
-                                                                        e.preventDefault();
-                                                                        toggleTorAccordion(tor.id);
-                                                                      }
-                                                                    }}
-                                                                    className={`px-3.5 py-2.5 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 cursor-pointer select-none transition-colors ${
-                                                                      isTorExpanded
-                                                                        ? 'bg-[#F8FAFC]'
-                                                                        : 'hover:bg-[#F8FAFC]/70'
-                                                                    }`}
+                                                                  <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                      onSelectTor?.(tor.id)
+                                                                    }
+                                                                    className="flex-1 min-w-0 text-left py-0.5 px-1.5 -mx-1.5 rounded hover:bg-[#F8FAFC] text-[11.5px] text-[#334155] hover:text-[#1D4ED8] transition-colors flex items-center gap-1.5 cursor-pointer"
                                                                   >
-                                                                    {/* Left: Title first, clean metadata row below */}
-                                                                    <div className="flex-1 min-w-0 space-y-1">
-                                                                      <div className="flex items-center gap-2 min-w-0">
-                                                                        <span
-                                                                          className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDot.dotColorClass}`}
-                                                                          title={`Status: ${statusDot.label}`}
-                                                                        />
-                                                                        <span className="text-[13px] font-semibold text-[#0F172A] hover:text-[#2563EB] transition-colors leading-snug">
-                                                                          {tor.title}
-                                                                        </span>
-                                                                        {canEditTor ? (
-                                                                          <span className="text-[10px] font-medium text-[#0F7B6C] bg-[#EBF7F5] border border-[#C0E8DF] px-1.5 py-0.2 rounded shrink-0">
-                                                                            Akses Edit
-                                                                          </span>
-                                                                        ) : (
-                                                                          <span className="text-[10px] text-[#64748B] bg-[#F1F5F9] px-1.5 py-0.2 rounded shrink-0">
-                                                                            Lihat Saja
-                                                                          </span>
-                                                                        )}
-                                                                      </div>
-
-                                                                      <div className="flex items-center gap-2 flex-wrap text-[11px] text-[#64748B] pl-4">
-                                                                        <span className="font-mono font-semibold text-[#1D4ED8]">
-                                                                          {tor.torNumber}
-                                                                        </span>
-                                                                        {(tor.activityCode ||
-                                                                          tor.hierarchyCode) && (
-                                                                          <>
-                                                                            <span className="text-[#CBD5E1]">·</span>
-                                                                            <span className="font-mono font-medium text-[#334155]">
-                                                                              Kode: {tor.activityCode || tor.hierarchyCode}
-                                                                            </span>
-                                                                          </>
-                                                                        )}
-                                                                        <span className="text-[#CBD5E1]">·</span>
-                                                                        <span>
-                                                                          PIC: <strong className="text-[#334155] font-medium">{tor.picName}</strong>
-                                                                        </span>
-                                                                        <span className="text-[#CBD5E1]">·</span>
-                                                                        <span>
-                                                                          {formatPeriodRange(tor.startDate, tor.endDate)}
-                                                                        </span>
-                                                                        {(tor.budgetRequested ?? 0) > 0 && (
-                                                                          <>
-                                                                            <span className="text-[#CBD5E1]">·</span>
-                                                                            <span className="font-medium text-[#0F172A]">
-                                                                              {formatRupiah(tor.budgetRequested ?? 0)}
-                                                                            </span>
-                                                                          </>
-                                                                        )}
-                                                                      </div>
-                                                                    </div>
-
-                                                                    {/* Right: Deadline & Status Badges */}
-                                                                    <div className="flex items-center justify-between lg:justify-end gap-3 shrink-0 pl-4 lg:pl-0 border-t lg:border-t-0 pt-1.5 lg:pt-0 border-[#F1F5F9]">
-                                                                      <div className="text-left lg:text-right leading-tight">
-                                                                        <div className="text-[10.5px] text-[#64748B]">
-                                                                          Batas LPJ: <strong className="text-[#1E293B] font-medium">{deadlineInfo.formattedDate}</strong>
-                                                                        </div>
-                                                                        <div
-                                                                          className={`text-[10.5px] font-medium ${deadlineInfo.colorClasses.text}`}
-                                                                        >
-                                                                          {deadlineInfo.indicatorText}
-                                                                        </div>
-                                                                      </div>
-
-                                                                      <div className="flex items-center gap-1.5">
-                                                                        <SubmissionStatusBadge
-                                                                          status={tor.submissionStatus}
-                                                                        />
-                                                                        <ActivityStatusBadge
-                                                                          status={tor.activityStatus}
-                                                                        />
-                                                                      </div>
-
-                                                                      <ChevronDown
-                                                                        className={`w-4 h-4 text-[#64748B] transition-transform duration-200 shrink-0 ${
-                                                                          isTorExpanded
-                                                                            ? 'rotate-180 text-[#0F172A]'
-                                                                            : ''
-                                                                        }`}
-                                                                      />
-                                                                    </div>
-                                                                  </div>
-
-                                                                {isTorExpanded && (
-                                                                  <div className="p-3 border-t border-[#EDEDEC] bg-[#FAFAF9] space-y-2.5 text-[12px] animate-in fade-in duration-150">
-                                                                    <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-white rounded border border-[#EDEDEC]">
-                                                                      <div className="flex items-center gap-2 text-[11.5px]">
-                                                                        <span
-                                                                          className={`w-2 h-2 rounded-full shrink-0 ${statusDot.dotColorClass}`}
-                                                                        />
-                                                                        <span className="font-semibold text-[#171717]">
-                                                                          {statusDot.label}
-                                                                        </span>
-                                                                        <span className="text-[#787774]">
-                                                                          ({statusDot.reason})
-                                                                        </span>
-                                                                      </div>
-
-                                                                      <div className="flex items-center gap-2">
-                                                                        <SubmissionStatusBadge
-                                                                          status={tor.submissionStatus}
-                                                                        />
-                                                                        <ActivityStatusBadge
-                                                                          status={tor.activityStatus}
-                                                                        />
-                                                                      </div>
-                                                                    </div>
-
-                                                                    <div className="p-2 bg-[#F8FAFC] rounded border border-[#E2E8F0] text-[11px] flex flex-wrap items-center justify-between gap-2">
-                                                                      <div className="font-mono text-[#1E3A8A]">
-                                                                        <span className="font-semibold">Rantai Integrasi:</span>{' '}
-                                                                        {currentProg.name} → {outcome.name} → {output.name} → {act.name}
-                                                                      </div>
-                                                                      <span className="font-mono font-bold text-[#2851C5] bg-[#EEF3FF] px-2 py-0.5 rounded border border-[#C7D7FE]">
-                                                                        Finance Code: {tor.activityCode || act.code || tor.hierarchyCode || '-'}
-                                                                      </span>
-                                                                    </div>
-
-                                                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-2.5 bg-white rounded border border-[#EDEDEC]">
-                                                                      <div>
-                                                                        <span className="text-[10px] font-mono text-[#9A9996] uppercase block">
-                                                                          DANA DIMINTA
-                                                                        </span>
-                                                                        <span className="text-[13px] font-semibold text-[#171717]">
-                                                                          {formatRupiah(tor.budgetRequested)}
-                                                                        </span>
-                                                                      </div>
-                                                                      <div>
-                                                                        <span className="text-[10px] font-mono text-[#9A9996] uppercase block">
-                                                                          DANA DISETUJUI
-                                                                        </span>
-                                                                        <span className="text-[13px] font-semibold text-[#0F7B6C]">
-                                                                          {tor.budgetApproved != null
-                                                                            ? formatRupiah(tor.budgetApproved)
-                                                                            : 'Menunggu Approval'}
-                                                                        </span>
-                                                                      </div>
-                                                                      <div>
-                                                                        <span className="text-[10px] font-mono text-[#9A9996] uppercase block">
-                                                                          REALISASI AKTUAL (LPJ FINAL)
-                                                                        </span>
-                                                                        <span className="text-[13px] font-semibold text-[#2F3437]">
-                                                                          {tor.budgetActualSpent != null &&
-                                                                          tor.budgetActualSpent > 0
-                                                                            ? formatRupiah(
-                                                                                tor.budgetActualSpent
-                                                                              )
-                                                                            : 'Belum Ada LPJ Terverifikasi'}
-                                                                        </span>
-                                                                      </div>
-                                                                    </div>
-
-                                                                    <div className="p-2 bg-white rounded border border-[#EDEDEC] space-y-1.5">
-                                                                      <div className="flex items-center justify-between">
-                                                                        <span className="text-[11px] font-mono font-medium text-[#787774] uppercase">
-                                                                          DOKUMEN PROGRAM (8 TAHAPAN)
-                                                                        </span>
-                                                                        <span className="text-[10.5px] text-[#0F7B6C] font-medium">
-                                                                          Tahap 1 Aktif
-                                                                        </span>
-                                                                      </div>
-                                                                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
-                                                                        {WORKFLOW_STAGES.map(
-                                                                          (st, stageIdx) => (
-                                                                            <button
-                                                                              type="button"
-                                                                              key={st.num}
-                                                                              onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                onSelectTor?.(
-                                                                                  tor.id,
-                                                                                  stageIdx + 1
-                                                                                );
-                                                                              }}
-                                                                              className="p-1.5 rounded border text-[11px] flex items-center justify-between text-left transition-colors cursor-pointer border-[#EDEDEC] bg-white hover:border-[#1D4ED8]/40 hover:bg-blue-50/30 text-[#2F3437]"
-                                                                              title={`Klik untuk membuka Tahap ${st.num}: ${st.title}`}
-                                                                            >
-                                                                              <span className="truncate font-medium">
-                                                                                <span className="font-mono text-[#787774] mr-1">
-                                                                                  {st.num}
-                                                                                </span>
-                                                                                {st.title}
-                                                                              </span>
-                                                                              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#0F7B6C] shrink-0">
-                                                                                <span className="w-1.5 h-1.5 rounded-full bg-[#0F7B6C]" />
-                                                                                Aktif
-                                                                              </span>
-                                                                            </button>
-                                                                          )
-                                                                        )}
-                                                                      </div>
-                                                                    </div>
-
-                                                                    <div className="flex items-center justify-between pt-1">
-                                                                      <span className="text-[11px] text-[#9A9996]">
-                                                                        PIC: {tor.picName} · Pembuat:{' '}
-                                                                        {tor.createdByName}
-                                                                      </span>
-
-                                                                      {onSelectTor && (
-                                                                        <button
-                                                                          type="button"
-                                                                          onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            onSelectTor(tor.id);
-                                                                          }}
-                                                                          className="h-[28px] px-3 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[11.5px] font-medium rounded transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                                                                        >
-                                                                          <span>Buka TOR Lengkap</span>
-                                                                          <ArrowRight className="w-3 h-3" />
-                                                                        </button>
-                                                                      )}
-                                                                    </div>
-                                                                  </div>
-                                                                )}
-                                                              </div>
-                                                            );
-                                                          })}
-                                                        </div>
-                                                      )}
+                                                                    <span className="text-[#94A3B8] shrink-0">
+                                                                      •
+                                                                    </span>
+                                                                    <span className="font-mono font-semibold text-[#0F172A] shrink-0">
+                                                                      {shortTorNumber}
+                                                                    </span>
+                                                                    <span className="text-[#CBD5E1] shrink-0">
+                                                                      |
+                                                                    </span>
+                                                                    <span className="truncate text-[#1E293B]">
+                                                                      {tor.title}
+                                                                    </span>
+                                                                    <span className="text-[#CBD5E1] shrink-0">
+                                                                      |
+                                                                    </span>
+                                                                    <span
+                                                                      className={`text-[11px] font-semibold shrink-0 ${
+                                                                        torStatusLabel ===
+                                                                        'Completed'
+                                                                          ? 'text-[#0F7B6C]'
+                                                                          : torStatusLabel ===
+                                                                            'In Progress'
+                                                                          ? 'text-[#1D4ED8]'
+                                                                          : 'text-[#64748B]'
+                                                                      }`}
+                                                                    >
+                                                                      {torStatusLabel}
+                                                                    </span>
+                                                                  </button>
+                                                                  {isDirector && (
+                                                                    <button
+                                                                      type="button"
+                                                                      onClick={async (e) => {
+                                                                        e.stopPropagation();
+                                                                        try {
+                                                                          await api.deleteTor(tor.id);
+                                                                          onRefresh();
+                                                                        } catch {
+                                                                          // ignore
+                                                                        }
+                                                                      }}
+                                                                      title="Hapus TOR (Khusus Direktur)"
+                                                                      className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer"
+                                                                    >
+                                                                      <Trash2 className="w-3 h-3" />
+                                                                      <span>Hapus</span>
+                                                                    </button>
+                                                                  )}
+                                                                </li>
+                                                              );
+                                                            })}
+                                                          </ul>
+                                                        )}
                                                       </div>
-                                                    </div>
+                                                    )}
                                                   </div>
                                                 );
-                                              })
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
-                                    );
-                                  })
+                                              })}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
                                 )}
                               </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
-                </div>
-              )}
             </div>
           );
         })()
@@ -3694,272 +4975,1192 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         </div>
       )}
 
+      {showHierarchyExcelPreviewModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="bg-white border border-[#E5E5E3] rounded-md shadow-xl max-w-4xl w-full p-5 space-y-4 max-h-[88vh] flex flex-col">
+            <div className="flex items-center justify-between pb-2.5 border-b border-[#EAEAEA]">
+              <div>
+                <h3 className="text-sm font-bold text-[#171717]">
+                  Preview Import Excel Otomatis — Hirarki Program
+                </h3>
+                <p className="text-[11px] text-[#787774]">
+                  File: <strong>{hierarchyExcelFileName}</strong> • Program:{' '}
+                  <strong>
+                    {currentSelectedProgram?.name || activeBudgetProgram?.name || '-'}
+                  </strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={importingHierarchyExcel}
+                onClick={() => setShowHierarchyExcelPreviewModal(false)}
+                className="text-[#787774] hover:text-[#171717] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="p-2.5 rounded bg-blue-50/70 border border-blue-200">
+                <span className="text-[10.5px] text-[#5F5E5B] block">Outcome Baru</span>
+                <strong className="text-sm font-bold text-[#1D4ED8]">
+                  {hierarchyExcelPreviewRows.filter((r) => r.isNewOutcome).length}
+                </strong>
+              </div>
+              <div className="p-2.5 rounded bg-[#EBF7F5] border border-[#C0E8DF]">
+                <span className="text-[10.5px] text-[#5F5E5B] block">Output Baru</span>
+                <strong className="text-sm font-bold text-[#0F7B6C]">
+                  {hierarchyExcelPreviewRows.filter((r) => r.isNewOutput).length}
+                </strong>
+              </div>
+              <div className="p-2.5 rounded bg-amber-50/80 border border-amber-200">
+                <span className="text-[10.5px] text-[#5F5E5B] block">Activity Baru</span>
+                <strong className="text-sm font-bold text-amber-800">
+                  {hierarchyExcelPreviewRows.filter((r) => r.isNewActivity).length}
+                </strong>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1 border border-[#0F172A] rounded-sm">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-[#0F172A] bg-white text-[12px] font-bold text-[#0F172A]">
+                    <th className="py-2.5 px-3 text-center border-r border-[#0F172A] w-[30%]">
+                      Outcome
+                    </th>
+                    <th className="py-2.5 px-3 text-center border-r border-[#0F172A] w-[30%]">
+                      Output
+                    </th>
+                    <th className="py-2.5 px-3 text-center border-r border-[#0F172A] w-[30%]">
+                      Activity
+                    </th>
+                    <th className="py-2.5 px-2.5 text-center w-[10%]">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hierarchyExcelPreviewRows.map((row) => (
+                    <tr
+                      key={row.rowNumber}
+                      className="border-b border-[#0F172A] last:border-b-0 hover:bg-[#F8FAFC]"
+                    >
+                      <td className="py-2 px-3 align-top text-[#0F172A] border-r border-[#0F172A] leading-snug">
+                        {row.outcomeName || '-'}
+                      </td>
+                      <td className="py-2 px-3 align-top text-[#0F172A] border-r border-[#0F172A] leading-snug">
+                        {row.outputName || '-'}
+                      </td>
+                      <td className="py-2 px-3 align-top text-[#0F172A] border-r border-[#0F172A] leading-snug">
+                        {row.activityName || '-'}
+                      </td>
+                      <td className="py-2 px-2.5 align-top text-center">
+                        <span
+                          className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            row.status === 'valid'
+                              ? 'bg-[#EAF3EC] text-[#2B6E3F]'
+                              : row.status === 'duplicate'
+                              ? 'bg-[#F4F4F2] text-[#6B6B68]'
+                              : 'bg-[#FDECEC] text-[#C93B3B]'
+                          }`}
+                        >
+                          {row.status === 'valid'
+                            ? 'Siap'
+                            : row.status === 'duplicate'
+                            ? 'Terdaftar'
+                            : 'Invalid'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#EAEAEA] text-xs">
+              <div className="text-[#787774]">
+                Siap diimpor otomatis:{' '}
+                <strong className="text-[#0F7B6C]">
+                  {hierarchyExcelPreviewRows.filter((r) => r.status === 'valid').length} baris
+                  hirarki baru
+                </strong>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={importingHierarchyExcel}
+                  onClick={() => setShowHierarchyExcelPreviewModal(false)}
+                  className="px-3 py-1.5 rounded border border-[#D4D4D0] text-[#5A5A58] hover:bg-[#F4F4F2] cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    importingHierarchyExcel ||
+                    hierarchyExcelPreviewRows.filter((r) => r.status === 'valid').length === 0
+                  }
+                  onClick={handleConfirmHierarchyExcelImport}
+                  className="px-4 py-1.5 rounded font-semibold bg-[#0F7B6C] text-white hover:bg-[#0B5E52] disabled:opacity-50 cursor-pointer"
+                >
+                  {importingHierarchyExcel
+                    ? 'Mengimpor Hirarki...'
+                    : 'Konfirmasi Import Hirarki'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DETAIL MODALS (For Outcome Indicators, Output Indicators, Activity Details) */}
-      {selectedOutcomeDetail && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <span className="text-xs font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800 uppercase">
-                  Detail Indikator Outcome
+      {/* DETAIL & MANUAL INPUT MODAL FOR OUTCOME (1 Kolom Mendatar Penuh & Menurun Urut Kolom Tabel) */}
+      {selectedOutcomeDetail && editingOutcomeDraft && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3">
+          <div className="bg-white rounded-md shadow-xl max-w-4xl w-full flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 border border-[#CBD5E1]">
+            <div className="px-3.5 py-2 border-b border-[#CBD5E1] flex flex-wrap items-center justify-between gap-2 bg-[#F8FAFC]">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[#E5E7EB] text-[#0F172A] shrink-0">
+                  {editingOutcomeDraft.outcomeNumber || 'Outcome'}
                 </span>
-                <h4 className="text-base font-bold text-slate-900 mt-1">
-                  {selectedOutcomeDetail.name}
+                <h4 className="text-xs font-semibold text-[#0F172A] truncate">
+                  {editingOutcomeDraft.description}
                 </h4>
               </div>
-              <button
-                onClick={() => setSelectedOutcomeDetail(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingOutcomeModal(true);
+                    setEditingOutcomeDraft({
+                      ...editingOutcomeDraft,
+                      indicators: [
+                        ...editingOutcomeDraft.indicators,
+                        {
+                          id: `ind-oc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                          name: '',
+                          description: '',
+                          dataSource: '',
+                          cumulativeType: 'Non cumulative',
+                          plannedDataBreakdown: '',
+                          reportingFrequency: 'Annual',
+                          baseline: 'TBA',
+                          target: '',
+                          endOfProjectGoal: '',
+                          unit: '',
+                          verificationMethod: '',
+                        },
+                      ],
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Tambah Indikator</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingOutcomeModal((prev) => !prev)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-[#1D4ED8] bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] rounded transition-colors cursor-pointer"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>{isEditingOutcomeModal ? 'Tutup Form Edit' : 'Input / Edit Manual'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const idToDel = selectedOutcomeDetail.id;
+                    setSelectedOutcomeDetail(null);
+                    setEditingOutcomeDraft(null);
+                    setIsEditingOutcomeModal(false);
+                    handleDeleteOutcome(idToDel);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded transition-colors cursor-pointer"
+                  title="Hapus Outcome"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedOutcomeDetail(null);
+                    setEditingOutcomeDraft(null);
+                    setIsEditingOutcomeModal(false);
+                  }}
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="p-5 overflow-y-auto space-y-4 text-xs md:text-sm">
-              <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase">Deskripsi</div>
-                <p className="text-slate-700 mt-0.5">{selectedOutcomeDetail.description || '-'}</p>
-              </div>
-
-              <div className="border-t border-slate-200 pt-3">
-                <h5 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-blue-600" />
-                  <span>Daftar Indikator Outcome ({selectedOutcomeDetail.indicators.length})</span>
-                </h5>
-
-                {selectedOutcomeDetail.indicators.length === 0 ? (
-                  <p className="text-slate-500 italic">Belum ada indikator yang dicatat.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {selectedOutcomeDetail.indicators.map((ind, idx) => (
-                      <div
-                        key={ind.id}
-                        className="p-3.5 rounded border border-slate-200 bg-slate-50/60 space-y-2"
+            <div className="p-3 space-y-3 max-h-[80vh] overflow-y-auto">
+              {/* TABEL PREVIEW MATRIKS OUTCOME */}
+              <div className="overflow-x-auto border border-[#CBD5E1] rounded bg-white">
+                <table className="w-full text-left border-collapse text-[11.5px]">
+                  <thead>
+                    <tr className="border-b border-[#CBD5E1] bg-[#F1F5F9] text-[11px] font-bold text-[#0F172A]">
+                      <th className="py-2 px-2.5 w-[100px] text-center border-r border-[#CBD5E1] bg-[#E5E7EB]">
+                        Nomor outcome
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[180px] border-r border-[#CBD5E1]">
+                        Description
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[200px] border-r border-[#CBD5E1]">
+                        Progress indicator
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[160px] border-r border-[#CBD5E1]">
+                        Data source
+                      </th>
+                      <th className="py-2 px-2 w-[110px] text-center border-r border-[#CBD5E1]">
+                        Cumulative or non-cumulative
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[170px] border-r border-[#CBD5E1]">
+                        Planned data breakdown
+                      </th>
+                      <th className="py-2 px-2 w-[90px] text-center border-r border-[#CBD5E1]">
+                        Reporting frequency
+                      </th>
+                      <th className="py-2 px-2 w-[80px] text-center border-r border-[#CBD5E1]">
+                        Baseline
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[180px]">End of project goal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(editingOutcomeDraft.indicators.length > 0
+                      ? editingOutcomeDraft.indicators
+                      : [
+                          {
+                            id: 'empty-oc-ind',
+                            name: '-',
+                            description: '',
+                            dataSource: '-',
+                            cumulativeType: 'Non cumulative',
+                            plannedDataBreakdown: '-',
+                            reportingFrequency: '-',
+                            baseline: '-',
+                            target: '-',
+                            endOfProjectGoal: '-',
+                            unit: '',
+                            verificationMethod: '-',
+                          },
+                        ]
+                    ).map((ind, idx, arr) => (
+                      <tr
+                        key={ind.id || idx}
+                        className="border-b border-[#CBD5E1] last:border-b-0 align-top"
                       >
-                        <div className="font-semibold text-slate-900">
-                          {idx + 1}. {ind.name}
-                        </div>
-                        {ind.description && (
-                          <div className="text-xs text-slate-600">{ind.description}</div>
+                        {idx === 0 && (
+                          <>
+                            <td
+                              rowSpan={arr.length}
+                              className="py-2.5 px-2.5 text-center align-middle font-bold text-[#0F172A] bg-[#E5E7EB] border-r border-[#CBD5E1] whitespace-nowrap"
+                            >
+                              {editingOutcomeDraft.outcomeNumber || 'Outcome'}
+                            </td>
+                            <td
+                              rowSpan={arr.length}
+                              className="py-2.5 px-2.5 align-middle font-semibold text-[#0F172A] bg-white border-r border-[#CBD5E1] leading-snug"
+                            >
+                              {editingOutcomeDraft.description || '-'}
+                            </td>
+                          </>
                         )}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 border-t border-slate-200/80 text-xs">
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Baseline:</span>
-                            <span className="font-semibold text-slate-800">{ind.baseline}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Target:</span>
-                            <span className="font-semibold text-blue-700">{ind.target}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Satuan:</span>
-                            <span className="text-slate-800">{ind.unit}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Frekuensi:</span>
-                            <span className="text-slate-800">{ind.reportingFrequency}</span>
-                          </div>
-                        </div>
-                        <div className="text-xs text-slate-600 pt-1">
-                          <span className="text-slate-400">Metode Verifikasi: </span>
-                          <span className="font-medium">{ind.verificationMethod}</span>
-                          {ind.dataSource && (
-                            <span className="block text-slate-500 mt-0.5">
-                              Sumber Data: {ind.dataSource}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.name || '-'}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.dataSource || ind.verificationMethod || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.cumulativeType || 'Non cumulative'}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.plannedDataBreakdown || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.reportingFrequency || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.baseline || '-'}
+                        </td>
+                        <td className="py-2 px-2.5 text-[#0F172A] leading-snug">
+                          {ind.endOfProjectGoal || ind.target || '-'}
+                        </td>
+                      </tr>
                     ))}
-                  </div>
-                )}
+                  </tbody>
+                </table>
               </div>
+
+              {/* FORM INPUT MANUAL OUTCOME: SATU KOLOM MENDATAR PENUH & MENURUN URUT TABEL TANPA WASTE */}
+              {isEditingOutcomeModal && (
+                <div className="border border-[#CBD5E1] rounded bg-[#F8FAFC] p-2.5 space-y-2">
+                  <div className="grid grid-cols-1 gap-1.5 bg-white p-2.5 rounded border border-[#CBD5E1]">
+                    {/* 1. Nomor outcome (1 kolom penuh) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#0F172A] mb-0.5">
+                        1. Nomor outcome
+                      </label>
+                      <input
+                        type="text"
+                        value={editingOutcomeDraft.outcomeNumber}
+                        onChange={(e) =>
+                          setEditingOutcomeDraft({
+                            ...editingOutcomeDraft,
+                            outcomeNumber: e.target.value,
+                          })
+                        }
+                        placeholder="Contoh: Outcome 1"
+                        className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono font-bold text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                      />
+                    </div>
+
+                    {/* 2. Description (1 kolom penuh) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#0F172A] mb-0.5">
+                        2. Description
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={editingOutcomeDraft.description}
+                        onChange={(e) =>
+                          setEditingOutcomeDraft({
+                            ...editingOutcomeDraft,
+                            description: e.target.value,
+                          })
+                        }
+                        placeholder="Deskripsi / Nama Outcome..."
+                        className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#1D4ED8]"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Daftar Indikator: Masing-masing field 1 kolom penuh menurun urut tabel */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between px-0.5">
+                      <span className="text-[11px] font-bold text-[#0F172A]">
+                        Daftar Progress Indicator ({editingOutcomeDraft.indicators.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingOutcomeDraft({
+                            ...editingOutcomeDraft,
+                            indicators: [
+                              ...editingOutcomeDraft.indicators,
+                              {
+                                id: `ind-oc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                                name: '',
+                                description: '',
+                                dataSource: '',
+                                cumulativeType: 'Non cumulative',
+                                plannedDataBreakdown: '',
+                                reportingFrequency: 'Annual',
+                                baseline: 'TBA',
+                                target: '',
+                                endOfProjectGoal: '',
+                                unit: '',
+                                verificationMethod: '',
+                              },
+                            ],
+                          })
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>Tambah Indikator</span>
+                      </button>
+                    </div>
+
+                    {editingOutcomeDraft.indicators.map((ind, idx) => {
+                      const updateInd = (field: keyof Indicator, val: string) => {
+                        const nextList = editingOutcomeDraft.indicators.map((item, i) =>
+                          i === idx
+                            ? {
+                                ...item,
+                                [field]: val,
+                                ...(field === 'dataSource' ? { verificationMethod: val } : {}),
+                                ...(field === 'endOfProjectGoal' ? { target: val } : {}),
+                              }
+                            : item
+                        );
+                        setEditingOutcomeDraft({
+                          ...editingOutcomeDraft,
+                          indicators: nextList,
+                        });
+                      };
+
+                      return (
+                        <div
+                          key={ind.id || idx}
+                          className="bg-white border border-[#CBD5E1] rounded p-2.5 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-1 mb-1">
+                            <span className="text-[11px] font-bold text-[#1D4ED8]">
+                              Indikator Outcome #{idx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingOutcomeDraft({
+                                  ...editingOutcomeDraft,
+                                  indicators: editingOutcomeDraft.indicators.filter(
+                                    (_, i) => i !== idx
+                                  ),
+                                })
+                              }
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600 hover:text-rose-700 cursor-pointer"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Hapus</span>
+                            </button>
+                          </div>
+
+                          {/* Satu kolom mendatar penuh, urut menurun sesuai tabel */}
+                          <div className="grid grid-cols-1 gap-1.5">
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                3. Progress indicator
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={ind.name}
+                                onChange={(e) => updateInd('name', e.target.value)}
+                                placeholder="Progress indicator..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                4. Data source
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.dataSource || ''}
+                                onChange={(e) => updateInd('dataSource', e.target.value)}
+                                placeholder="Data source..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                5. Cumulative or non-cumulative
+                              </label>
+                              <select
+                                value={ind.cumulativeType || 'Non cumulative'}
+                                onChange={(e) => updateInd('cumulativeType', e.target.value)}
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                              >
+                                <option value="Non cumulative">Non cumulative</option>
+                                <option value="Non-cumulative">Non-cumulative</option>
+                                <option value="Cumulative">Cumulative</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                6. Planned data breakdown
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.plannedDataBreakdown || ''}
+                                onChange={(e) => updateInd('plannedDataBreakdown', e.target.value)}
+                                placeholder="Planned data breakdown..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                7. Reporting frequency
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.reportingFrequency || ''}
+                                onChange={(e) => updateInd('reportingFrequency', e.target.value)}
+                                placeholder="Annual / Semi-Annual / Quarterly..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                8. Baseline
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.baseline}
+                                onChange={(e) => updateInd('baseline', e.target.value)}
+                                placeholder="TBA / 0..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                9. End of project goal
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={ind.endOfProjectGoal || ind.target}
+                                onChange={(e) => updateInd('endOfProjectGoal', e.target.value)}
+                                placeholder="End of project goal..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#1D4ED8]"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-              <button
-                onClick={() => setSelectedOutcomeDetail(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded"
-              >
-                Tutup
-              </button>
+            <div className="px-3.5 py-2.5 bg-[#F8FAFC] border-t border-[#CBD5E1] flex items-center justify-between gap-2">
+              <div className="text-[11px] text-[#64748B]">
+                Urutan 1 kolom menurun sesuai kolom tabel Matriks Outcome
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedOutcomeDetail(null);
+                    setEditingOutcomeDraft(null);
+                    setIsEditingOutcomeModal(false);
+                  }}
+                  className="px-3 py-1.5 border border-[#CBD5E1] bg-white hover:bg-[#F1F5F9] text-[#334155] text-xs font-semibold rounded cursor-pointer"
+                >
+                  Tutup
+                </button>
+                {!isEditingOutcomeModal ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingOutcomeModal(true)}
+                    className="px-3.5 py-1.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold rounded cursor-pointer"
+                  >
+                    Input / Edit Manual
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={savingOutcomeDetail}
+                    onClick={handleSaveOutcomeDetailChanges}
+                    className="px-3.5 py-1.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold rounded cursor-pointer disabled:opacity-50"
+                  >
+                    {savingOutcomeDetail ? 'Menyimpan...' : 'Simpan Perubahan'}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {selectedOutputDetail && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 uppercase">
-                  Detail Indikator Output
+      {/* DETAIL & MANUAL INPUT MODAL FOR OUTPUT (1 Kolom Mendatar Penuh & Menurun Urut Kolom Tabel) */}
+      {selectedOutputDetail && editingOutputDraft && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3">
+          <div className="bg-white rounded-md shadow-xl max-w-4xl w-full flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 border border-[#CBD5E1]">
+            <div className="px-3.5 py-2 border-b border-[#CBD5E1] flex flex-wrap items-center justify-between gap-2 bg-[#F8FAFC]">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[#E5E7EB] text-[#0F172A] shrink-0">
+                  {editingOutputDraft.outputNumber || 'Output'}
                 </span>
-                <h4 className="text-base font-bold text-slate-900 mt-1">
-                  {selectedOutputDetail.name}
+                <h4 className="text-xs font-semibold text-[#0F172A] truncate">
+                  {editingOutputDraft.description}
                 </h4>
               </div>
-              <button
-                onClick={() => setSelectedOutputDetail(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingOutputModal(true);
+                    setEditingOutputDraft({
+                      ...editingOutputDraft,
+                      indicators: [
+                        ...editingOutputDraft.indicators,
+                        {
+                          id: `ind-op-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                          name: '',
+                          description: '',
+                          dataSource: '',
+                          cumulativeType: 'Non cumulative',
+                          plannedDataBreakdown: '',
+                          reportingFrequency: 'Annual',
+                          baseline: 'TBA',
+                          target: '',
+                          endOfProjectGoal: '',
+                          unit: '',
+                          verificationMethod: '',
+                        },
+                      ],
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-[#0F7B6C] hover:bg-[#0B5E52] rounded transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Tambah Indikator</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetOp = selectedOutputDetail;
+                    setSelectedOutputDetail(null);
+                    setEditingOutputDraft(null);
+                    setIsEditingOutputModal(false);
+                    setShowAddActivity({ outputId: targetOp.id });
+                    setActivityForm({
+                      activityNumber: editingOutputDraft.outputNumber.replace(
+                        /^Output/i,
+                        'Activity'
+                      ),
+                      name: '',
+                      code: '',
+                      description: '',
+                      anticipatedInputs: '',
+                      plannedParticipantsBreakdown: '',
+                      startDate:
+                        currentSelectedProgram?.startDate ||
+                        new Date().toISOString().slice(0, 10),
+                      endDate:
+                        currentSelectedProgram?.endDate ||
+                        new Date().toISOString().slice(0, 10),
+                    });
+                  }}
+                  className="px-2.5 py-1 text-[11px] font-medium text-[#0F7B6C] bg-[#ECFDF5] hover:bg-[#D1FAE5] border border-[#A7F3D0] rounded transition-colors cursor-pointer"
+                >
+                  + Activity
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingOutputModal((prev) => !prev)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-[#1D4ED8] bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] rounded transition-colors cursor-pointer"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>{isEditingOutputModal ? 'Tutup Form Edit' : 'Input / Edit Manual'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const idToDel = selectedOutputDetail.id;
+                    setSelectedOutputDetail(null);
+                    setEditingOutputDraft(null);
+                    setIsEditingOutputModal(false);
+                    handleDeleteOutput(idToDel);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded transition-colors cursor-pointer"
+                  title="Hapus Output"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedOutputDetail(null);
+                    setEditingOutputDraft(null);
+                    setIsEditingOutputModal(false);
+                  }}
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="p-5 overflow-y-auto space-y-4 text-xs md:text-sm">
-              <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase">Deskripsi</div>
-                <p className="text-slate-700 mt-0.5">{selectedOutputDetail.description || '-'}</p>
+            <div className="p-3 space-y-3 max-h-[80vh] overflow-y-auto">
+              {/* TABEL PREVIEW MATRIKS OUTPUT */}
+              <div className="overflow-x-auto border border-[#CBD5E1] rounded bg-white">
+                <table className="w-full text-left border-collapse text-[11.5px]">
+                  <thead>
+                    <tr className="border-b border-[#CBD5E1] bg-[#F1F5F9] text-[11px] font-bold text-[#0F172A]">
+                      <th className="py-2 px-2.5 w-[100px] text-center border-r border-[#CBD5E1] bg-[#E5E7EB]">
+                        Nomor output
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[180px] border-r border-[#CBD5E1]">
+                        Description
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[200px] border-r border-[#CBD5E1]">
+                        Progress indicator
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[160px] border-r border-[#CBD5E1]">
+                        Data source
+                      </th>
+                      <th className="py-2 px-2 w-[110px] text-center border-r border-[#CBD5E1]">
+                        Cumulative or non-cumulative
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[170px] border-r border-[#CBD5E1]">
+                        Planned data breakdown
+                      </th>
+                      <th className="py-2 px-2 w-[90px] text-center border-r border-[#CBD5E1]">
+                        Reporting frequency
+                      </th>
+                      <th className="py-2 px-2 w-[80px] text-center border-r border-[#CBD5E1]">
+                        Baseline
+                      </th>
+                      <th className="py-2 px-2.5 min-w-[180px]">End of project goal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(editingOutputDraft.indicators.length > 0
+                      ? editingOutputDraft.indicators
+                      : [
+                          {
+                            id: 'empty-op-ind',
+                            name: '-',
+                            description: '',
+                            dataSource: '-',
+                            cumulativeType: 'Non cumulative',
+                            plannedDataBreakdown: '-',
+                            reportingFrequency: '-',
+                            baseline: '-',
+                            target: '-',
+                            endOfProjectGoal: '-',
+                            unit: '',
+                            verificationMethod: '-',
+                          },
+                        ]
+                    ).map((ind, idx, arr) => (
+                      <tr
+                        key={ind.id || idx}
+                        className="border-b border-[#CBD5E1] last:border-b-0 align-top"
+                      >
+                        {idx === 0 && (
+                          <>
+                            <td
+                              rowSpan={arr.length}
+                              className="py-2.5 px-2.5 text-center align-middle font-bold text-[#0F172A] bg-[#E5E7EB] border-r border-[#CBD5E1] whitespace-nowrap"
+                            >
+                              {editingOutputDraft.outputNumber || 'Output'}
+                            </td>
+                            <td
+                              rowSpan={arr.length}
+                              className="py-2.5 px-2.5 align-middle font-medium text-[#0F172A] bg-white border-r border-[#CBD5E1] leading-snug"
+                            >
+                              {editingOutputDraft.description || '-'}
+                            </td>
+                          </>
+                        )}
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.name || '-'}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.dataSource || ind.verificationMethod || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.cumulativeType || 'Non cumulative'}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-[#CBD5E1] text-[#0F172A] leading-snug">
+                          {ind.plannedDataBreakdown || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.reportingFrequency || '-'}
+                        </td>
+                        <td className="py-2 px-2 text-center border-r border-[#CBD5E1] text-[#0F172A] whitespace-nowrap">
+                          {ind.baseline || '-'}
+                        </td>
+                        <td className="py-2 px-2.5 text-[#0F172A] leading-snug">
+                          {ind.endOfProjectGoal || ind.target || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
-              <div className="border-t border-slate-200 pt-3">
-                <h5 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-emerald-600" />
-                  <span>Daftar Indikator Output ({selectedOutputDetail.indicators.length})</span>
-                </h5>
+              {/* FORM INPUT MANUAL OUTPUT: SATU KOLOM MENDATAR PENUH & MENURUN URUT TABEL TANPA WASTE */}
+              {isEditingOutputModal && (
+                <div className="border border-[#CBD5E1] rounded bg-[#F8FAFC] p-2.5 space-y-2">
+                  <div className="grid grid-cols-1 gap-1.5 bg-white p-2.5 rounded border border-[#CBD5E1]">
+                    {/* 1. Nomor output (1 kolom penuh) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#0F172A] mb-0.5">
+                        1. Nomor output
+                      </label>
+                      <input
+                        type="text"
+                        value={editingOutputDraft.outputNumber}
+                        onChange={(e) =>
+                          setEditingOutputDraft({
+                            ...editingOutputDraft,
+                            outputNumber: e.target.value,
+                          })
+                        }
+                        placeholder="Contoh: Output 1.1"
+                        className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono font-bold text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                      />
+                    </div>
 
-                {selectedOutputDetail.indicators.length === 0 ? (
-                  <p className="text-slate-500 italic">Belum ada indikator yang dicatat.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {selectedOutputDetail.indicators.map((ind, idx) => (
-                      <div
-                        key={ind.id}
-                        className="p-3.5 rounded border border-slate-200 bg-slate-50/60 space-y-2"
-                      >
-                        <div className="font-semibold text-slate-900">
-                          {idx + 1}. {ind.name}
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 border-t border-slate-200/80 text-xs">
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Baseline:</span>
-                            <span className="font-semibold text-slate-800">{ind.baseline}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Target:</span>
-                            <span className="font-semibold text-emerald-700">{ind.target}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Satuan:</span>
-                            <span className="text-slate-800">{ind.unit}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[11px]">Frekuensi:</span>
-                            <span className="text-slate-800">{ind.reportingFrequency}</span>
-                          </div>
-                        </div>
-                        <div className="text-xs text-slate-600 pt-1">
-                          <span className="text-slate-400">Metode Verifikasi: </span>
-                          <span className="font-medium">{ind.verificationMethod}</span>
-                        </div>
-                      </div>
-                    ))}
+                    {/* 2. Description (1 kolom penuh) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#0F172A] mb-0.5">
+                        2. Description
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={editingOutputDraft.description}
+                        onChange={(e) =>
+                          setEditingOutputDraft({
+                            ...editingOutputDraft,
+                            description: e.target.value,
+                          })
+                        }
+                        placeholder="Deskripsi / Nama Output..."
+                        className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#0F7B6C]"
+                      />
+                    </div>
                   </div>
+
+                  {/* Daftar Indikator: Masing-masing field 1 kolom penuh menurun urut tabel */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between px-0.5">
+                      <span className="text-[11px] font-bold text-[#0F172A]">
+                        Daftar Progress Indicator ({editingOutputDraft.indicators.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingOutputDraft({
+                            ...editingOutputDraft,
+                            indicators: [
+                              ...editingOutputDraft.indicators,
+                              {
+                                id: `ind-op-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                                name: '',
+                                description: '',
+                                dataSource: '',
+                                cumulativeType: 'Non cumulative',
+                                plannedDataBreakdown: '',
+                                reportingFrequency: 'Annual',
+                                baseline: 'TBA',
+                                target: '',
+                                endOfProjectGoal: '',
+                                unit: '',
+                                verificationMethod: '',
+                              },
+                            ],
+                          })
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-[#0F7B6C] hover:bg-[#0B5E52] rounded cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>Tambah Indikator</span>
+                      </button>
+                    </div>
+
+                    {editingOutputDraft.indicators.map((ind, idx) => {
+                      const updateInd = (field: keyof Indicator, val: string) => {
+                        const nextList = editingOutputDraft.indicators.map((item, i) =>
+                          i === idx
+                            ? {
+                                ...item,
+                                [field]: val,
+                                ...(field === 'dataSource' ? { verificationMethod: val } : {}),
+                                ...(field === 'endOfProjectGoal' ? { target: val } : {}),
+                              }
+                            : item
+                        );
+                        setEditingOutputDraft({
+                          ...editingOutputDraft,
+                          indicators: nextList,
+                        });
+                      };
+
+                      return (
+                        <div
+                          key={ind.id || idx}
+                          className="bg-white border border-[#CBD5E1] rounded p-2.5 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-1 mb-1">
+                            <span className="text-[11px] font-bold text-[#0F7B6C]">
+                              Indikator Output #{idx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingOutputDraft({
+                                  ...editingOutputDraft,
+                                  indicators: editingOutputDraft.indicators.filter(
+                                    (_, i) => i !== idx
+                                  ),
+                                })
+                              }
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600 hover:text-rose-700 cursor-pointer"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Hapus</span>
+                            </button>
+                          </div>
+
+                          {/* Satu kolom mendatar penuh, urut menurun sesuai tabel */}
+                          <div className="grid grid-cols-1 gap-1.5">
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                3. Progress indicator
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={ind.name}
+                                onChange={(e) => updateInd('name', e.target.value)}
+                                placeholder="Progress indicator..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                4. Data source
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.dataSource || ''}
+                                onChange={(e) => updateInd('dataSource', e.target.value)}
+                                placeholder="Data source..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                5. Cumulative or non-cumulative
+                              </label>
+                              <select
+                                value={ind.cumulativeType || 'Non cumulative'}
+                                onChange={(e) => updateInd('cumulativeType', e.target.value)}
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                              >
+                                <option value="Non cumulative">Non cumulative</option>
+                                <option value="Non-cumulative">Non-cumulative</option>
+                                <option value="Cumulative">Cumulative</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                6. Planned data breakdown
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.plannedDataBreakdown || ''}
+                                onChange={(e) => updateInd('plannedDataBreakdown', e.target.value)}
+                                placeholder="Planned data breakdown..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                7. Reporting frequency
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.reportingFrequency || ''}
+                                onChange={(e) => updateInd('reportingFrequency', e.target.value)}
+                                placeholder="Annual / Semi-Annual / Quarterly..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                8. Baseline
+                              </label>
+                              <input
+                                type="text"
+                                value={ind.baseline}
+                                onChange={(e) => updateInd('baseline', e.target.value)}
+                                placeholder="TBA / 0..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                                9. End of project goal
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={ind.endOfProjectGoal || ind.target}
+                                onChange={(e) => updateInd('endOfProjectGoal', e.target.value)}
+                                placeholder="End of project goal..."
+                                className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#0F7B6C]"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-3.5 py-2.5 bg-[#F8FAFC] border-t border-[#CBD5E1] flex items-center justify-between gap-2">
+              <div className="text-[11px] text-[#64748B]">
+                Urutan 1 kolom menurun sesuai kolom tabel Matriks Output
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedOutputDetail(null);
+                    setEditingOutputDraft(null);
+                    setIsEditingOutputModal(false);
+                  }}
+                  className="px-3 py-1.5 border border-[#CBD5E1] bg-white hover:bg-[#F1F5F9] text-[#334155] text-xs font-semibold rounded cursor-pointer"
+                >
+                  Tutup
+                </button>
+                {!isEditingOutputModal ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingOutputModal(true)}
+                    className="px-3.5 py-1.5 bg-[#0F7B6C] hover:bg-[#0B5E52] text-white text-xs font-semibold rounded cursor-pointer"
+                  >
+                    Input / Edit Manual
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={savingOutputDetail}
+                    onClick={handleSaveOutputDetailChanges}
+                    className="px-3.5 py-1.5 bg-[#0F7B6C] hover:bg-[#0B5E52] text-white text-xs font-semibold rounded cursor-pointer disabled:opacity-50"
+                  >
+                    {savingOutputDetail ? 'Menyimpan...' : 'Simpan Perubahan'}
+                  </button>
                 )}
               </div>
-            </div>
-
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-              <button
-                onClick={() => setSelectedOutputDetail(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded"
-              >
-                Tutup
-              </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* DETAIL MODAL FOR ACTIVITY (Tampil dalam format tabel matriks bersih saat diklik) */}
       {selectedActivityDetail && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-xl w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900 uppercase">
-                  Detail Kegiatan (Activity)
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-xs font-bold px-2.5 py-0.5 rounded bg-[#E5E7EB] text-[#0F172A] shrink-0">
+                  {selectedActivityDetail.activityNumber ||
+                    (selectedActivityDetail.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ??
+                      'Activity')}
                 </span>
-                <h4 className="text-base font-bold text-slate-900 mt-1">
-                  {selectedActivityDetail.name}
+                <h4 className="text-sm font-semibold text-slate-900 truncate">
+                  {selectedActivityDetail.name
+                    .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                    .trim() || selectedActivityDetail.name}
                 </h4>
               </div>
               <button
                 onClick={() => setSelectedActivityDetail(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="p-5 space-y-4 text-xs md:text-sm">
-              <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase">Deskripsi Kegiatan</div>
-                <p className="text-slate-700 mt-0.5">{selectedActivityDetail.description || '-'}</p>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3 p-3 bg-slate-50 rounded border border-slate-200 text-xs">
-                <div>
-                  <span className="text-slate-400 block">Master Budget Code:</span>
-                  <span className="font-mono font-bold text-blue-700">
-                    {selectedActivityDetail.code || 'Belum diatur'}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400 block">Penanggung Jawab (PIC):</span>
-                  <span className="font-semibold text-slate-800">{selectedActivityDetail.picName}</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 block">Jadwal Pelaksanaan:</span>
-                  <span className="font-semibold text-slate-800">
-                    {selectedActivityDetail.startDate} s/d {selectedActivityDetail.endDate}
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs font-semibold text-slate-500 uppercase mb-2">
-                  Sub-Kegiatan Terkait (Opsional)
-                </div>
-                {subActivities.filter((s) => s.activityId === selectedActivityDetail.id).length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">Tidak ada sub-kegiatan tambahan.</p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {subActivities
-                      .filter((s) => s.activityId === selectedActivityDetail.id)
-                      .map((sub, i) => (
-                        <div
-                          key={sub.id}
-                          className="p-2 text-xs bg-slate-50 rounded border border-slate-200 flex items-center justify-between"
-                        >
-                          <div>
-                            <span className="font-medium text-slate-800">
-                              {i + 1}. {sub.name}
-                            </span>
-                            {sub.picName && (
-                              <span className="text-slate-500 block text-[11px]">
-                                PIC: {sub.picName}
-                              </span>
-                            )}
-                          </div>
-                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-700">
-                            {sub.status}
-                          </span>
-                        </div>
-                      ))}
-                  </div>
-                )}
+            <div className="p-5 space-y-4 text-xs md:text-sm max-h-[75vh] overflow-y-auto">
+              <div className="overflow-x-auto border border-[#CBD5E1] rounded-md bg-white shadow-2xs">
+                <table className="w-full text-left border-collapse text-[12px]">
+                  <thead>
+                    <tr className="border-b border-[#CBD5E1] bg-[#F1F5F9] text-[11.5px] font-bold text-[#0F172A]">
+                      <th className="py-2.5 px-3 w-[120px] text-center border-r border-[#CBD5E1] bg-[#E5E7EB]">
+                        Nomor activity
+                      </th>
+                      <th className="py-2.5 px-3.5 min-w-[200px] border-r border-[#CBD5E1]">
+                        Nama activity
+                      </th>
+                      <th className="py-2.5 px-3.5 min-w-[260px] border-r border-[#CBD5E1]">
+                        Activity description
+                      </th>
+                      <th className="py-2.5 px-3.5 min-w-[180px] border-r border-[#CBD5E1]">
+                        Anticipated inputs
+                      </th>
+                      <th className="py-2.5 px-3.5 min-w-[180px]">
+                        Planned participants (by gender &amp; age)
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="py-4 px-3 text-center align-middle font-bold text-[#0F172A] bg-[#E5E7EB] border-r border-[#CBD5E1] whitespace-nowrap">
+                        {selectedActivityDetail.activityNumber ||
+                          (selectedActivityDetail.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ??
+                            'Activity')}
+                      </td>
+                      <td className="py-4 px-3.5 align-middle font-medium text-[#0F172A] border-r border-[#CBD5E1] leading-relaxed">
+                        {selectedActivityDetail.name
+                          .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+                          .trim() || selectedActivityDetail.name}
+                      </td>
+                      <td className="py-4 px-3.5 align-middle text-[#0F172A] border-r border-[#CBD5E1] leading-relaxed">
+                        {selectedActivityDetail.description || '-'}
+                      </td>
+                      <td className="py-4 px-3.5 align-middle text-[#0F172A] border-r border-[#CBD5E1] leading-relaxed">
+                        {selectedActivityDetail.anticipatedInputs || '-'}
+                      </td>
+                      <td className="py-4 px-3.5 align-middle text-[#0F172A] leading-relaxed">
+                        {selectedActivityDetail.plannedParticipantsBreakdown || '-'}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
 
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-              <button
-                onClick={() => setSelectedActivityDetail(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded"
-              >
-                Tutup
-              </button>
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                {canManage && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const idToDel = selectedActivityDetail.id;
+                      setSelectedActivityDetail(null);
+                      handleDeleteActivity(idToDel);
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Activity</span>
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {canManage && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const actToEdit = selectedActivityDetail;
+                      setSelectedActivityDetail(null);
+                      setEditingActivity(actToEdit);
+                      setActivityForm({
+                        activityNumber:
+                          actToEdit.activityNumber ||
+                          (actToEdit.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? ''),
+                        name: actToEdit.name,
+                        code: '',
+                        description: actToEdit.description || '',
+                        anticipatedInputs: actToEdit.anticipatedInputs || '',
+                        plannedParticipantsBreakdown:
+                          actToEdit.plannedParticipantsBreakdown || '',
+                        startDate: actToEdit.startDate,
+                        endDate: actToEdit.endDate,
+                      });
+                    }}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded cursor-pointer"
+                  >
+                    Edit Activity
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedActivityDetail(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4203,18 +6404,18 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         </div>
       )}
 
-      {/* Add / Edit Activity Modal (Connected with Master Budget Code!) */}
+      {/* Add / Edit Activity Modal (1 Kolom Mendatar Penuh & Menurun Urut Kolom Tabel Tanpa Waste) */}
       {(showAddActivity || editingActivity) && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3">
           <form
             onSubmit={handleCreateOrUpdateActivitySubmit}
-            className="bg-white rounded-lg shadow-xl max-w-lg w-full overflow-hidden"
+            className="bg-white rounded-md shadow-xl max-w-2xl w-full overflow-hidden border border-[#CBD5E1]"
           >
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <h4 className="font-bold text-slate-900">
+            <div className="px-3.5 py-2 border-b border-[#CBD5E1] flex items-center justify-between bg-[#F8FAFC]">
+              <h4 className="text-xs font-bold text-[#0F172A]">
                 {editingActivity
-                  ? 'Edit Activity & Master Budget Code'
-                  : 'Tambah Activity Baru (Terintegrasi Master Budget Code)'}
+                  ? 'Input / Edit Manual Activity (1 Kolom Menurun Urut Tabel)'
+                  : 'Tambah Activity Baru'}
               </h4>
               <button
                 type="button"
@@ -4222,120 +6423,117 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   setShowAddActivity(null);
                   setEditingActivity(null);
                 }}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-5 space-y-4 text-xs md:text-sm">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Master Budget Code (Eksklusif Program: {dataset.programName})
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="p-3 bg-[#F8FAFC] max-h-[78vh] overflow-y-auto">
+              <div className="bg-white border border-[#CBD5E1] rounded p-2.5 grid grid-cols-1 gap-1.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                    1. Nomor activity
+                  </label>
                   <input
                     type="text"
-                    placeholder="Contoh: 1.1.5"
-                    value={activityForm.code}
-                    onChange={(e) => setActivityForm({ ...activityForm, code: e.target.value })}
-                    className="w-full p-2 font-mono border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                  {dataset.masterBudgetCodes.length > 0 && (
-                    <select
-                      value={activityForm.code}
-                      onChange={(e) => {
-                        const chosen = dataset.masterBudgetCodes.find(
-                          (c) => c.code === e.target.value
-                        );
-                        setActivityForm((prev) => ({
-                          ...prev,
-                          code: e.target.value,
-                          name: prev.name || chosen?.budgetCategory || '',
-                        }));
-                      }}
-                      className="w-full p-2 bg-slate-50 border border-slate-300 rounded text-xs"
-                    >
-                      <option value="">-- Pilih Kode Finance Program Ini --</option>
-                      {dataset.masterBudgetCodes.map((mc) => (
-                        <option key={mc.id} value={mc.code}>
-                          {mc.code} — {mc.budgetCategory}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Hanya menampilkan kode finance dari Program ini. Kode baru yang diketik akan otomatis didaftarkan khusus untuk Program ini.
-                </p>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Nama Kegiatan (Activity / Budget Category) <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Survei Geolistrik Titik Sumur Bor..."
-                  value={activityForm.name}
-                  onChange={(e) => setActivityForm({ ...activityForm, name: e.target.value })}
-                  className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Deskripsi Kegiatan</label>
-                <textarea
-                  rows={2}
-                  placeholder="Rincian teknis kegiatan..."
-                  value={activityForm.description}
-                  onChange={(e) => setActivityForm({ ...activityForm, description: e.target.value })}
-                  className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Tanggal Mulai</label>
-                  <input
-                    type="date"
-                    value={activityForm.startDate}
+                    placeholder="Contoh: Activity 1.1"
+                    value={activityForm.activityNumber}
                     onChange={(e) =>
-                      setActivityForm({ ...activityForm, startDate: e.target.value })
+                      setActivityForm({ ...activityForm, activityNumber: e.target.value })
                     }
-                    className="w-full p-2 border border-slate-300 rounded"
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono font-bold text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
                   />
                 </div>
+
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Tanggal Selesai</label>
+                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                    2. Nama activity <span className="text-rose-500">*</span>
+                  </label>
                   <input
-                    type="date"
-                    value={activityForm.endDate}
-                    onChange={(e) => setActivityForm({ ...activityForm, endDate: e.target.value })}
-                    className="w-full p-2 border border-slate-300 rounded"
+                    type="text"
+                    required
+                    placeholder="Nama / judul Activity..."
+                    value={activityForm.name}
+                    onChange={(e) =>
+                      setActivityForm({ ...activityForm, name: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-medium text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                    3. Activity description
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Activity description..."
+                    value={activityForm.description}
+                    onChange={(e) =>
+                      setActivityForm({ ...activityForm, description: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] leading-snug focus:outline-none focus:border-[#1D4ED8]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                    4. Anticipated inputs
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Anticipated inputs..."
+                    value={activityForm.anticipatedInputs}
+                    onChange={(e) =>
+                      setActivityForm({ ...activityForm, anticipatedInputs: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                    5. Planned participants (by gender &amp; age)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Breakdown planned participants by gender & age..."
+                    value={activityForm.plannedParticipantsBreakdown}
+                    onChange={(e) =>
+                      setActivityForm({
+                        ...activityForm,
+                        plannedParticipantsBreakdown: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowAddActivity(null);
-                  setEditingActivity(null);
-                }}
-                className="px-3 py-1.5 border border-slate-300 rounded text-xs font-semibold text-slate-700"
-              >
-                Batal
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold cursor-pointer"
-              >
-                {editingActivity ? 'Simpan Perubahan' : 'Simpan Activity'}
-              </button>
+            <div className="px-3.5 py-2.5 bg-[#F8FAFC] border-t border-[#CBD5E1] flex items-center justify-between gap-2">
+              <div className="text-[11px] text-[#64748B]">
+                Urutan 1 kolom menurun sesuai kolom tabel Matriks Activity
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddActivity(null);
+                    setEditingActivity(null);
+                  }}
+                  className="px-3 py-1.5 border border-[#CBD5E1] bg-white hover:bg-[#F1F5F9] rounded text-xs font-semibold text-[#334155] cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-3.5 py-1.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white rounded text-xs font-semibold cursor-pointer"
+                >
+                  {editingActivity ? 'Simpan Perubahan' : 'Simpan Activity'}
+                </button>
+              </div>
             </div>
           </form>
         </div>
