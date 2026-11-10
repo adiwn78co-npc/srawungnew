@@ -269,7 +269,7 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   }
 
   if (!Array.isArray(parsed.programs)) {
-    parsed.programs = [...INITIAL_PROGRAMS];
+    parsed.programs = [];
   }
 
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
@@ -287,13 +287,13 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   }
 
   if (!Array.isArray(parsed.outcomes)) {
-    parsed.outcomes = [...INITIAL_OUTCOMES];
+    parsed.outcomes = [];
   }
   if (!Array.isArray(parsed.outputs)) {
-    parsed.outputs = [...INITIAL_OUTPUTS];
+    parsed.outputs = [];
   }
   if (!Array.isArray(parsed.activities)) {
-    parsed.activities = [...INITIAL_ACTIVITIES];
+    parsed.activities = [];
   }
   if (!Array.isArray(parsed.subActivities)) {
     parsed.subActivities = [];
@@ -389,6 +389,16 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   return parsed;
 }
 
+function sanitizeDbError(err: unknown): string {
+  const raw =
+    err instanceof Error
+      ? `${err.name}${('code' in err && (err as any).code) ? ` [${(err as any).code}]` : ''}: ${err.message}`
+      : String(err || 'Unknown error');
+  return raw
+    .replace(/mysql2?:\/\/[^\s@]+@/gi, 'mysql://***@')
+    .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
+}
+
 class Database {
   private data: DatabaseSchema;
   private mysqlWriteChain: Promise<void> = Promise.resolve();
@@ -397,19 +407,50 @@ class Database {
 
   constructor() {
     this.ensureDirectory();
-    this.data = this.loadInitialLocalSeed();
+    // Jika MySQL dikonfigurasi, jangan pernah memuat db.json atau db.backup.json ke memori operasional.
+    this.data = isMysqlConfigured()
+      ? normalizeSchema(createDefaultSeed())
+      : this.loadInitialLocalDevData();
     this.initPromise = this.initializeMysqlStorage();
   }
 
   /**
-   * Menunggu hingga proses inisialisasi database (khususnya pembacaan awal dari MySQL)
-   * benar-benar selesai sebelum server menerima request atau memodifikasi data.
+   * Menunggu hingga proses inisialisasi database selesai sepenuhnya.
+   * Jika percobaan sebelumnya gagal (status 'failed'), memanggil ready() akan mencoba menginisialisasi ulang secara aman.
    */
   public async ready(): Promise<void> {
-    if (!this.initPromise) {
+    if (
+      !this.initPromise ||
+      (isMysqlConfigured() && this.mysqlStatus === 'failed' && !this.isInitializing)
+    ) {
       this.initPromise = this.initializeMysqlStorage();
     }
     await this.initPromise;
+  }
+
+  private isInitializing = false;
+
+  /**
+   * Bernilai true apabila database siap melayani aplikasi:
+   * - MySQL tidak dikonfigurasi (mode lokal), ATAU
+   * - MySQL berhasil dimuat ('ready'), ATAU
+   * - Mode fallback lokal aktif ketika MySQL tidak terjangkau di environment preview (kecuali MYSQL_STRICT_REQUIRED=true).
+   */
+  public isOperational(): boolean {
+    if (!isMysqlConfigured() || this.mysqlStatus === 'ready') {
+      return true;
+    }
+    if (process.env.MYSQL_STRICT_REQUIRED === 'true') {
+      return false;
+    }
+    return this.mysqlStatus === 'failed';
+  }
+
+  /**
+   * Menunggu seluruh antrean penulisan asynchronous ke MySQL selesai.
+   */
+  public async flushWrites(): Promise<void> {
+    await this.mysqlWriteChain;
   }
 
   private ensureDirectory() {
@@ -437,121 +478,95 @@ class Database {
   }
 
   /**
-   * Memuat data lokal untuk:
-   * - fallback development (ketika MySQL tidak dikonfigurasi), atau
-   * - seed awal satu kali apabila database MySQL benar-benar baru/kosong.
-   * Catatan: db.json diprioritaskan di atas db.backup.json, dan tidak pernah menimpa MySQL yang sudah berisi data.
+   * Hanya digunakan untuk mode fallback development lokal ketika MySQL TIDAK dikonfigurasi
+   * atau ketika host MySQL produksi tidak dapat dijangkau dari container preview.
+   * Catatan penting: db.backup.json tidak pernah dibaca secara otomatis, dan data ini TIDAK PERNAH ditulis ke MySQL.
    */
-  private loadInitialLocalSeed(): DatabaseSchema {
+  private loadInitialLocalDevData(): DatabaseSchema {
     try {
-      const sourceFile = fs.existsSync(DB_FILE)
-        ? DB_FILE
-        : fs.existsSync(DB_BACKUP_FILE)
-        ? DB_BACKUP_FILE
-        : null;
-
-      if (sourceFile) {
-        const fileContent = fs.readFileSync(sourceFile, 'utf-8');
+      if (fs.existsSync(DB_FILE)) {
+        const fileContent = fs.readFileSync(DB_FILE, 'utf-8');
         const rawParsed: DatabaseSchema = JSON.parse(fileContent);
         const normalized = normalizeSchema(rawParsed);
-        if (!isMysqlConfigured()) {
-          this.persistLocalJsonOnly(normalized);
-        }
+        this.persistLocalJsonOnly(normalized);
         return normalized;
       }
     } catch (err) {
-      console.error('[Database][Local] Gagal membaca file JSON lokal, menggunakan default seed:', err);
+      console.warn('[DB] Failed to read local development data/db.json, using default seed:', sanitizeDbError(err));
     }
 
     const fresh = normalizeSchema(createDefaultSeed());
-    if (!isMysqlConfigured()) {
-      this.persistLocalJsonOnly(fresh);
-      if (!fs.existsSync(DB_BACKUP_FILE)) {
-        this.persistExplicitBackup(fresh);
-      }
-    }
+    this.persistLocalJsonOnly(fresh);
     return fresh;
   }
 
   private async initializeMysqlStorage(): Promise<void> {
     if (!isMysqlConfigured()) {
       this.mysqlStatus = 'unconfigured';
-      console.log(
-        '[Database][Local] Konfigurasi MySQL tidak ditemukan — menggunakan penyimpanan file lokal (data/db.json).'
-      );
       return;
     }
 
-    const maxAttempts = 3;
-    let lastError: any = null;
+    this.isInitializing = true;
+    const maxAttempts = 2;
+    let lastError: unknown = null;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const pool = await getMysqlPool();
-        if (!pool) {
-          throw new Error('Pool koneksi MySQL bernilai null meskipun konfigurasi environment tersedia.');
-        }
-
-        const existingFromMysql = await loadDatabaseFromMysql(pool, this.data);
-        if (existingFromMysql) {
-          const missingFlags: Record<string, boolean> = {};
-          if (existingFromMysql.cleanResetPrj3581V1 === undefined) {
-            missingFlags.cleanResetPrj3581V1 = true;
-          }
-          if (existingFromMysql.cleanResetPrj3581V2 === undefined) {
-            missingFlags.cleanResetPrj3581V2 = true;
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const pool = await getMysqlPool();
+          if (!pool) {
+            throw new Error('MySQL connection pool is unavailable.');
           }
 
-          this.data = normalizeSchema(existingFromMysql);
+          // Verifikasi koneksi aktif ke server MySQL sebelum menyatakan terhubung
+          await pool.query('SELECT 1');
+          console.log('[DB] MySQL connected successfully.');
+
+          const existingFromMysql = await loadDatabaseFromMysql(pool);
+          if (existingFromMysql) {
+            const missingFlags: Record<string, boolean> = {};
+            if (existingFromMysql.cleanResetPrj3581V1 === undefined) {
+              missingFlags.cleanResetPrj3581V1 = true;
+            }
+            if (existingFromMysql.cleanResetPrj3581V2 === undefined) {
+              missingFlags.cleanResetPrj3581V2 = true;
+            }
+
+            this.data = normalizeSchema(existingFromMysql);
+            this.mysqlStatus = 'ready';
+
+            if (Object.keys(missingFlags).length > 0) {
+              await upsertMysqlKvEntries(pool, missingFlags);
+            }
+
+            console.log('[DB] Existing application data loaded from MySQL.');
+            return;
+          }
+
+          // Kondisi: MySQL berhasil terhubung DAN database benar-benar baru / kosong
+          console.log('[DB] Database is empty. Initial seed is being created.');
+          const initialSeed = normalizeSchema(createDefaultSeed());
+          await saveDatabaseToMysql(pool, initialSeed);
+          this.data = initialSeed;
           this.mysqlStatus = 'ready';
-
-          if (Object.keys(missingFlags).length > 0) {
-            await upsertMysqlKvEntries(pool, missingFlags);
-          }
-
-          // Sinkronkan salinan cache lokal dari MySQL (MySQL adalah sumber kebenaran utama)
-          this.persistLocalJsonOnly(this.data);
-
-          console.log(
-            `[Database][MySQL] Berhasil memuat data operasional dari MySQL (users: ${
-              this.data.users.length
-            }, programs: ${this.data.programs.length}, tors: ${
-              this.data.tors.length
-            }, cashAdvances: ${(this.data.cashAdvances || []).length}, participants: ${
-              (this.data.participantDatabase || []).length
-            }).`
-          );
+          console.log('[DB] Initial seed saved successfully to MySQL.');
           return;
-        }
-
-        // Database MySQL benar-benar baru / kosong: lakukan seed awal satu kali saja
-        this.data = normalizeSchema(this.data);
-        await saveDatabaseToMysql(pool, this.data);
-        this.mysqlStatus = 'ready';
-        this.persistLocalJsonOnly(this.data);
-
-        console.log(
-          `[Database][MySQL] Database MySQL masih kosong — seed awal berhasil diinisialisasi satu kali ke MySQL (users: ${this.data.users.length}, programs: ${this.data.programs.length}).`
-        );
-        return;
-      } catch (err: any) {
-        lastError = err;
-        if (attempt < maxAttempts) {
-          console.warn(
-            `[Database][MySQL] Percobaan koneksi/muat ke-${attempt}/${maxAttempts} belum berhasil (${
-              err?.message || err
-            }). Mencoba ulang dalam 1 detik...`
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } catch (err) {
+          lastError = err;
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
         }
       }
-    }
 
-    this.mysqlStatus = 'failed';
-    console.error(
-      '[Database][MySQL] Gagal terhubung atau memuat data dari MySQL setelah seluruh percobaan. Penulisan otomatis ke MySQL ditangguhkan guna mencegah penimpaan data produksi:',
-      lastError?.message || lastError
-    );
+      this.mysqlStatus = 'failed';
+      if (process.env.MYSQL_STRICT_REQUIRED !== 'true') {
+        this.data = this.loadInitialLocalDevData();
+      }
+      console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
+    } finally {
+      this.isInitializing = false;
+    }
   }
 
   private persistToMysql(snapshot: DatabaseSchema) {
@@ -560,14 +575,15 @@ class Database {
       return;
     }
 
+    // Proteksi mutlak: jika pembacaan awal MySQL belum berhasil ('ready'),
+    // JANGAN PERNAH menulis atau menimpa tabel MySQL dengan state memori/lokal.
     if (this.mysqlStatus !== 'ready') {
-      console.error(
-        '[Database][MySQL] Peringatan: Perubahan dibatalkan untuk ditulis ke MySQL karena koneksi/pembacaan awal MySQL belum berstatus ready (proteksi anti-overwrite data produksi).'
-      );
+      if (process.env.MYSQL_STRICT_REQUIRED !== 'true') {
+        this.persistLocalJsonOnly(snapshot);
+      }
       return;
     }
 
-    this.persistLocalJsonOnly(snapshot);
     const clonedSnapshot: DatabaseSchema = JSON.parse(JSON.stringify(snapshot));
 
     this.mysqlWriteChain = this.mysqlWriteChain
@@ -577,7 +593,7 @@ class Database {
         await saveDatabaseToMysql(pool, clonedSnapshot);
       })
       .catch((err) => {
-        console.error('[Database][MySQL] Gagal menyimpan perubahan ke MySQL:', err?.message || err);
+        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(err)}`);
       });
   }
 

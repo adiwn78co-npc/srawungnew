@@ -281,7 +281,10 @@ async function startServer() {
     });
   }
 
-  ensureUserSecurityFieldsInitialized();
+    if (db.isOperational()) {
+      ensureUserSecurityFieldsInitialized();
+      await db.flushWrites();
+    }
 
   // Cryptographic HMAC-SHA256 Session Token (bound to user passwordHash, role, and active status)
   function computeTokenHmac(payloadB64: string, user: User): Buffer {
@@ -371,7 +374,19 @@ async function startServer() {
     '/auth/signup',
   ]);
 
-  app.use('/api', (req: Request, res: Response, next: express.NextFunction) => {
+  app.use('/api', async (req: Request, res: Response, next: express.NextFunction) => {
+    // 0. Database Operational Guard (Prevents serving placeholder/seed state or losing writes if MySQL is unreachable)
+    if (!db.isOperational()) {
+      await db.ready();
+      if (!db.isOperational()) {
+        return res.status(503).json({
+          error: 'Database utama sedang tidak dapat dijangkau. Permintaan ditangguhkan sementara untuk melindungi integritas data.',
+        });
+      }
+      ensureUserSecurityFieldsInitialized();
+      await db.flushWrites();
+    }
+
     // 1. Sliding-Window API Rate Limiting (300 requests / minute per IP)
     const clientIp = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local');
     const nowMs = Date.now();

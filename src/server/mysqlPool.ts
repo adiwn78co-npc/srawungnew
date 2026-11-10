@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import type { DatabaseSchema } from './db.ts';
 
@@ -51,6 +52,7 @@ export async function getMysqlPool(): Promise<MysqlPoolLike | null> {
     user: process.env.MYSQL_USER,
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE,
+    connectTimeout: 5000,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -63,19 +65,34 @@ export async function getMysqlPool(): Promise<MysqlPoolLike | null> {
  * Menjalankan DDL pembuatan tabel MySQL dari database/schema.sql
  */
 export async function ensureMysqlSchema(pool: MysqlPoolLike): Promise<void> {
-  const schemaPath = path.resolve(process.cwd(), 'database', 'schema.sql');
-  if (!fs.existsSync(schemaPath)) {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'database', 'schema.sql'),
+    path.resolve(moduleDir, 'database', 'schema.sql'),
+    path.resolve(moduleDir, '..', '..', 'database', 'schema.sql'),
+  ];
+  const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (!schemaPath) {
     return;
   }
   const sqlContent = fs.readFileSync(schemaPath, 'utf-8');
-  const statements = sqlContent
+  // Hapus baris komentar SQL terlebih dahulu agar statement pertama (CREATE TABLE users)
+  // yang berada tepat di bawah header komentar tidak terlewati oleh filter.
+  const cleanedSql = sqlContent.replace(/^\s*--.*$/gm, '');
+  const statements = cleanedSql
     .split(';')
     .map((s) => s.trim())
-    .filter((s) => s.length > 0 && !s.startsWith('--'));
+    .filter((s) => s.length > 0);
 
   for (const stmt of statements) {
     await pool.query(stmt);
   }
+}
+
+function truncStr(val: any, maxLen: number): string | null {
+  if (val === null || val === undefined || val === '') return null;
+  const s = String(val);
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
 function safeJsonParse<T>(raw: any, fallback: T): T {
@@ -93,7 +110,7 @@ function safeJsonParse<T>(raw: any, fallback: T): T {
  */
 export async function loadDatabaseFromMysql(
   pool: MysqlPoolLike,
-  fallbackSeed: DatabaseSchema
+  _fallbackSeed?: DatabaseSchema
 ): Promise<DatabaseSchema | null> {
   await ensureMysqlSchema(pool);
 
@@ -101,16 +118,24 @@ export async function loadDatabaseFromMysql(
   const hasUsers = Array.isArray(userRows) && userRows.length > 0;
 
   if (!hasUsers) {
-    const [progCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM programs');
-    const [torCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM tors');
-    const [kvCountRows] = await pool.query('SELECT COUNT(*) AS cnt FROM system_kv_store');
-    const totalExistingRecords =
-      Number(progCountRows?.[0]?.cnt || 0) +
-      Number(torCountRows?.[0]?.cnt || 0) +
-      Number(kvCountRows?.[0]?.cnt || 0);
+    const [countRows] = await pool.query(
+      `SELECT (
+        (SELECT COUNT(*) FROM programs) +
+        (SELECT COUNT(*) FROM outcomes) +
+        (SELECT COUNT(*) FROM outputs) +
+        (SELECT COUNT(*) FROM activities) +
+        (SELECT COUNT(*) FROM tors) +
+        (SELECT COUNT(*) FROM cash_advances) +
+        (SELECT COUNT(*) FROM meeting_minutes) +
+        (SELECT COUNT(*) FROM participants) +
+        (SELECT COUNT(*) FROM attendance_records) +
+        (SELECT COUNT(*) FROM system_kv_store)
+      ) AS total_cnt`
+    );
+    const totalExistingRecords = Number(countRows?.[0]?.total_cnt || 0);
 
     if (totalExistingRecords === 0) {
-      return null; // Seluruh tabel utama MySQL benar-benar kosong, aman untuk seed satu kali
+      return null; // Seluruh tabel aplikasi MySQL benar-benar kosong, aman untuk seed satu kali
     }
   }
 
@@ -140,7 +165,7 @@ export async function loadDatabaseFromMysql(
       ? rows.map((r) => safeJsonParse<T>(r.raw_json, r as T))
       : [];
 
-  const attendanceSystem = kvMap['attendanceSystem'] || fallbackSeed.attendanceSystem || {
+  const attendanceSystem = kvMap['attendanceSystem'] || {
     locationConfig: {
       officeName: 'Kantor Pusat Yayasan WIJNA',
       address: 'Kantor WIJNA (-7.342604, 110.489848)',
@@ -161,13 +186,13 @@ export async function loadDatabaseFromMysql(
     auditTrail: [],
   };
 
-  if (Array.isArray(attendanceRows) && attendanceRows.length > 0) {
+  if (Array.isArray(attendanceRows) && (attendanceRows.length > 0 || Boolean(kvMap['attendanceSystem']))) {
     attendanceSystem.records = parseRowList(attendanceRows);
   }
 
   return {
     users: parseRowList(userRows),
-    currentUserId: kvMap['currentUserId'] || fallbackSeed.currentUserId || 'user-director',
+    currentUserId: kvMap['currentUserId'] || 'user-director',
     programs: parseRowList(programRows),
     outcomes: parseRowList(outcomeRows),
     outputs: parseRowList(outputRows),
@@ -284,19 +309,19 @@ export async function saveDatabaseToMysql(
         last_login_at = VALUES(last_login_at),
         raw_json = VALUES(raw_json)`,
       (u) => [
-        u.id,
-        u.username || null,
-        u.name || '',
-        u.email || '',
-        u.passwordHash || null,
-        u.role || 'staff',
-        u.roleTitle || null,
-        u.department || null,
+        String(u.id).slice(0, 128),
+        truncStr(u.username, 128),
+        truncStr(u.name, 255) || '',
+        truncStr(u.email, 255) || '',
+        truncStr(u.passwordHash, 255),
+        truncStr(u.role, 64) || 'staff',
+        truncStr(u.roleTitle, 255),
+        truncStr(u.department, 255),
         u.isActive === false ? 0 : 1,
-        u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'),
+        truncStr(u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'), 64),
         JSON.stringify(u.permissions || {}),
-        u.lastLoginAt || null,
-        u.createdAt || new Date().toISOString(),
+        truncStr(u.lastLoginAt, 64),
+        truncStr(u.createdAt || new Date().toISOString(), 64),
         JSON.stringify(u),
       ]
     );
@@ -322,17 +347,17 @@ export async function saveDatabaseToMysql(
         status = VALUES(status),
         raw_json = VALUES(raw_json)`,
       (p) => [
-        p.id,
-        p.code || null,
-        p.name || '',
+        String(p.id).slice(0, 128),
+        truncStr(p.code, 64),
+        truncStr(p.name, 255) || '',
         p.description || null,
-        p.donor || null,
-        p.startDate || null,
-        p.endDate || null,
+        truncStr(p.donor, 255),
+        truncStr(p.startDate, 32),
+        truncStr(p.endDate, 32),
         Number(p.totalBudget || p.budget || 0),
-        p.currency || 'IDR',
-        p.status || 'Active',
-        p.createdAt || new Date().toISOString(),
+        truncStr(p.currency || 'IDR', 16),
+        truncStr(p.status || 'Active', 64),
+        truncStr(p.createdAt || new Date().toISOString(), 64),
         JSON.stringify(p),
       ]
     );
@@ -471,24 +496,24 @@ export async function saveDatabaseToMysql(
         updated_at = VALUES(updated_at),
         raw_json = VALUES(raw_json)`,
       (t) => [
-        t.id,
-        t.torNumber || null,
-        t.title || '',
-        t.programId || null,
-        t.outcomeId || null,
-        t.outputId || null,
-        t.activityId || null,
-        t.createdByUserId || null,
-        t.createdByName || null,
-        t.status || 'Draft',
+        String(t.id).slice(0, 128),
+        truncStr(t.torNumber, 128),
+        truncStr(t.title, 500) || '',
+        truncStr(t.programId, 128),
+        truncStr(t.outcomeId, 128),
+        truncStr(t.outputId, 128),
+        truncStr(t.activityId, 128),
+        truncStr(t.createdByUserId || t.createdById, 128),
+        truncStr(t.createdByName || t.picName, 255),
+        truncStr(t.status || 'Draft', 128),
         Number(t.currentWorkflowStage || 1),
         t.budgetRequested != null ? Number(t.budgetRequested) : null,
         t.budgetActualSpent != null ? Number(t.budgetActualSpent) : null,
-        t.startDate || null,
-        t.endDate || null,
-        t.location || null,
-        t.createdAt || new Date().toISOString(),
-        t.updatedAt || new Date().toISOString(),
+        truncStr(t.startDate, 32),
+        truncStr(t.endDate, 32),
+        truncStr(t.location, 255),
+        truncStr(t.createdAt || new Date().toISOString(), 64),
+        truncStr(t.updatedAt || new Date().toISOString(), 64),
         JSON.stringify(t),
       ]
     );
@@ -657,14 +682,14 @@ export async function saveDatabaseToMysql(
         details = VALUES(details),
         raw_json = VALUES(raw_json)`,
       (al) => [
-        al.id,
-        al.torId || null,
-        al.userId || null,
-        al.userName || null,
-        al.userRole || null,
-        al.action || '',
+        String(al.id).slice(0, 128),
+        truncStr(al.torId || (al.entityType === 'TOR' ? al.entityId : null), 128),
+        truncStr(al.userId || al.actorId, 128),
+        truncStr(al.userName || al.actorName, 255),
+        truncStr(al.userRole || al.actorRole, 64),
+        truncStr(al.action, 255) || '',
         al.details || null,
-        al.timestamp || new Date().toISOString(),
+        truncStr(al.timestamp || new Date().toISOString(), 64) || new Date().toISOString(),
         JSON.stringify(al),
       ]
     );
