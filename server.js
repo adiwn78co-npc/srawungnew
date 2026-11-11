@@ -111,6 +111,7 @@ function isMysqlConfigured() {
 async function resetMysqlPool() {
   const existing = cachedPool;
   cachedPool = null;
+  tableColumnsCache.clear();
   if (existing) {
     try {
       await existing.end();
@@ -570,499 +571,765 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     cleanResetPrj3581V2: kvMap["cleanResetPrj3581V2"] !== void 0 ? Boolean(kvMap["cleanResetPrj3581V2"]) : void 0
   };
 }
+var tableColumnsCache = /* @__PURE__ */ new Map();
+function safeFiniteNumber(val, fallback = 0) {
+  if (val === null || val === void 0 || val === "") return fallback;
+  if (typeof val === "boolean") return val ? 1 : 0;
+  const num = typeof val === "number" ? val : Number(val);
+  return Number.isFinite(num) ? num : fallback;
+}
+function toMysqlDateTimeString(val) {
+  if (val === null || val === void 0 || val === "") return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    return val.toISOString().slice(0, 19).replace("T", " ");
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s} 00:00:00`;
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 19).replace("T", " ");
+  }
+  return null;
+}
+function toMysqlDateOnlyString(val) {
+  if (val === null || val === void 0 || val === "") return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    return val.toISOString().slice(0, 10);
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
+  }
+  return null;
+}
+function formatValueForMysqlColumn(val, colMeta) {
+  const typeLower = (colMeta.type || "").toLowerCase();
+  const canLeaveNull = colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes("auto_increment");
+  const fallbackForStrictNotNull = () => {
+    if (typeLower.includes("int") || typeLower.includes("decimal") || typeLower.includes("numeric") || typeLower.includes("float") || typeLower.includes("double") || typeLower.includes("bit")) {
+      return 0;
+    }
+    if (typeLower.startsWith("datetime") || typeLower.startsWith("timestamp")) {
+      return (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ");
+    }
+    if (typeLower === "date") {
+      return (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    }
+    if (typeLower.includes("json")) {
+      return "{}";
+    }
+    return "";
+  };
+  if (val === void 0 || val === null) {
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+  if (typeLower.startsWith("datetime") || typeLower.startsWith("timestamp")) {
+    const dt = toMysqlDateTimeString(val);
+    if (dt !== null) return dt;
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+  if (typeLower === "date") {
+    const d = toMysqlDateOnlyString(val);
+    if (d !== null) return d;
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+  if (typeLower.includes("int") || typeLower.includes("decimal") || typeLower.includes("numeric") || typeLower.includes("float") || typeLower.includes("double") || typeLower.includes("bit")) {
+    const num = safeFiniteNumber(val, null);
+    if (num !== null) return num;
+    return canLeaveNull ? null : 0;
+  }
+  if (typeLower.includes("json")) {
+    if (typeof val === "string") {
+      try {
+        JSON.parse(val);
+        return val;
+      } catch {
+        return JSON.stringify(val);
+      }
+    }
+    return JSON.stringify(val);
+  }
+  const strVal = typeof val === "object" ? JSON.stringify(val) : String(val);
+  const lenMatch = typeLower.match(/(?:var)?char\((\d+)\)/);
+  if (lenMatch) {
+    const maxLen = parseInt(lenMatch[1], 10);
+    if (Number.isFinite(maxLen) && maxLen > 0 && strVal.length > maxLen) {
+      return strVal.slice(0, maxLen);
+    }
+  }
+  return strVal;
+}
+async function ensureSingleMissingTableFromSchema(connOrPool, tableName) {
+  const candidatePaths = [
+    path.resolve(process.cwd(), "database", "schema.sql"),
+    path.resolve(__poolDir, "database", "schema.sql"),
+    path.resolve(__poolDir, "..", "..", "database", "schema.sql")
+  ];
+  const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (!schemaPath) return;
+  const sqlContent = fs.readFileSync(schemaPath, "utf-8");
+  const cleanedSql = sqlContent.replace(/^\s*--.*$/gm, "");
+  const statements = cleanedSql.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
+  const targetRegex = new RegExp(
+    `^CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\s+\`?${tableName}\`?\\b`,
+    "i"
+  );
+  for (const stmt of statements) {
+    if (targetRegex.test(stmt)) {
+      await connOrPool.query(stmt);
+      return;
+    }
+  }
+}
+async function describeTableColumns(connOrPool, tableName) {
+  const cached = tableColumnsCache.get(tableName);
+  if (cached && cached.size > 0) {
+    return cached;
+  }
+  let rows;
+  try {
+    const [res] = await connOrPool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+    rows = Array.isArray(res) ? res : [];
+  } catch (err) {
+    if (err?.code === "ER_NO_SUCH_TABLE") {
+      await ensureSingleMissingTableFromSchema(connOrPool, tableName);
+      const [retryRes] = await connOrPool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+      rows = Array.isArray(retryRes) ? retryRes : [];
+    } else {
+      throw err;
+    }
+  }
+  const colMap = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const fieldName = String(r.Field || r.field || "").trim();
+    if (!fieldName) continue;
+    colMap.set(fieldName, {
+      name: fieldName,
+      type: String(r.Type || r.type || "varchar(255)"),
+      nullable: String(r.Null || r.null || "YES").toUpperCase() === "YES",
+      key: String(r.Key || r.key || ""),
+      hasDefault: r.Default !== null && r.Default !== void 0,
+      extra: String(r.Extra || r.extra || "").toLowerCase()
+    });
+  }
+  if (colMap.size > 0) {
+    tableColumnsCache.set(tableName, colMap);
+  }
+  return colMap;
+}
+async function checkMysqlWritePrivileges(pool) {
+  try {
+    const [rows] = await pool.query("SHOW GRANTS FOR CURRENT_USER()");
+    const grantLines = Array.isArray(rows) ? rows.map((r) => String(Object.values(r || {})[0] || "").toUpperCase()) : [];
+    let canSelect = false;
+    let canInsert = false;
+    let canUpdate = false;
+    let canDelete = false;
+    for (const line of grantLines) {
+      const match = line.match(/^GRANT\s+(.+?)\s+ON\s+/i);
+      const privPart = match ? match[1] : line;
+      if (privPart.includes("ALL PRIVILEGES") || /\bALL\b/.test(privPart)) {
+        canSelect = true;
+        canInsert = true;
+        canUpdate = true;
+        canDelete = true;
+      } else {
+        if (/\bSELECT\b/.test(privPart)) canSelect = true;
+        if (/\bINSERT\b/.test(privPart)) canInsert = true;
+        if (/\bUPDATE\b/.test(privPart)) canUpdate = true;
+        if (/\bDELETE\b/.test(privPart)) canDelete = true;
+      }
+    }
+    const summaryText = `SELECT=${canSelect}, INSERT=${canInsert}, UPDATE=${canUpdate}, DELETE=${canDelete}`;
+    if (!canInsert || !canUpdate) {
+      console.warn(
+        `[DB] WARNING: MySQL database user may lack write privileges (${summaryText}). Ensure INSERT and UPDATE privileges are granted in Hostinger MySQL Databases.`
+      );
+    } else {
+      console.log(`[DB] MySQL privilege verification OK (${summaryText}).`);
+    }
+    return {
+      checked: true,
+      canSelect,
+      canInsert,
+      canUpdate,
+      canDelete,
+      rawSummary: summaryText
+    };
+  } catch {
+    return {
+      checked: false,
+      canSelect: true,
+      canInsert: true,
+      canUpdate: true,
+      canDelete: true,
+      rawSummary: "Privilege inspection skipped (SHOW GRANTS restricted by host)"
+    };
+  }
+}
+async function executeAdaptiveUpsert(connOrPool, tableName, candidateRow, options) {
+  const colMetaMap = await describeTableColumns(connOrPool, tableName);
+  const pkCol = options?.primaryKeyColumn || "id";
+  const immutableSet = /* @__PURE__ */ new Set([
+    pkCol,
+    ...options?.immutableOnUpdateColumns || ["created_at"]
+  ]);
+  const preserveNonEmptySet = new Set(options?.preserveNonEmptyColumns || []);
+  const coalesceIfNullSet = new Set(options?.coalesceIfNullColumns || []);
+  const selectedCols = [];
+  const params = [];
+  for (const [colName, colMeta] of colMetaMap.entries()) {
+    if (colMeta.extra.includes("auto_increment") && candidateRow[colName] === void 0) {
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(candidateRow, colName)) {
+      selectedCols.push(colName);
+      params.push(formatValueForMysqlColumn(candidateRow[colName], colMeta));
+    } else if (!colMeta.nullable && !colMeta.hasDefault && !colMeta.extra.includes("auto_increment")) {
+      selectedCols.push(colName);
+      params.push(formatValueForMysqlColumn(null, colMeta));
+    }
+  }
+  if (selectedCols.length === 0) {
+    throw new Error(`No matching columns found for MySQL table '${tableName}'.`);
+  }
+  const quotedCols = selectedCols.map((c) => `\`${c}\``).join(", ");
+  const placeholders = selectedCols.map(() => "?").join(", ");
+  const updateAssignments = [];
+  for (const colName of selectedCols) {
+    if (immutableSet.has(colName)) continue;
+    if (preserveNonEmptySet.has(colName)) {
+      updateAssignments.push(
+        `\`${colName}\` = COALESCE(NULLIF(VALUES(\`${colName}\`), ''), \`${tableName}\`.\`${colName}\`)`
+      );
+    } else if (coalesceIfNullSet.has(colName)) {
+      updateAssignments.push(
+        `\`${colName}\` = COALESCE(VALUES(\`${colName}\`), \`${tableName}\`.\`${colName}\`)`
+      );
+    } else {
+      updateAssignments.push(`\`${colName}\` = VALUES(\`${colName}\`)`);
+    }
+  }
+  if (updateAssignments.length === 0) {
+    updateAssignments.push(`\`${pkCol}\` = \`${tableName}\`.\`${pkCol}\``);
+  }
+  const sql = `INSERT INTO \`${tableName}\` (${quotedCols}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateAssignments.join(", ")}`;
+  const [result] = await connOrPool.query(sql, params);
+  return Number(result?.affectedRows || 0);
+}
+function buildUserCandidateRow(u, nowIso) {
+  const effectiveHash = typeof u.passwordHash === "string" && u.passwordHash.trim() || typeof u.password_hash === "string" && u.password_hash.trim() || null;
+  const effectiveUsername = u.username || deriveUsernameFallback(u.email || "", u.name || "", String(u.id || ""));
+  const permsJson = JSON.stringify(u.permissions || {});
+  return {
+    id: String(u.id).slice(0, 128),
+    username: truncStr(effectiveUsername, 128),
+    name: truncStr(u.name, 255) || "",
+    email: truncStr(u.email, 255) || "",
+    password_hash: truncStr(effectiveHash, 255),
+    password: truncStr(effectiveHash, 255),
+    role: truncStr(u.role, 64) || "staff",
+    role_title: truncStr(u.roleTitle, 255) || truncStr(u.role, 64) || "Staff",
+    department: truncStr(u.department, 255),
+    is_active: u.isActive === false ? 0 : 1,
+    account_status: truncStr(u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"), 64),
+    must_change_password: u.mustChangePassword ? 1 : 0,
+    password_updated_at: u.passwordUpdatedAt || null,
+    permissions_json: permsJson,
+    permissions: permsJson,
+    last_login_at: u.lastLoginAt || null,
+    created_at: u.createdAt || nowIso,
+    updated_at: nowIso,
+    raw_json: JSON.stringify(u)
+  };
+}
+function buildProgramCandidateRow(p, nowIso) {
+  return {
+    id: String(p.id).slice(0, 128),
+    code: truncStr(p.code, 64),
+    name: truncStr(p.name, 255) || "",
+    location: truncStr(p.location, 255),
+    description: p.description || null,
+    donor: truncStr(p.donor, 255),
+    start_date: truncStr(p.startDate, 32),
+    end_date: truncStr(p.endDate, 32),
+    total_budget: safeFiniteNumber(p.totalBudget ?? p.budget, 0),
+    currency: truncStr(p.currency || "IDR", 16),
+    status: truncStr(p.status || "Aktif", 64),
+    created_at: p.createdAt || nowIso,
+    updated_at: p.updatedAt || nowIso,
+    raw_json: JSON.stringify(p)
+  };
+}
+function buildOutcomeCandidateRow(oc) {
+  return {
+    id: String(oc.id).slice(0, 128),
+    program_id: truncStr(oc.programId, 128) || "",
+    code: truncStr(oc.code, 64),
+    name: truncStr(oc.name || oc.title, 500) || "",
+    description: oc.description || null,
+    budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
+    raw_json: JSON.stringify(oc)
+  };
+}
+function buildOutputCandidateRow(op) {
+  return {
+    id: String(op.id).slice(0, 128),
+    program_id: truncStr(op.programId, 128),
+    outcome_id: truncStr(op.outcomeId, 128) || "",
+    code: truncStr(op.code, 64),
+    name: truncStr(op.name || op.title, 500) || "",
+    description: op.description || null,
+    budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
+    raw_json: JSON.stringify(op)
+  };
+}
+function buildActivityCandidateRow(ac) {
+  return {
+    id: String(ac.id).slice(0, 128),
+    program_id: truncStr(ac.programId, 128),
+    outcome_id: truncStr(ac.outcomeId, 128),
+    output_id: truncStr(ac.outputId, 128) || "",
+    code: truncStr(ac.code, 64),
+    name: truncStr(ac.name || ac.title, 500) || "",
+    description: ac.description || null,
+    budget_allocated: safeFiniteNumber(ac.budgetAllocated ?? ac.budget, 0),
+    raw_json: JSON.stringify(ac)
+  };
+}
+function buildSubActivityCandidateRow(sa) {
+  return {
+    id: String(sa.id).slice(0, 128),
+    activity_id: truncStr(sa.activityId, 128) || "",
+    code: truncStr(sa.code, 64),
+    name: truncStr(sa.name, 500) || "",
+    description: sa.description || null,
+    budget_allocated: safeFiniteNumber(sa.budgetAllocated ?? sa.budget, 0),
+    raw_json: JSON.stringify(sa)
+  };
+}
+function buildTorCandidateRow(t, nowIso) {
+  return {
+    id: String(t.id).slice(0, 128),
+    tor_number: truncStr(t.torNumber || t.documentNumber, 128),
+    title: truncStr(t.title, 500) || "",
+    program_id: truncStr(t.programId, 128),
+    outcome_id: truncStr(t.outcomeId, 128),
+    output_id: truncStr(t.outputId, 128),
+    activity_id: truncStr(t.activityId, 128),
+    created_by_user_id: truncStr(t.createdByUserId || t.createdById || t.picId, 128),
+    created_by_name: truncStr(t.createdByName || t.picName, 255),
+    status: truncStr(t.submissionStatus || t.status || "Draft", 128),
+    current_stage: safeFiniteNumber(t.currentWorkflowStage ?? t.currentStage, 1),
+    budget_requested: safeFiniteNumber(t.budgetRequested, null),
+    budget_actual_spent: safeFiniteNumber(t.budgetActualSpent, null),
+    start_date: truncStr(t.startDate, 32),
+    end_date: truncStr(t.endDate, 32),
+    location: truncStr(t.location, 255),
+    created_at: t.createdAt || nowIso,
+    updated_at: t.updatedAt || nowIso,
+    raw_json: JSON.stringify(t)
+  };
+}
+function buildApprovalRecordCandidateRow(ar, nowIso) {
+  return {
+    id: String(ar.id).slice(0, 128),
+    tor_id: truncStr(ar.torId, 128) || "",
+    // Mendukung stage bertipe INT maupun VARCHAR tanpa pernah menghasilkan NaN
+    stage: ar.stage ?? null,
+    approver_user_id: truncStr(ar.approverUserId || ar.approverId || ar.reviewerId, 128),
+    approver_name: truncStr(ar.approverName || ar.reviewerName, 255),
+    role: truncStr(ar.role || ar.reviewerRole, 128),
+    action: truncStr(ar.action || ar.decision, 128),
+    notes: ar.notes ?? ar.comment ?? null,
+    timestamp: ar.timestamp || nowIso,
+    raw_json: JSON.stringify(ar)
+  };
+}
+function buildCashAdvanceCandidateRow(ca, nowIso) {
+  return {
+    id: String(ca.id).slice(0, 128),
+    ca_number: truncStr(ca.caNumber || ca.documentNumber, 128),
+    tor_id: truncStr(ca.torId, 128),
+    program_id: truncStr(ca.programId, 128),
+    activity_id: truncStr(ca.activityId, 128),
+    requester_user_id: truncStr(ca.requesterUserId || ca.requesterId || ca.submittedByUserId, 128),
+    requester_name: truncStr(ca.requesterName || ca.submittedByName, 255),
+    total_amount: safeFiniteNumber(ca.totalAmount ?? ca.requestedAmount, 0),
+    realized_amount: safeFiniteNumber(ca.realizedAmount ?? ca.actualSpentAmount, null),
+    status: truncStr(ca.status || "Draft", 128),
+    report_approval_status: truncStr(ca.reportApprovalStatus, 128),
+    created_at: ca.createdAt || nowIso,
+    updated_at: ca.updatedAt || nowIso,
+    raw_json: JSON.stringify(ca)
+  };
+}
+function buildMeetingMinuteCandidateRow(mm, nowIso) {
+  return {
+    id: String(mm.id).slice(0, 128),
+    tor_id: truncStr(mm.torId, 128),
+    activity_id: truncStr(mm.activityId, 128),
+    title: truncStr(mm.title || mm.agenda, 500),
+    meeting_date: truncStr(mm.meetingDate || mm.date, 32),
+    location: truncStr(mm.location, 255),
+    created_by_user_id: truncStr(mm.createdByUserId || mm.createdById, 128),
+    status: truncStr(mm.status, 64),
+    created_at: mm.createdAt || nowIso,
+    raw_json: JSON.stringify(mm)
+  };
+}
+function buildParticipantCandidateRow(pt, nowIso) {
+  return {
+    id: String(pt.id).slice(0, 128),
+    participant_type: truncStr(pt.entityType || pt.participantType || "INDIVIDUAL", 64),
+    name: truncStr(pt.fullName || pt.groupName || pt.name, 255) || "",
+    gender: truncStr(pt.gender, 32),
+    organization_or_group: truncStr(pt.institutionName || pt.groupName, 255),
+    phone: truncStr(pt.phoneNumber || pt.contactPhone, 64),
+    village_or_city: truncStr(pt.cityOrRegency || pt.villageOrSubdistrict, 255),
+    created_at: pt.createdAt || nowIso,
+    raw_json: JSON.stringify(pt)
+  };
+}
+function buildAttendanceRecordCandidateRow(att, nowIso) {
+  return {
+    id: String(att.id).slice(0, 128),
+    record_date: truncStr(att.date, 32) || "",
+    user_id: truncStr(att.userId, 128) || "",
+    user_name: truncStr(att.userName, 255),
+    record_type: truncStr(att.recordType || "ATTENDANCE", 64),
+    clock_in_time: truncStr(att.clockInTime, 64),
+    clock_out_time: truncStr(att.clockOutTime, 64),
+    total_work_hours: safeFiniteNumber(att.totalWorkHours, 0),
+    is_outside_work_location: att.isOutsideWorkLocation ? 1 : 0,
+    created_at: att.createdAt || nowIso,
+    updated_at: att.updatedAt || nowIso,
+    raw_json: JSON.stringify(att)
+  };
+}
+function buildAuditLogCandidateRow(al, nowIso) {
+  return {
+    id: String(al.id).slice(0, 128),
+    tor_id: truncStr(al.torId || (al.entityType === "TOR" ? al.entityId : null), 128),
+    user_id: truncStr(al.userId || al.actorId, 128),
+    user_name: truncStr(al.userName || al.actorName, 255),
+    user_role: truncStr(al.userRole || al.actorRole, 64),
+    action: truncStr(al.action, 255) || "",
+    details: al.details || null,
+    timestamp: al.timestamp || nowIso,
+    raw_json: JSON.stringify(al)
+  };
+}
+function extractKvSnapshot(data) {
+  const kvEntries = {
+    currentUserId: data.currentUserId,
+    cashAdvanceSummaries: data.cashAdvanceSummaries || {},
+    cashAdvanceAuditLogs: data.cashAdvanceAuditLogs || {},
+    activityDocumentations: data.activityDocumentations || {},
+    activityDocumentationList: data.activityDocumentationList || [],
+    outputRaciRecords: data.outputRaciRecords || {},
+    activityMonitoringRecords: data.activityMonitoringRecords || {},
+    monitoringReports: data.monitoringReports || {},
+    approvalHubItems: data.approvalHubItems || {},
+    approvalWorkflowConfigs: data.approvalWorkflowConfigs || {},
+    approvalNotifications: data.approvalNotifications || [],
+    programBudgets: data.programBudgets || {},
+    attendanceSystem: data.attendanceSystem || {},
+    cleanResetPrj3581V1: data.cleanResetPrj3581V1 ?? true,
+    cleanResetPrj3581V2: data.cleanResetPrj3581V2 ?? true
+  };
+  if (data.organizationSettings !== void 0) {
+    kvEntries.organizationSettings = data.organizationSettings;
+  }
+  return kvEntries;
+}
 async function upsertMysqlKvEntries(pool, entries) {
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   for (const [k, v] of Object.entries(entries)) {
     if (v === void 0) continue;
-    await pool.query(
-      `INSERT INTO system_kv_store (store_key, store_value, updated_at)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         store_value = VALUES(store_value),
-         updated_at = VALUES(updated_at)`,
-      [k, JSON.stringify(v), nowIso]
+    await executeAdaptiveUpsert(
+      pool,
+      "system_kv_store",
+      {
+        store_key: String(k).slice(0, 128),
+        store_value: JSON.stringify(v),
+        updated_at: nowIso
+      },
+      {
+        primaryKeyColumn: "store_key",
+        immutableOnUpdateColumns: []
+      }
     );
   }
 }
 async function upsertMysqlUserRow(pool, u) {
-  if (!u || !u.id) return;
-  await pool.query(
-    `INSERT INTO users (
-      id, username, name, email, password_hash, role, role_title, department,
-      is_active, account_status, permissions_json, last_login_at, created_at, raw_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      username = VALUES(username),
-      name = VALUES(name),
-      email = VALUES(email),
-      password_hash = COALESCE(NULLIF(VALUES(password_hash), ''), users.password_hash),
-      role = VALUES(role),
-      role_title = VALUES(role_title),
-      department = VALUES(department),
-      is_active = VALUES(is_active),
-      account_status = VALUES(account_status),
-      permissions_json = VALUES(permissions_json),
-      last_login_at = VALUES(last_login_at),
-      raw_json = VALUES(raw_json)`,
-    [
-      String(u.id).slice(0, 128),
-      truncStr(u.username, 128),
-      truncStr(u.name, 255) || "",
-      truncStr(u.email, 255) || "",
-      truncStr(u.passwordHash, 255),
-      truncStr(u.role, 64) || "staff",
-      truncStr(u.roleTitle, 255),
-      truncStr(u.department, 255),
-      u.isActive === false ? 0 : 1,
-      truncStr(u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"), 64),
-      JSON.stringify(u.permissions || {}),
-      truncStr(u.lastLoginAt, 64),
-      truncStr(u.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
-      JSON.stringify(u)
-    ]
-  );
+  if (!u || !u.id) return 0;
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  return executeAdaptiveUpsert(pool, "users", buildUserCandidateRow(u, nowIso), {
+    primaryKeyColumn: "id",
+    immutableOnUpdateColumns: ["created_at"],
+    preserveNonEmptyColumns: ["password_hash", "password"],
+    coalesceIfNullColumns: ["last_login_at"]
+  });
 }
 async function deleteMysqlUserRow(pool, userId) {
-  if (!userId) return;
-  await pool.query("DELETE FROM users WHERE id = ?", [String(userId).slice(0, 128)]);
+  if (!userId) return 0;
+  const [result] = await pool.query("DELETE FROM `users` WHERE `id` = ?", [
+    String(userId).slice(0, 128)
+  ]);
+  return Number(result?.affectedRows || 0);
 }
-async function syncTableById(conn, tableName, rows, insertSql, mapRowParams, options) {
-  const safeRows = Array.isArray(rows) ? rows.filter((r) => r && r.id) : [];
-  const currentIds = safeRows.map((r) => String(r.id));
-  const allowDelete = options?.allowDeleteMissing !== false;
-  if (currentIds.length === 0) {
-    if (allowDelete && tableName !== "users") {
-      await conn.query(`DELETE FROM ${tableName}`);
+var ENTITY_TABLE_SPECS = [
+  {
+    tableName: "users",
+    getRows: (d) => d.users || [],
+    buildCandidate: buildUserCandidateRow,
+    allowTargetedDelete: false,
+    // Penghapusan user hanya boleh melalui deleteMysqlUserRow eksplisit
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: ["created_at"],
+      preserveNonEmptyColumns: ["password_hash", "password"],
+      coalesceIfNullColumns: ["last_login_at"]
     }
-    return;
+  },
+  {
+    tableName: "programs",
+    getRows: (d) => d.programs || [],
+    buildCandidate: buildProgramCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "outcomes",
+    getRows: (d) => d.outcomes || [],
+    buildCandidate: (oc) => buildOutcomeCandidateRow(oc),
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "outputs",
+    getRows: (d) => d.outputs || [],
+    buildCandidate: (op) => buildOutputCandidateRow(op),
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "activities",
+    getRows: (d) => d.activities || [],
+    buildCandidate: (ac) => buildActivityCandidateRow(ac),
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "sub_activities",
+    getRows: (d) => d.subActivities || [],
+    buildCandidate: (sa) => buildSubActivityCandidateRow(sa),
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "tors",
+    getRows: (d) => d.tors || [],
+    buildCandidate: buildTorCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "approval_records",
+    getRows: (d) => d.approvalRecords || [],
+    buildCandidate: buildApprovalRecordCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "cash_advances",
+    getRows: (d) => d.cashAdvances || [],
+    buildCandidate: buildCashAdvanceCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "meeting_minutes",
+    getRows: (d) => d.meetingMinutes || [],
+    buildCandidate: buildMeetingMinuteCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "participants",
+    getRows: (d) => d.participantDatabase || [],
+    buildCandidate: buildParticipantCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "attendance_records",
+    getRows: (d) => d.attendanceSystem?.records || [],
+    buildCandidate: buildAttendanceRecordCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "audit_logs",
+    getRows: (d) => d.auditLogs || [],
+    buildCandidate: buildAuditLogCandidateRow,
+    allowTargetedDelete: false
   }
-  if (allowDelete && tableName !== "users") {
-    const placeholders = currentIds.map(() => "?").join(", ");
-    await conn.query(
-      `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
-      currentIds
+];
+async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write") {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const plannedOps = [];
+  for (const spec of ENTITY_TABLE_SPECS) {
+    const prevRows = (spec.getRows(prevData) || []).filter((r) => r && r.id);
+    const nextRows = (spec.getRows(nextData) || []).filter((r) => r && r.id);
+    const prevSerializedById = /* @__PURE__ */ new Map();
+    for (const r of prevRows) {
+      prevSerializedById.set(String(r.id), JSON.stringify(r));
+    }
+    const nextIds = /* @__PURE__ */ new Set();
+    const toUpsert = [];
+    for (const r of nextRows) {
+      const id = String(r.id);
+      nextIds.add(id);
+      const serialized = JSON.stringify(r);
+      if (prevSerializedById.get(id) !== serialized) {
+        toUpsert.push(r);
+      }
+    }
+    const toDeleteIds = [];
+    if (spec.allowTargetedDelete) {
+      for (const prevId of prevSerializedById.keys()) {
+        if (!nextIds.has(prevId)) {
+          toDeleteIds.push(prevId);
+        }
+      }
+    }
+    if (toUpsert.length > 0 || toDeleteIds.length > 0) {
+      plannedOps.push({ spec, toUpsert, toDeleteIds });
+    }
+  }
+  const prevKv = extractKvSnapshot(prevData);
+  const nextKv = extractKvSnapshot(nextData);
+  const changedKvEntries = [];
+  for (const [k, v] of Object.entries(nextKv)) {
+    if (v === void 0) continue;
+    const nextSerialized = JSON.stringify(v);
+    const prevSerialized = prevKv[k] !== void 0 ? JSON.stringify(prevKv[k]) : void 0;
+    if (nextSerialized !== prevSerialized) {
+      changedKvEntries.push([k, nextSerialized]);
+    }
+  }
+  if (plannedOps.length === 0 && changedKvEntries.length === 0) {
+    return {
+      upsertedRows: 0,
+      deletedRows: 0,
+      updatedKvKeys: 0,
+      totalAffectedRows: 0,
+      touchedTables: []
+    };
+  }
+  const touchedTables = [
+    ...plannedOps.map((p) => p.spec.tableName),
+    ...changedKvEntries.length > 0 ? ["system_kv_store"] : []
+  ];
+  console.log(
+    `[WRITE] DATABASE QUERY STARTED (${contextLabel}) -> tables=[${touchedTables.join(", ")}]`
+  );
+  const conn = await pool.getConnection();
+  let totalAffectedRows = 0;
+  let upsertedRows = 0;
+  let deletedRows = 0;
+  try {
+    await conn.beginTransaction();
+    for (const op of plannedOps) {
+      for (const delId of op.toDeleteIds) {
+        const [delRes] = await conn.query(
+          `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
+          [delId.slice(0, 128)]
+        );
+        deletedRows += 1;
+        totalAffectedRows += Number(delRes?.affectedRows || 0);
+      }
+      for (const item of op.toUpsert) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          op.spec.tableName,
+          op.spec.buildCandidate(item, nowIso),
+          op.spec.upsertOptions
+        );
+        upsertedRows += 1;
+        totalAffectedRows += affected;
+      }
+    }
+    for (const [kvKey, kvJson] of changedKvEntries) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        "system_kv_store",
+        {
+          store_key: kvKey.slice(0, 128),
+          store_value: kvJson,
+          updated_at: nowIso
+        },
+        {
+          primaryKeyColumn: "store_key",
+          immutableOnUpdateColumns: []
+        }
+      );
+      totalAffectedRows += affected;
+    }
+    await conn.commit();
+    console.log(
+      `[WRITE] DATABASE QUERY SUCCESS (${contextLabel}) -> upserted=${upsertedRows}, deleted=${deletedRows}, kvUpdated=${changedKvEntries.length}, affectedRows=${totalAffectedRows}`
     );
-  }
-  for (const item of safeRows) {
-    await conn.query(insertSql, mapRowParams(item));
+    return {
+      upsertedRows,
+      deletedRows,
+      updatedKvKeys: changedKvEntries.length,
+      totalAffectedRows,
+      touchedTables
+    };
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch {
+    }
+    const safeCode = err?.code ? ` [${err.code}]` : "";
+    const safeMsg = String(err?.message || err || "Unknown SQL error").replace(/mysql2?:\/\/[^\s@]+@/gi, "mysql://***@").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
+    console.error(`[WRITE] DATABASE QUERY FAILED (${contextLabel})${safeCode}: ${safeMsg}`);
+    throw err;
+  } finally {
+    conn.release();
   }
 }
 async function saveDatabaseToMysql(pool, data) {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    await syncTableById(
-      conn,
-      "users",
-      data.users || [],
-      `INSERT INTO users (
-        id, username, name, email, password_hash, role, role_title, department,
-        is_active, account_status, permissions_json, last_login_at, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        username = VALUES(username),
-        name = VALUES(name),
-        email = VALUES(email),
-        password_hash = COALESCE(NULLIF(users.password_hash, ''), VALUES(password_hash)),
-        role = VALUES(role),
-        role_title = VALUES(role_title),
-        department = VALUES(department),
-        is_active = VALUES(is_active),
-        account_status = VALUES(account_status),
-        permissions_json = VALUES(permissions_json),
-        last_login_at = COALESCE(VALUES(last_login_at), users.last_login_at),
-        raw_json = VALUES(raw_json)`,
-      (u) => [
-        String(u.id).slice(0, 128),
-        truncStr(u.username, 128),
-        truncStr(u.name, 255) || "",
-        truncStr(u.email, 255) || "",
-        truncStr(u.passwordHash, 255),
-        truncStr(u.role, 64) || "staff",
-        truncStr(u.roleTitle, 255),
-        truncStr(u.department, 255),
-        u.isActive === false ? 0 : 1,
-        truncStr(u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"), 64),
-        JSON.stringify(u.permissions || {}),
-        truncStr(u.lastLoginAt, 64),
-        truncStr(u.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
-        JSON.stringify(u)
-      ],
-      { allowDeleteMissing: false }
-    );
-    await syncTableById(
-      conn,
-      "programs",
-      data.programs || [],
-      `INSERT INTO programs (
-        id, code, name, description, donor, start_date, end_date,
-        total_budget, currency, status, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        code = VALUES(code),
-        name = VALUES(name),
-        description = VALUES(description),
-        donor = VALUES(donor),
-        start_date = VALUES(start_date),
-        end_date = VALUES(end_date),
-        total_budget = VALUES(total_budget),
-        currency = VALUES(currency),
-        status = VALUES(status),
-        raw_json = VALUES(raw_json)`,
-      (p) => [
-        String(p.id).slice(0, 128),
-        truncStr(p.code, 64),
-        truncStr(p.name, 255) || "",
-        p.description || null,
-        truncStr(p.donor, 255),
-        truncStr(p.startDate, 32),
-        truncStr(p.endDate, 32),
-        Number(p.totalBudget || p.budget || 0),
-        truncStr(p.currency || "IDR", 16),
-        truncStr(p.status || "Active", 64),
-        truncStr(p.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
-        JSON.stringify(p)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "outcomes",
-      data.outcomes || [],
-      `INSERT INTO outcomes (id, program_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (oc) => [
-        oc.id,
-        oc.programId || "",
-        oc.code || null,
-        oc.name || oc.title || "",
-        oc.description || null,
-        Number(oc.budgetAllocated || oc.budget || 0),
-        JSON.stringify(oc)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "outputs",
-      data.outputs || [],
-      `INSERT INTO outputs (id, program_id, outcome_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         outcome_id = VALUES(outcome_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (op) => [
-        op.id,
-        op.programId || null,
-        op.outcomeId || "",
-        op.code || null,
-        op.name || op.title || "",
-        op.description || null,
-        Number(op.budgetAllocated || op.budget || 0),
-        JSON.stringify(op)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "activities",
-      data.activities || [],
-      `INSERT INTO activities (id, program_id, outcome_id, output_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         outcome_id = VALUES(outcome_id),
-         output_id = VALUES(output_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (ac) => [
-        ac.id,
-        ac.programId || null,
-        ac.outcomeId || null,
-        ac.outputId || "",
-        ac.code || null,
-        ac.name || ac.title || "",
-        ac.description || null,
-        Number(ac.budgetAllocated || ac.budget || 0),
-        JSON.stringify(ac)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "sub_activities",
-      data.subActivities || [],
-      `INSERT INTO sub_activities (id, activity_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         activity_id = VALUES(activity_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (sa) => [
-        sa.id,
-        sa.activityId || "",
-        sa.code || null,
-        sa.name || "",
-        sa.description || null,
-        Number(sa.budgetAllocated || sa.budget || 0),
-        JSON.stringify(sa)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "tors",
-      data.tors || [],
-      `INSERT INTO tors (
-        id, tor_number, title, program_id, outcome_id, output_id, activity_id,
-        created_by_user_id, created_by_name, status, current_stage,
-        budget_requested, budget_actual_spent, start_date, end_date, location,
-        created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        tor_number = VALUES(tor_number),
-        title = VALUES(title),
-        program_id = VALUES(program_id),
-        outcome_id = VALUES(outcome_id),
-        output_id = VALUES(output_id),
-        activity_id = VALUES(activity_id),
-        status = VALUES(status),
-        current_stage = VALUES(current_stage),
-        budget_requested = VALUES(budget_requested),
-        budget_actual_spent = VALUES(budget_actual_spent),
-        start_date = VALUES(start_date),
-        end_date = VALUES(end_date),
-        location = VALUES(location),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (t) => [
-        String(t.id).slice(0, 128),
-        truncStr(t.torNumber, 128),
-        truncStr(t.title, 500) || "",
-        truncStr(t.programId, 128),
-        truncStr(t.outcomeId, 128),
-        truncStr(t.outputId, 128),
-        truncStr(t.activityId, 128),
-        truncStr(t.createdByUserId || t.createdById, 128),
-        truncStr(t.createdByName || t.picName, 255),
-        truncStr(t.status || "Draft", 128),
-        Number(t.currentWorkflowStage || 1),
-        t.budgetRequested != null ? Number(t.budgetRequested) : null,
-        t.budgetActualSpent != null ? Number(t.budgetActualSpent) : null,
-        truncStr(t.startDate, 32),
-        truncStr(t.endDate, 32),
-        truncStr(t.location, 255),
-        truncStr(t.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
-        truncStr(t.updatedAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
-        JSON.stringify(t)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "approval_records",
-      data.approvalRecords || [],
-      `INSERT INTO approval_records (
-        id, tor_id, stage, approver_user_id, approver_name, role, action, notes, timestamp, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        action = VALUES(action),
-        notes = VALUES(notes),
-        timestamp = VALUES(timestamp),
-        raw_json = VALUES(raw_json)`,
-      (ar) => [
-        ar.id,
-        ar.torId || "",
-        ar.stage != null ? Number(ar.stage) : null,
-        ar.approverUserId || null,
-        ar.approverName || null,
-        ar.role || null,
-        ar.action || null,
-        ar.notes || null,
-        ar.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(ar)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "cash_advances",
-      data.cashAdvances || [],
-      `INSERT INTO cash_advances (
-        id, ca_number, tor_id, program_id, activity_id, requester_user_id, requester_name,
-        total_amount, realized_amount, status, report_approval_status, created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        ca_number = VALUES(ca_number),
-        total_amount = VALUES(total_amount),
-        realized_amount = VALUES(realized_amount),
-        status = VALUES(status),
-        report_approval_status = VALUES(report_approval_status),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (ca) => [
-        ca.id,
-        ca.caNumber || ca.documentNumber || null,
-        ca.torId || null,
-        ca.programId || null,
-        ca.activityId || null,
-        ca.requesterUserId || ca.submittedByUserId || null,
-        ca.requesterName || ca.submittedByName || null,
-        Number(ca.totalAmount || 0),
-        ca.realizedAmount != null ? Number(ca.realizedAmount) : null,
-        ca.status || "Draft",
-        ca.reportApprovalStatus || null,
-        ca.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-        ca.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(ca)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "meeting_minutes",
-      data.meetingMinutes || [],
-      `INSERT INTO meeting_minutes (
-        id, tor_id, activity_id, title, meeting_date, location, created_by_user_id, status, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        title = VALUES(title),
-        meeting_date = VALUES(meeting_date),
-        location = VALUES(location),
-        status = VALUES(status),
-        raw_json = VALUES(raw_json)`,
-      (mm) => [
-        mm.id,
-        mm.torId || null,
-        mm.activityId || null,
-        mm.title || mm.agenda || null,
-        mm.meetingDate || mm.date || null,
-        mm.location || null,
-        mm.createdByUserId || null,
-        mm.status || null,
-        mm.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(mm)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "participants",
-      data.participantDatabase || [],
-      `INSERT INTO participants (
-        id, participant_type, name, gender, organization_or_group, phone, village_or_city, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        participant_type = VALUES(participant_type),
-        name = VALUES(name),
-        gender = VALUES(gender),
-        organization_or_group = VALUES(organization_or_group),
-        phone = VALUES(phone),
-        village_or_city = VALUES(village_or_city),
-        raw_json = VALUES(raw_json)`,
-      (pt) => [
-        pt.id,
-        pt.entityType || pt.participantType || "INDIVIDUAL",
-        pt.fullName || pt.groupName || pt.name || "",
-        pt.gender || null,
-        pt.institutionName || pt.groupName || null,
-        pt.phoneNumber || pt.contactPhone || null,
-        pt.cityOrRegency || pt.villageOrSubdistrict || null,
-        pt.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(pt)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "attendance_records",
-      data.attendanceSystem?.records || [],
-      `INSERT INTO attendance_records (
-        id, record_date, user_id, user_name, record_type, clock_in_time, clock_out_time,
-        total_work_hours, is_outside_work_location, created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        clock_in_time = VALUES(clock_in_time),
-        clock_out_time = VALUES(clock_out_time),
-        total_work_hours = VALUES(total_work_hours),
-        is_outside_work_location = VALUES(is_outside_work_location),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (att) => [
-        att.id,
-        att.date || "",
-        att.userId || "",
-        att.userName || null,
-        att.recordType || "ATTENDANCE",
-        att.clockInTime || null,
-        att.clockOutTime || null,
-        Number(att.totalWorkHours || 0),
-        att.isOutsideWorkLocation ? 1 : 0,
-        att.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-        att.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(att)
-      ]
-    );
-    await syncTableById(
-      conn,
-      "audit_logs",
-      data.auditLogs || [],
-      `INSERT INTO audit_logs (
-        id, tor_id, user_id, user_name, user_role, action, details, timestamp, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        action = VALUES(action),
-        details = VALUES(details),
-        raw_json = VALUES(raw_json)`,
-      (al) => [
-        String(al.id).slice(0, 128),
-        truncStr(al.torId || (al.entityType === "TOR" ? al.entityId : null), 128),
-        truncStr(al.userId || al.actorId, 128),
-        truncStr(al.userName || al.actorName, 255),
-        truncStr(al.userRole || al.actorRole, 64),
-        truncStr(al.action, 255) || "",
-        al.details || null,
-        truncStr(al.timestamp || (/* @__PURE__ */ new Date()).toISOString(), 64) || (/* @__PURE__ */ new Date()).toISOString(),
-        JSON.stringify(al)
-      ]
-    );
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const kvEntries = {
-      currentUserId: data.currentUserId,
-      cashAdvanceSummaries: data.cashAdvanceSummaries || {},
-      cashAdvanceAuditLogs: data.cashAdvanceAuditLogs || {},
-      activityDocumentations: data.activityDocumentations || {},
-      activityDocumentationList: data.activityDocumentationList || [],
-      outputRaciRecords: data.outputRaciRecords || {},
-      activityMonitoringRecords: data.activityMonitoringRecords || {},
-      monitoringReports: data.monitoringReports || {},
-      approvalHubItems: data.approvalHubItems || {},
-      approvalWorkflowConfigs: data.approvalWorkflowConfigs || {},
-      approvalNotifications: data.approvalNotifications || [],
-      programBudgets: data.programBudgets || {},
-      attendanceSystem: data.attendanceSystem || {},
-      cleanResetPrj3581V1: data.cleanResetPrj3581V1 ?? true,
-      cleanResetPrj3581V2: data.cleanResetPrj3581V2 ?? true
-    };
-    if (data.organizationSettings !== void 0) {
-      kvEntries.organizationSettings = data.organizationSettings;
+    for (const spec of ENTITY_TABLE_SPECS) {
+      const rows = (spec.getRows(data) || []).filter((r) => r && r.id);
+      for (const item of rows) {
+        await executeAdaptiveUpsert(
+          conn,
+          spec.tableName,
+          spec.buildCandidate(item, nowIso),
+          spec.upsertOptions
+        );
+      }
     }
+    const kvEntries = extractKvSnapshot(data);
     for (const [k, v] of Object.entries(kvEntries)) {
-      await conn.query(
-        `INSERT INTO system_kv_store (store_key, store_value, updated_at)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           store_value = VALUES(store_value),
-           updated_at = VALUES(updated_at)`,
-        [k, JSON.stringify(v), nowIso]
+      if (v === void 0) continue;
+      await executeAdaptiveUpsert(
+        conn,
+        "system_kv_store",
+        {
+          store_key: k.slice(0, 128),
+          store_value: JSON.stringify(v),
+          updated_at: nowIso
+        },
+        {
+          primaryKeyColumn: "store_key",
+          immutableOnUpdateColumns: []
+        }
       );
     }
     await conn.commit();
@@ -2474,13 +2741,42 @@ function sanitizeDbError(err) {
   const raw = err instanceof Error ? `${err.name}${"code" in err && err.code ? ` [${err.code}]` : ""}: ${err.message}` : String(err || "Unknown error");
   return raw.replace(/mysql2?:\/\/[^\s@]+@/gi, "mysql://***@").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
 }
+function buildMysqlWriteFailureError(err, contextLabel) {
+  const sqlCode = String(err?.code || "");
+  const safeDetail = sanitizeDbError(err);
+  let httpStatus = 500;
+  let userMessage = "Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan agar tampilan tetap akurat.";
+  if (sqlCode === "ER_TABLEACCESS_DENIED_ERROR" || sqlCode === "ER_DBACCESS_DENIED_ERROR" || sqlCode === "ER_SPECIFIC_ACCESS_DENIED_ERROR" || /command denied to user/i.test(safeDetail)) {
+    httpStatus = 500;
+    userMessage = "Database MySQL menolak penyimpanan karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.";
+  } else if (sqlCode === "ECONNREFUSED" || sqlCode === "PROTOCOL_CONNECTION_LOST" || sqlCode === "ETIMEDOUT" || sqlCode === "EHOSTUNREACH") {
+    httpStatus = 503;
+    userMessage = "Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.";
+  } else if (sqlCode === "ER_DUP_ENTRY") {
+    httpStatus = 409;
+    userMessage = "Data dengan kode atau identitas tersebut sudah terdaftar di database MySQL.";
+  } else if (sqlCode === "ER_DATA_TOO_LONG" || sqlCode === "ER_TRUNCATED_WRONG_VALUE") {
+    httpStatus = 400;
+    userMessage = "Format atau panjang data tidak sesuai dengan kolom tabel MySQL. Periksa kembali isian formulir Anda.";
+  }
+  return Object.assign(new Error(`[MySQL Write Failed: ${contextLabel}] ${safeDetail}`), {
+    httpStatus,
+    userMessage,
+    code: sqlCode || void 0
+  });
+}
 var Database = class {
   constructor() {
+    this.lastCommittedJson = "";
+    this.dirtySinceCommit = false;
+    this.isCommittingWrite = false;
     this.mysqlWriteChain = Promise.resolve();
     this.initPromise = null;
     this.mysqlStatus = "unconfigured";
     this.lastMysqlErrorSummary = "";
     this.lastUsersRefreshAt = 0;
+    this.lastFullMysqlSyncAt = 0;
+    this.privilegeSummary = null;
     this.isInitializing = false;
     this.lastFailedMysqlAttemptAt = 0;
     this.failedMysqlCycles = 0;
@@ -2490,6 +2786,7 @@ var Database = class {
     } else {
       this.data = this.loadInitialLocalDevData();
     }
+    this.lastCommittedJson = JSON.stringify(this.data);
     this.initPromise = this.initializeMysqlStorage();
   }
   /**
@@ -2525,6 +2822,13 @@ var Database = class {
       operational: this.isOperational(),
       mysqlConfigured: envCheck.configured,
       missingEnvVars: envCheck.missingVars,
+      privileges: this.privilegeSummary ? {
+        checked: this.privilegeSummary.checked,
+        canSelect: this.privilegeSummary.canSelect,
+        canInsert: this.privilegeSummary.canInsert,
+        canUpdate: this.privilegeSummary.canUpdate,
+        canDelete: this.privilegeSummary.canDelete
+      } : void 0,
       lastError: this.lastMysqlErrorSummary || void 0,
       counts: {
         users: (this.data.users || []).length,
@@ -2562,6 +2866,14 @@ var Database = class {
     }
     return true;
   }
+  enqueueWriteTask(task) {
+    const run = this.mysqlWriteChain.then(task, task);
+    this.mysqlWriteChain = run.then(
+      () => void 0,
+      () => void 0
+    );
+    return run;
+  }
   /**
    * Menunggu seluruh antrean penulisan asynchronous ke MySQL selesai.
    */
@@ -2569,11 +2881,117 @@ var Database = class {
     await this.mysqlWriteChain;
   }
   /**
+   * Menyelaraskan baseline snapshot bersih setelah normalisasi memori non-mutasi (seperti saat startup / reload).
+   */
+  syncCleanBaseline() {
+    if (!this.dirtySinceCommit && !this.isCommittingWrite) {
+      this.lastCommittedJson = JSON.stringify(this.data);
+    }
+  }
+  hasUncommittedChanges() {
+    return this.dirtySinceCommit;
+  }
+  rollbackUncommittedChanges() {
+    if (this.dirtySinceCommit && this.lastCommittedJson) {
+      try {
+        this.data = JSON.parse(this.lastCommittedJson);
+      } catch {
+      }
+      this.dirtySinceCommit = false;
+    }
+  }
+  /**
+   * Menyimpan seluruh perubahan yang dilakukan melalui `db.update()` ke MySQL secara sinkron & atomik.
+   * Jika query INSERT/UPDATE/DELETE ke MySQL gagal, state memori (`this.data`) dikembalikan ke state terakhir
+   * yang sudah ter-commit di MySQL, dan error dilempar agar API TIDAK PERNAH mengembalikan sukses palsu (fake 200 OK).
+   */
+  async commitPendingWrites(contextLabel = "write") {
+    if (!this.isStrictMysqlRequired()) {
+      if (this.dirtySinceCommit) {
+        this.persistLocalJsonOnly(this.data);
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.dirtySinceCommit = false;
+      }
+      return;
+    }
+    if (this.mysqlStatus !== "ready") {
+      this.rollbackUncommittedChanges();
+      throw Object.assign(new Error("MySQL database is not ready for write operations."), {
+        httpStatus: 503,
+        userMessage: "Database MySQL sedang tidak siap menerima penyimpanan data. Silakan muat ulang halaman dan coba kembali."
+      });
+    }
+    if (!this.dirtySinceCommit) {
+      return;
+    }
+    await this.enqueueWriteTask(async () => {
+      if (!this.dirtySinceCommit) {
+        return;
+      }
+      this.isCommittingWrite = true;
+      try {
+        const pool = await getMysqlPool();
+        if (!pool) {
+          throw new Error("MySQL connection pool is unavailable during commit.");
+        }
+        const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
+        const nextSnapshotJson = JSON.stringify(this.data);
+        const nextData = JSON.parse(nextSnapshotJson);
+        await saveDiffToMysql(pool, prevData, nextData, contextLabel);
+        this.lastCommittedJson = nextSnapshotJson;
+        this.dirtySinceCommit = false;
+        this.lastFullMysqlSyncAt = Date.now();
+        this.lastUsersRefreshAt = Date.now();
+      } catch (err) {
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      } finally {
+        this.isCommittingWrite = false;
+      }
+    });
+  }
+  /**
+   * Menyegarkan data aplikasi dari MySQL apabila cache memori lebih lama dari `maxAgeMs`
+   * dan tidak ada transaksi tulis yang sedang berlangsung, sehingga refresh halaman selalu
+   * menampilkan data aktual yang benar-benar tersimpan di MySQL.
+   */
+  async refreshFromMysqlIfStale(maxAgeMs = 1500) {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.dirtySinceCommit || this.isCommittingWrite) {
+      return false;
+    }
+    const now = Date.now();
+    if (now - this.lastFullMysqlSyncAt < maxAgeMs) {
+      return false;
+    }
+    try {
+      const pool = await getMysqlPool();
+      if (!pool) return false;
+      const fresh = await loadDatabaseFromMysql(pool);
+      if (fresh && !this.dirtySinceCommit && !this.isCommittingWrite) {
+        this.data = normalizeSchema(fresh, { isFromMysql: true });
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.lastFullMysqlSyncAt = Date.now();
+        this.lastUsersRefreshAt = Date.now();
+        return true;
+      }
+    } catch (err) {
+      console.warn(`[DB] Warning refreshing state from MySQL: ${sanitizeDbError(err)}`);
+    }
+    return false;
+  }
+  /**
    * Membaca ulang daftar pengguna & password_hash terbaru langsung dari tabel `users` MySQL
    * agar login dan pengelolaan akun selalu menggunakan Single Source of Truth di MySQL.
    */
   async refreshUsersFromMysql(force = false) {
-    if (!isMysqlConfigured() || this.mysqlStatus !== "ready") {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.dirtySinceCommit || this.isCommittingWrite) {
       return this.data.users || [];
     }
     const now = Date.now();
@@ -2584,9 +3002,10 @@ var Database = class {
       const pool = await getMysqlPool();
       if (!pool) return this.data.users || [];
       const freshUsers = await fetchUsersFromMysql(pool);
-      if (Array.isArray(freshUsers) && freshUsers.length > 0) {
+      if (Array.isArray(freshUsers) && freshUsers.length > 0 && !this.dirtySinceCommit && !this.isCommittingWrite) {
         this.data.users = freshUsers;
         this.lastUsersRefreshAt = now;
+        this.lastCommittedJson = JSON.stringify(this.data);
       }
     } catch (err) {
       console.warn(`[DB] Warning refreshing users from MySQL: ${sanitizeDbError(err)}`);
@@ -2595,35 +3014,83 @@ var Database = class {
   }
   /**
    * Menjamin perubahan akun / password pengguna langsung tersimpan atomik ke tabel users MySQL
-   * sebelum server mengembalikan respons sukses ke klien.
+   * sebelum server mengembalikan respons sukses ke klien. Jika gagal, melempar error & rollback memori.
    */
-  async syncUserImmediately(user) {
-    if (isMysqlConfigured() && this.mysqlStatus === "ready") {
-      try {
-        const pool = await getMysqlPool();
-        if (pool) {
+  async syncUserImmediately(user, options) {
+    const label = options?.contextLabel || `user-sync:${user?.id || "unknown"}`;
+    if (!this.isStrictMysqlRequired()) {
+      await this.commitPendingWrites(label);
+      return;
+    }
+    try {
+      if (this.dirtySinceCommit) {
+        await this.commitPendingWrites(label);
+      } else if (isMysqlConfigured() && this.mysqlStatus === "ready" && user?.id) {
+        await this.enqueueWriteTask(async () => {
+          const pool = await getMysqlPool();
+          if (!pool) throw new Error("MySQL connection pool is unavailable.");
           await upsertMysqlUserRow(pool, user);
           this.lastUsersRefreshAt = Date.now();
-        }
-      } catch (err) {
-        console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
+          this.lastCommittedJson = JSON.stringify(this.data);
+        });
       }
+    } catch (err) {
+      if (options?.bestEffortMetadataOnly) {
+        console.warn(
+          `[DB] Non-critical login/session metadata update skipped (${label}): ${sanitizeDbError(err)}`
+        );
+        return;
+      }
+      throw err;
     }
-    await this.flushWrites();
   }
   async removeUserImmediately(userId) {
-    if (isMysqlConfigured() && this.mysqlStatus === "ready") {
+    const label = `user-delete:${userId}`;
+    if (!this.isStrictMysqlRequired()) {
+      await this.commitPendingWrites(label);
+      return;
+    }
+    if (this.mysqlStatus !== "ready") {
+      this.rollbackUncommittedChanges();
+      throw Object.assign(new Error("MySQL database is not ready for user deletion."), {
+        httpStatus: 503,
+        userMessage: "Database MySQL sedang tidak tersedia untuk menghapus akun pengguna."
+      });
+    }
+    await this.enqueueWriteTask(async () => {
+      this.isCommittingWrite = true;
       try {
         const pool = await getMysqlPool();
-        if (pool) {
-          await deleteMysqlUserRow(pool, userId);
-          this.lastUsersRefreshAt = Date.now();
+        if (!pool) {
+          throw new Error("MySQL connection pool is unavailable.");
         }
+        await deleteMysqlUserRow(pool, userId);
+        if (this.dirtySinceCommit) {
+          const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
+          const nextSnapshotJson = JSON.stringify(this.data);
+          const nextData = JSON.parse(nextSnapshotJson);
+          await saveDiffToMysql(pool, prevData, nextData, label);
+          this.lastCommittedJson = nextSnapshotJson;
+          this.dirtySinceCommit = false;
+        } else {
+          this.lastCommittedJson = JSON.stringify(this.data);
+        }
+        this.lastUsersRefreshAt = Date.now();
+        this.lastFullMysqlSyncAt = Date.now();
       } catch (err) {
-        console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, label);
+      } finally {
+        this.isCommittingWrite = false;
       }
-    }
-    await this.flushWrites();
+    });
   }
   ensureDirectory() {
     if (!fs2.existsSync(DATA_DIR)) {
@@ -2673,9 +3140,10 @@ var Database = class {
       if (this.isStrictMysqlRequired()) {
         this.mysqlStatus = "failed";
         this.data = createEmptyDatabaseState();
+        this.lastCommittedJson = JSON.stringify(this.data);
         this.lastMysqlErrorSummary = `Missing required MySQL environment variables (${envCheck.missingVars.join(", ")})`;
         console.error(
-          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD.`
+          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE.`
         );
       } else {
         this.mysqlStatus = "unconfigured";
@@ -2689,6 +3157,14 @@ var Database = class {
         try {
           const pool = await verifyAndGetMysqlPool();
           console.log(`[DB] MySQL connected successfully (${envCheck.safeSummary}).`);
+          this.privilegeSummary = await checkMysqlWritePrivileges(pool);
+          try {
+            await ensureMysqlSchema(pool);
+          } catch (schemaErr) {
+            console.warn(
+              `[DB] Non-destructive schema verification notice: ${sanitizeDbError(schemaErr)}`
+            );
+          }
           const existingFromMysql = await loadDatabaseFromMysql(pool);
           if (existingFromMysql) {
             const missingFlags = {};
@@ -2699,12 +3175,21 @@ var Database = class {
               missingFlags.cleanResetPrj3581V2 = true;
             }
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
+            this.lastCommittedJson = JSON.stringify(this.data);
+            this.dirtySinceCommit = false;
             this.mysqlStatus = "ready";
             this.lastMysqlErrorSummary = "";
             this.failedMysqlCycles = 0;
             this.lastUsersRefreshAt = Date.now();
+            this.lastFullMysqlSyncAt = Date.now();
             if (Object.keys(missingFlags).length > 0) {
-              await upsertMysqlKvEntries(pool, missingFlags);
+              try {
+                await upsertMysqlKvEntries(pool, missingFlags);
+              } catch (kvErr) {
+                console.warn(
+                  `[DB] Metadata flag initialization skipped: ${sanitizeDbError(kvErr)}`
+                );
+              }
             }
             console.log(
               `[DB] Existing application data loaded from MySQL (users=${this.data.users.length}, programs=${this.data.programs.length}, tors=${this.data.tors.length}).`
@@ -2715,10 +3200,13 @@ var Database = class {
           const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
+          this.lastCommittedJson = JSON.stringify(this.data);
+          this.dirtySinceCommit = false;
           this.mysqlStatus = "ready";
           this.lastMysqlErrorSummary = "";
           this.failedMysqlCycles = 0;
           this.lastUsersRefreshAt = Date.now();
+          this.lastFullMysqlSyncAt = Date.now();
           console.log("[DB] Initial seed saved successfully to MySQL.");
           return;
         } catch (err) {
@@ -2734,34 +3222,35 @@ var Database = class {
       this.mysqlStatus = "failed";
       this.lastMysqlErrorSummary = sanitizeDbError(lastError);
       this.data = createEmptyDatabaseState();
+      this.lastCommittedJson = JSON.stringify(this.data);
+      this.dirtySinceCommit = false;
       console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
     }
   }
-  persistToMysql(snapshot) {
-    if (!this.isStrictMysqlRequired()) {
-      this.persistLocalJsonOnly(snapshot);
-      return;
-    }
-    if (this.mysqlStatus !== "ready") {
-      return;
-    }
-    const clonedSnapshot = JSON.parse(JSON.stringify(snapshot));
-    this.mysqlWriteChain = this.mysqlWriteChain.then(async () => {
-      const pool = await getMysqlPool();
-      if (!pool) return;
-      await saveDatabaseToMysql(pool, clonedSnapshot);
-    }).catch((err) => {
-      console.error(`[DB] MySQL write error: ${sanitizeDbError(err)}`);
-    });
-  }
   getData() {
     return this.data;
   }
   update(updater) {
+    if (!this.isStrictMysqlRequired()) {
+      updater(this.data);
+      this.persistLocalJsonOnly(this.data);
+      this.lastCommittedJson = JSON.stringify(this.data);
+      this.dirtySinceCommit = false;
+      return this.data;
+    }
+    if (this.mysqlStatus !== "ready") {
+      throw Object.assign(new Error("MySQL database is not ready to accept updates."), {
+        httpStatus: 503,
+        userMessage: "Database MySQL sedang tidak tersedia. Perubahan tidak dapat diproses saat ini."
+      });
+    }
+    if (!this.lastCommittedJson) {
+      this.lastCommittedJson = JSON.stringify(this.data);
+    }
     updater(this.data);
-    this.persistToMysql(this.data);
+    this.dirtySinceCommit = true;
     return this.data;
   }
   resetToSeed() {
@@ -2771,6 +3260,8 @@ var Database = class {
     this.data = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistExplicitBackup(this.data);
     this.persistLocalJsonOnly(this.data);
+    this.lastCommittedJson = JSON.stringify(this.data);
+    this.dirtySinceCommit = false;
     return this.data;
   }
 };
@@ -5266,6 +5757,25 @@ function getNextTorSequenceForYear(data, targetYear) {
 async function startServer() {
   await db.ready();
   const app = express();
+  for (const method of ["get", "post", "put", "patch", "delete"]) {
+    const origRegister = app[method].bind(app);
+    app[method] = (routePath, ...handlers) => {
+      const wrappedHandlers = handlers.map((fn) => {
+        if (typeof fn !== "function" || fn.length > 3) return fn;
+        return (req, res, next) => {
+          try {
+            const ret = fn(req, res, next);
+            if (ret && typeof ret.catch === "function") {
+              ret.catch(next);
+            }
+          } catch (syncErr) {
+            next(syncErr);
+          }
+        };
+      });
+      return origRegister(routePath, ...wrappedHandlers);
+    };
+  }
   app.set("trust proxy", 1);
   const PORT = Number(process.env.PORT) || 3e3;
   app.disable("x-powered-by");
@@ -5523,6 +6033,7 @@ async function startServer() {
           u.mustChangePassword = false;
         }
       }
+      db.syncCleanBaseline();
       return;
     }
     const needsInit = (current.users || []).some(
@@ -5729,9 +6240,19 @@ async function startServer() {
     if (req.path === "/health") {
       return next();
     }
+    const methodUpper = (req.method || "GET").toUpperCase();
+    const isWriteMethod = methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH" || methodUpper === "DELETE";
+    if (isWriteMethod) {
+      console.log(`[WRITE] WRITE REQUEST RECEIVED: ${methodUpper} /api${req.path}`);
+    }
     if (!db.isOperational()) {
       await db.ready();
       if (!db.isOperational()) {
+        if (isWriteMethod) {
+          console.error(
+            `[WRITE] DATABASE UNAVAILABLE: ${methodUpper} /api${req.path} rejected (503)`
+          );
+        }
         return res.status(503).json({
           error: "Database utama sedang tidak dapat dijangkau. Permintaan ditangguhkan sementara untuk melindungi integritas data."
         });
@@ -5743,6 +6264,64 @@ async function startServer() {
           ensureUserSecurityFieldsInitialized();
         }
       }).catch(() => {
+      });
+    }
+    if (db.isMysqlReady()) {
+      const refreshedFromMysql = await db.refreshFromMysqlIfStale(1500);
+      if (refreshedFromMysql) {
+        ensureUserSecurityFieldsInitialized();
+      }
+    }
+    if (isWriteMethod) {
+      const originalSend = res.send.bind(res);
+      let sendIntercepted = false;
+      const isSessionAuditOnlyRoute = req.path === "/auth/login" || req.path === "/auth/logout";
+      res.send = ((body) => {
+        if (sendIntercepted) {
+          return originalSend(body);
+        }
+        sendIntercepted = true;
+        if (isSessionAuditOnlyRoute) {
+          if (db.hasUncommittedChanges()) {
+            void db.commitPendingWrites(`${methodUpper} /api${req.path} [session]`).catch(() => {
+              db.rollbackUncommittedChanges();
+            }).finally(() => {
+              originalSend(body);
+            });
+            return res;
+          }
+          return originalSend(body);
+        }
+        if (res.statusCode < 400) {
+          console.log(
+            `[WRITE] AUTHORIZED & VALIDATED: ${methodUpper} /api${req.path} (status=${res.statusCode})`
+          );
+          if (!db.hasUncommittedChanges()) {
+            return originalSend(body);
+          }
+          void db.commitPendingWrites(`${methodUpper} /api${req.path}`).then(() => {
+            originalSend(body);
+          }).catch((commitErr) => {
+            const errStatus = Number(commitErr?.httpStatus || commitErr?.status || 500);
+            const errMsg = commitErr?.userMessage || "Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.";
+            res.status(errStatus);
+            res.setHeader("Content-Type", "application/json; charset=utf-8");
+            originalSend(JSON.stringify({ error: errMsg }));
+          });
+          return res;
+        }
+        console.warn(
+          `[WRITE] REJECTED BEFORE COMMIT: ${methodUpper} /api${req.path} (status=${res.statusCode})`
+        );
+        if (db.hasUncommittedChanges()) {
+          void db.commitPendingWrites(`${methodUpper} /api${req.path} [audit]`).catch(() => {
+            db.rollbackUncommittedChanges();
+          }).finally(() => {
+            originalSend(body);
+          });
+          return res;
+        }
+        return originalSend(body);
       });
     }
     const rawForwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
@@ -5779,9 +6358,17 @@ async function startServer() {
     }
     const verifiedUser = authenticateBearerToken(req);
     if (!verifiedUser) {
+      if (isWriteMethod) {
+        console.warn(`[WRITE] UNAUTHENTICATED: ${methodUpper} /api${req.path} rejected (401)`);
+      }
       return res.status(401).json({
         error: "Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali menggunakan kredensial resmi Anda."
       });
+    }
+    if (isWriteMethod) {
+      console.log(
+        `[WRITE] AUTHENTICATED: ${methodUpper} /api${req.path} (user=${verifiedUser.id}, role=${verifiedUser.role})`
+      );
     }
     if (req.shouldRefreshSessionToken && req.path !== "/auth/logout" && req.path !== "/auth/change-password") {
       res.setHeader("X-Refreshed-Token", createSessionToken(verifiedUser));
@@ -6173,7 +6760,11 @@ async function startServer() {
         timestamp: nowIso
       });
     });
-    await db.syncUserImmediately(loggedInUser);
+    await db.syncUserImmediately(loggedInUser, {
+      bestEffortMetadataOnly: true,
+      contextLabel: "POST /api/auth/login [metadata]"
+    });
+    loggedInUser = db.getData().users.find((u) => u.id === targetUser.id) || targetUser;
     const sessionToken = createSessionToken(loggedInUser);
     res.json({
       message: `Selamat datang kembali, ${loggedInUser.name}`,
@@ -6308,7 +6899,11 @@ async function startServer() {
         updatedTarget = d.users[idx];
       }
     });
-    await db.syncUserImmediately(updatedTarget);
+    await db.syncUserImmediately(updatedTarget, {
+      bestEffortMetadataOnly: true,
+      contextLabel: "POST /api/auth/switch-user [metadata]"
+    });
+    updatedTarget = db.getData().users.find((u) => u.id === user.id) || user;
     const sessionToken = createSessionToken(updatedTarget);
     res.json({
       message: `Berhasil beralih ke ${user.name} (${user.roleTitle})`,
@@ -10722,7 +11317,7 @@ async function startServer() {
   app.put("/api/finance-workspace/budgets/:key", (req, res) => {
     const { key } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "admin") {
+    if (currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "admin" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({
         error: "Akses ditolak: Hanya Finance, Direktur, atau Program Manager yang berwenang memperbarui Master Budget."
       });
@@ -13140,12 +13735,14 @@ async function startServer() {
     ensureUserSecurityFieldsInitialized();
     res.json({ message: "Database telah direset ke konfigurasi awal" });
   });
-  app.use("/api", (err, _req, res, _next) => {
+  app.use("/api", (err, req, res, _next) => {
+    db.rollbackUncommittedChanges();
     const safeErrMsg = String(err?.message || "Unexpected error").replace(/Bearer\s+[^\s]+/gi, "Bearer ***").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
-    console.error("[API Security Error]:", safeErrMsg);
+    console.error(`[API Error] ${req.method} /api${req.path}:`, safeErrMsg);
     if (res.headersSent) return;
-    res.status(err?.status || 500).json({
-      error: "Terjadi kesalahan pemrosesan pada server. Silakan periksa kembali data yang dikirimkan."
+    const statusCode = Number(err?.httpStatus || err?.status || 500);
+    res.status(statusCode).json({
+      error: err?.userMessage || (statusCode === 401 ? "Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali." : "Terjadi kesalahan pemrosesan pada server saat menyimpan atau memuat data.")
     });
   });
   const distDir = path3.join(__dirname, "dist");

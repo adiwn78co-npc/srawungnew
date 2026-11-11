@@ -23,17 +23,21 @@ import type {
   AttendanceSystemBundle,
 } from '../types/index.ts';
 import {
+  checkMysqlWritePrivileges,
+  deleteMysqlUserRow,
+  ensureMysqlSchema,
   fetchUsersFromMysql,
   getMysqlPool,
   isCloudRunEnvironment,
   isMysqlConfigured,
   isProductionHostingerEnvironment,
   loadDatabaseFromMysql,
+  type MysqlPrivilegeSummary,
   resetMysqlPool,
   saveDatabaseToMysql,
+  saveDiffToMysql,
   upsertMysqlKvEntries,
   upsertMysqlUserRow,
-  deleteMysqlUserRow,
   validateMysqlEnvConfiguration,
   verifyAndGetMysqlPool,
 } from './mysqlPool.ts';
@@ -486,13 +490,64 @@ function sanitizeDbError(err: unknown): string {
     .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
 }
 
+function buildMysqlWriteFailureError(err: any, contextLabel: string): Error & {
+  httpStatus?: number;
+  userMessage?: string;
+  code?: string;
+} {
+  const sqlCode = String(err?.code || '');
+  const safeDetail = sanitizeDbError(err);
+
+  let httpStatus = 500;
+  let userMessage =
+    'Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan agar tampilan tetap akurat.';
+
+  if (
+    sqlCode === 'ER_TABLEACCESS_DENIED_ERROR' ||
+    sqlCode === 'ER_DBACCESS_DENIED_ERROR' ||
+    sqlCode === 'ER_SPECIFIC_ACCESS_DENIED_ERROR' ||
+    /command denied to user/i.test(safeDetail)
+  ) {
+    httpStatus = 500;
+    userMessage =
+      'Database MySQL menolak penyimpanan karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.';
+  } else if (
+    sqlCode === 'ECONNREFUSED' ||
+    sqlCode === 'PROTOCOL_CONNECTION_LOST' ||
+    sqlCode === 'ETIMEDOUT' ||
+    sqlCode === 'EHOSTUNREACH'
+  ) {
+    httpStatus = 503;
+    userMessage =
+      'Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.';
+  } else if (sqlCode === 'ER_DUP_ENTRY') {
+    httpStatus = 409;
+    userMessage = 'Data dengan kode atau identitas tersebut sudah terdaftar di database MySQL.';
+  } else if (sqlCode === 'ER_DATA_TOO_LONG' || sqlCode === 'ER_TRUNCATED_WRONG_VALUE') {
+    httpStatus = 400;
+    userMessage =
+      'Format atau panjang data tidak sesuai dengan kolom tabel MySQL. Periksa kembali isian formulir Anda.';
+  }
+
+  return Object.assign(new Error(`[MySQL Write Failed: ${contextLabel}] ${safeDetail}`), {
+    httpStatus,
+    userMessage,
+    code: sqlCode || undefined,
+  });
+}
+
 class Database {
   private data: DatabaseSchema;
+  private lastCommittedJson = '';
+  private dirtySinceCommit = false;
+  private isCommittingWrite = false;
   private mysqlWriteChain: Promise<void> = Promise.resolve();
   private initPromise: Promise<void> | null = null;
   private mysqlStatus: 'unconfigured' | 'ready' | 'failed' = 'unconfigured';
   private lastMysqlErrorSummary = '';
   private lastUsersRefreshAt = 0;
+  private lastFullMysqlSyncAt = 0;
+  private privilegeSummary: MysqlPrivilegeSummary | null = null;
 
   constructor() {
     this.ensureDirectory();
@@ -503,6 +558,7 @@ class Database {
     } else {
       this.data = this.loadInitialLocalDevData();
     }
+    this.lastCommittedJson = JSON.stringify(this.data);
     this.initPromise = this.initializeMysqlStorage();
   }
 
@@ -554,6 +610,15 @@ class Database {
       operational: this.isOperational(),
       mysqlConfigured: envCheck.configured,
       missingEnvVars: envCheck.missingVars,
+      privileges: this.privilegeSummary
+        ? {
+            checked: this.privilegeSummary.checked,
+            canSelect: this.privilegeSummary.canSelect,
+            canInsert: this.privilegeSummary.canInsert,
+            canUpdate: this.privilegeSummary.canUpdate,
+            canDelete: this.privilegeSummary.canDelete,
+          }
+        : undefined,
       lastError: this.lastMysqlErrorSummary || undefined,
       counts: {
         users: (this.data.users || []).length,
@@ -594,6 +659,15 @@ class Database {
     return true;
   }
 
+  private enqueueWriteTask<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.mysqlWriteChain.then(task, task);
+    this.mysqlWriteChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
   /**
    * Menunggu seluruh antrean penulisan asynchronous ke MySQL selesai.
    */
@@ -602,11 +676,143 @@ class Database {
   }
 
   /**
+   * Menyelaraskan baseline snapshot bersih setelah normalisasi memori non-mutasi (seperti saat startup / reload).
+   */
+  public syncCleanBaseline(): void {
+    if (!this.dirtySinceCommit && !this.isCommittingWrite) {
+      this.lastCommittedJson = JSON.stringify(this.data);
+    }
+  }
+
+  public hasUncommittedChanges(): boolean {
+    return this.dirtySinceCommit;
+  }
+
+  public rollbackUncommittedChanges(): void {
+    if (this.dirtySinceCommit && this.lastCommittedJson) {
+      try {
+        this.data = JSON.parse(this.lastCommittedJson);
+      } catch {
+        // ignore parse fallback
+      }
+      this.dirtySinceCommit = false;
+    }
+  }
+
+  /**
+   * Menyimpan seluruh perubahan yang dilakukan melalui `db.update()` ke MySQL secara sinkron & atomik.
+   * Jika query INSERT/UPDATE/DELETE ke MySQL gagal, state memori (`this.data`) dikembalikan ke state terakhir
+   * yang sudah ter-commit di MySQL, dan error dilempar agar API TIDAK PERNAH mengembalikan sukses palsu (fake 200 OK).
+   */
+  public async commitPendingWrites(contextLabel = 'write'): Promise<void> {
+    if (!this.isStrictMysqlRequired()) {
+      if (this.dirtySinceCommit) {
+        this.persistLocalJsonOnly(this.data);
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.dirtySinceCommit = false;
+      }
+      return;
+    }
+
+    if (this.mysqlStatus !== 'ready') {
+      this.rollbackUncommittedChanges();
+      throw Object.assign(new Error('MySQL database is not ready for write operations.'), {
+        httpStatus: 503,
+        userMessage:
+          'Database MySQL sedang tidak siap menerima penyimpanan data. Silakan muat ulang halaman dan coba kembali.',
+      });
+    }
+
+    if (!this.dirtySinceCommit) {
+      return;
+    }
+
+    await this.enqueueWriteTask(async () => {
+      if (!this.dirtySinceCommit) {
+        return;
+      }
+      this.isCommittingWrite = true;
+      try {
+        const pool = await getMysqlPool();
+        if (!pool) {
+          throw new Error('MySQL connection pool is unavailable during commit.');
+        }
+
+        const prevData: DatabaseSchema = this.lastCommittedJson
+          ? JSON.parse(this.lastCommittedJson)
+          : createEmptyDatabaseState();
+        const nextSnapshotJson = JSON.stringify(this.data);
+        const nextData: DatabaseSchema = JSON.parse(nextSnapshotJson);
+
+        await saveDiffToMysql(pool, prevData, nextData, contextLabel);
+
+        this.lastCommittedJson = nextSnapshotJson;
+        this.dirtySinceCommit = false;
+        this.lastFullMysqlSyncAt = Date.now();
+        this.lastUsersRefreshAt = Date.now();
+      } catch (err) {
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+            // ignore
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      } finally {
+        this.isCommittingWrite = false;
+      }
+    });
+  }
+
+  /**
+   * Menyegarkan data aplikasi dari MySQL apabila cache memori lebih lama dari `maxAgeMs`
+   * dan tidak ada transaksi tulis yang sedang berlangsung, sehingga refresh halaman selalu
+   * menampilkan data aktual yang benar-benar tersimpan di MySQL.
+   */
+  public async refreshFromMysqlIfStale(maxAgeMs = 1500): Promise<boolean> {
+    if (
+      !isMysqlConfigured() ||
+      this.mysqlStatus !== 'ready' ||
+      this.dirtySinceCommit ||
+      this.isCommittingWrite
+    ) {
+      return false;
+    }
+    const now = Date.now();
+    if (now - this.lastFullMysqlSyncAt < maxAgeMs) {
+      return false;
+    }
+    try {
+      const pool = await getMysqlPool();
+      if (!pool) return false;
+      const fresh = await loadDatabaseFromMysql(pool);
+      if (fresh && !this.dirtySinceCommit && !this.isCommittingWrite) {
+        this.data = normalizeSchema(fresh, { isFromMysql: true });
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.lastFullMysqlSyncAt = Date.now();
+        this.lastUsersRefreshAt = Date.now();
+        return true;
+      }
+    } catch (err) {
+      console.warn(`[DB] Warning refreshing state from MySQL: ${sanitizeDbError(err)}`);
+    }
+    return false;
+  }
+
+  /**
    * Membaca ulang daftar pengguna & password_hash terbaru langsung dari tabel `users` MySQL
    * agar login dan pengelolaan akun selalu menggunakan Single Source of Truth di MySQL.
    */
   public async refreshUsersFromMysql(force = false): Promise<User[]> {
-    if (!isMysqlConfigured() || this.mysqlStatus !== 'ready') {
+    if (
+      !isMysqlConfigured() ||
+      this.mysqlStatus !== 'ready' ||
+      this.dirtySinceCommit ||
+      this.isCommittingWrite
+    ) {
       return this.data.users || [];
     }
     const now = Date.now();
@@ -617,9 +823,15 @@ class Database {
       const pool = await getMysqlPool();
       if (!pool) return this.data.users || [];
       const freshUsers = await fetchUsersFromMysql(pool);
-      if (Array.isArray(freshUsers) && freshUsers.length > 0) {
+      if (
+        Array.isArray(freshUsers) &&
+        freshUsers.length > 0 &&
+        !this.dirtySinceCommit &&
+        !this.isCommittingWrite
+      ) {
         this.data.users = freshUsers as User[];
         this.lastUsersRefreshAt = now;
+        this.lastCommittedJson = JSON.stringify(this.data);
       }
     } catch (err) {
       console.warn(`[DB] Warning refreshing users from MySQL: ${sanitizeDbError(err)}`);
@@ -629,36 +841,96 @@ class Database {
 
   /**
    * Menjamin perubahan akun / password pengguna langsung tersimpan atomik ke tabel users MySQL
-   * sebelum server mengembalikan respons sukses ke klien.
+   * sebelum server mengembalikan respons sukses ke klien. Jika gagal, melempar error & rollback memori.
    */
-  public async syncUserImmediately(user: User): Promise<void> {
-    if (isMysqlConfigured() && this.mysqlStatus === 'ready') {
-      try {
-        const pool = await getMysqlPool();
-        if (pool) {
+  public async syncUserImmediately(
+    user: User,
+    options?: { bestEffortMetadataOnly?: boolean; contextLabel?: string }
+  ): Promise<void> {
+    const label = options?.contextLabel || `user-sync:${user?.id || 'unknown'}`;
+    if (!this.isStrictMysqlRequired()) {
+      await this.commitPendingWrites(label);
+      return;
+    }
+
+    try {
+      if (this.dirtySinceCommit) {
+        await this.commitPendingWrites(label);
+      } else if (isMysqlConfigured() && this.mysqlStatus === 'ready' && user?.id) {
+        await this.enqueueWriteTask(async () => {
+          const pool = await getMysqlPool();
+          if (!pool) throw new Error('MySQL connection pool is unavailable.');
           await upsertMysqlUserRow(pool, user);
           this.lastUsersRefreshAt = Date.now();
-        }
-      } catch (err) {
-        console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
+          this.lastCommittedJson = JSON.stringify(this.data);
+        });
       }
+    } catch (err) {
+      if (options?.bestEffortMetadataOnly) {
+        console.warn(
+          `[DB] Non-critical login/session metadata update skipped (${label}): ${sanitizeDbError(err)}`
+        );
+        return;
+      }
+      throw err;
     }
-    await this.flushWrites();
   }
 
   public async removeUserImmediately(userId: string): Promise<void> {
-    if (isMysqlConfigured() && this.mysqlStatus === 'ready') {
+    const label = `user-delete:${userId}`;
+    if (!this.isStrictMysqlRequired()) {
+      await this.commitPendingWrites(label);
+      return;
+    }
+
+    if (this.mysqlStatus !== 'ready') {
+      this.rollbackUncommittedChanges();
+      throw Object.assign(new Error('MySQL database is not ready for user deletion.'), {
+        httpStatus: 503,
+        userMessage: 'Database MySQL sedang tidak tersedia untuk menghapus akun pengguna.',
+      });
+    }
+
+    await this.enqueueWriteTask(async () => {
+      this.isCommittingWrite = true;
       try {
         const pool = await getMysqlPool();
-        if (pool) {
-          await deleteMysqlUserRow(pool, userId);
-          this.lastUsersRefreshAt = Date.now();
+        if (!pool) {
+          throw new Error('MySQL connection pool is unavailable.');
         }
+
+        await deleteMysqlUserRow(pool, userId);
+
+        if (this.dirtySinceCommit) {
+          const prevData: DatabaseSchema = this.lastCommittedJson
+            ? JSON.parse(this.lastCommittedJson)
+            : createEmptyDatabaseState();
+          const nextSnapshotJson = JSON.stringify(this.data);
+          const nextData: DatabaseSchema = JSON.parse(nextSnapshotJson);
+          await saveDiffToMysql(pool, prevData, nextData, label);
+          this.lastCommittedJson = nextSnapshotJson;
+          this.dirtySinceCommit = false;
+        } else {
+          this.lastCommittedJson = JSON.stringify(this.data);
+        }
+
+        this.lastUsersRefreshAt = Date.now();
+        this.lastFullMysqlSyncAt = Date.now();
       } catch (err) {
-        console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+            // ignore
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, label);
+      } finally {
+        this.isCommittingWrite = false;
       }
-    }
-    await this.flushWrites();
+    });
   }
 
   private ensureDirectory() {
@@ -717,9 +989,10 @@ class Database {
       if (this.isStrictMysqlRequired()) {
         this.mysqlStatus = 'failed';
         this.data = createEmptyDatabaseState();
+        this.lastCommittedJson = JSON.stringify(this.data);
         this.lastMysqlErrorSummary = `Missing required MySQL environment variables (${envCheck.missingVars.join(', ')})`;
         console.error(
-          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD.`
+          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE.`
         );
       } else {
         this.mysqlStatus = 'unconfigured';
@@ -737,7 +1010,17 @@ class Database {
           const pool = await verifyAndGetMysqlPool();
           console.log(`[DB] MySQL connected successfully (${envCheck.safeSummary}).`);
 
-          // 2. Muat data existing dari MySQL
+          // 2. Periksa privilege user MySQL secara non-destructive & pastikan tabel pendukung tersedia (CREATE TABLE IF NOT EXISTS)
+          this.privilegeSummary = await checkMysqlWritePrivileges(pool);
+          try {
+            await ensureMysqlSchema(pool);
+          } catch (schemaErr) {
+            console.warn(
+              `[DB] Non-destructive schema verification notice: ${sanitizeDbError(schemaErr)}`
+            );
+          }
+
+          // 3. Muat data existing dari MySQL (Jalur READ yang sudah bekerja)
           const existingFromMysql = await loadDatabaseFromMysql(pool);
           if (existingFromMysql) {
             const missingFlags: Record<string, boolean> = {};
@@ -749,13 +1032,22 @@ class Database {
             }
 
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
+            this.lastCommittedJson = JSON.stringify(this.data);
+            this.dirtySinceCommit = false;
             this.mysqlStatus = 'ready';
             this.lastMysqlErrorSummary = '';
             this.failedMysqlCycles = 0;
             this.lastUsersRefreshAt = Date.now();
+            this.lastFullMysqlSyncAt = Date.now();
 
             if (Object.keys(missingFlags).length > 0) {
-              await upsertMysqlKvEntries(pool, missingFlags);
+              try {
+                await upsertMysqlKvEntries(pool, missingFlags);
+              } catch (kvErr) {
+                console.warn(
+                  `[DB] Metadata flag initialization skipped: ${sanitizeDbError(kvErr)}`
+                );
+              }
             }
 
             console.log(
@@ -764,15 +1056,18 @@ class Database {
             return;
           }
 
-          // 3. Hanya jika seluruh tabel di database MySQL benar-benar kosong (0 baris di semua tabel)
+          // 4. Hanya jika seluruh tabel di database MySQL benar-benar kosong (0 baris di semua tabel)
           console.log('[DB] Database is empty. Initial seed is being created.');
           const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
+          this.lastCommittedJson = JSON.stringify(this.data);
+          this.dirtySinceCommit = false;
           this.mysqlStatus = 'ready';
           this.lastMysqlErrorSummary = '';
           this.failedMysqlCycles = 0;
           this.lastUsersRefreshAt = Date.now();
+          this.lastFullMysqlSyncAt = Date.now();
           console.log('[DB] Initial seed saved successfully to MySQL.');
           return;
         } catch (err) {
@@ -790,35 +1085,12 @@ class Database {
       this.lastMysqlErrorSummary = sanitizeDbError(lastError);
       // Proteksi mutlak: JANGAN memuat data/db.json atau dummy seed apabila MySQL gagal terhubung!
       this.data = createEmptyDatabaseState();
+      this.lastCommittedJson = JSON.stringify(this.data);
+      this.dirtySinceCommit = false;
       console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
     }
-  }
-
-  private persistToMysql(snapshot: DatabaseSchema) {
-    if (!this.isStrictMysqlRequired()) {
-      this.persistLocalJsonOnly(snapshot);
-      return;
-    }
-
-    // Proteksi mutlak: jika pembacaan awal MySQL belum berhasil ('ready'),
-    // JANGAN PERNAH menulis atau menimpa tabel MySQL maupun JSON lokal.
-    if (this.mysqlStatus !== 'ready') {
-      return;
-    }
-
-    const clonedSnapshot: DatabaseSchema = JSON.parse(JSON.stringify(snapshot));
-
-    this.mysqlWriteChain = this.mysqlWriteChain
-      .then(async () => {
-        const pool = await getMysqlPool();
-        if (!pool) return;
-        await saveDatabaseToMysql(pool, clonedSnapshot);
-      })
-      .catch((err) => {
-        console.error(`[DB] MySQL write error: ${sanitizeDbError(err)}`);
-      });
   }
 
   public getData(): DatabaseSchema {
@@ -826,8 +1098,28 @@ class Database {
   }
 
   public update(updater: (data: DatabaseSchema) => void): DatabaseSchema {
+    if (!this.isStrictMysqlRequired()) {
+      updater(this.data);
+      this.persistLocalJsonOnly(this.data);
+      this.lastCommittedJson = JSON.stringify(this.data);
+      this.dirtySinceCommit = false;
+      return this.data;
+    }
+
+    if (this.mysqlStatus !== 'ready') {
+      throw Object.assign(new Error('MySQL database is not ready to accept updates.'), {
+        httpStatus: 503,
+        userMessage:
+          'Database MySQL sedang tidak tersedia. Perubahan tidak dapat diproses saat ini.',
+      });
+    }
+
+    if (!this.lastCommittedJson) {
+      this.lastCommittedJson = JSON.stringify(this.data);
+    }
+
     updater(this.data);
-    this.persistToMysql(this.data);
+    this.dirtySinceCommit = true;
     return this.data;
   }
 
@@ -838,6 +1130,8 @@ class Database {
     this.data = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistExplicitBackup(this.data);
     this.persistLocalJsonOnly(this.data);
+    this.lastCommittedJson = JSON.stringify(this.data);
+    this.dirtySinceCommit = false;
     return this.data;
   }
 }

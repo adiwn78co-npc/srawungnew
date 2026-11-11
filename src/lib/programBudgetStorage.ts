@@ -786,11 +786,7 @@ export function getOrCreateProgramBudgetDataset(
   return created;
 }
 
-export function saveProgramBudgetDataset(
-  dataset: ProgramBudgetDataset,
-  persistToServer: boolean = true
-): void {
-  const all = loadAllProgramBudgetDatasets();
+function normalizeDatasetForSave(dataset: ProgramBudgetDataset): ProgramBudgetDataset {
   const activePeriods = getActivePeriods(dataset);
   const periodSum = activePeriods.reduce(
     (s, p) => s + (Number(p.allocatedAmount) || 0),
@@ -801,32 +797,56 @@ export function saveProgramBudgetDataset(
     periodSum > 0 ? periodSum : Number(dataset.annualApprovedBudget) || 0;
   const effectiveTotalProgramBudget = effectiveAnnualBudget;
 
-  const normalized: ProgramBudgetDataset = {
+  return {
     ...dataset,
     periodStructureType: 'custom',
     customPeriods: activePeriods,
     totalProgramBudget: effectiveTotalProgramBudget,
     annualApprovedBudget: effectiveAnnualBudget,
     isBudgetConfigured: Boolean(
-      dataset.isBudgetConfigured ||
-        effectiveAnnualBudget > 0
+      dataset.isBudgetConfigured || effectiveAnnualBudget > 0
     ),
     updatedAt: new Date().toISOString(),
   };
-  all[dataset.id] = normalized;
+}
+
+function commitDatasetToLocalCache(normalized: ProgramBudgetDataset): void {
+  const all = loadAllProgramBudgetDatasets();
+  all[normalized.id] = normalized;
 
   // Keep totalProgramBudget and program-specific Master Budget Codes consistent across all years of the SAME Program only
   for (const [k, otherDs] of Object.entries(all)) {
-    if (k !== dataset.id && otherDs && otherDs.programId === dataset.programId) {
+    if (k !== normalized.id && otherDs && otherDs.programId === normalized.programId) {
       all[k] = {
         ...otherDs,
-        totalProgramBudget: effectiveTotalProgramBudget,
+        totalProgramBudget: normalized.totalProgramBudget,
         masterBudgetCodes: normalized.masterBudgetCodes,
       };
     }
   }
 
   saveAllProgramBudgetDatasets(all);
+}
+
+export async function saveProgramBudgetDatasetAsync(
+  dataset: ProgramBudgetDataset
+): Promise<ProgramBudgetDataset> {
+  const normalized = normalizeDatasetForSave(dataset);
+  const savedFromServer = await api.saveFinanceProgramBudget(normalized.id, normalized);
+  const effectiveSaved: ProgramBudgetDataset =
+    savedFromServer && typeof savedFromServer === 'object' && savedFromServer.id
+      ? { ...normalized, ...savedFromServer }
+      : normalized;
+  commitDatasetToLocalCache(effectiveSaved);
+  return effectiveSaved;
+}
+
+export function saveProgramBudgetDataset(
+  dataset: ProgramBudgetDataset,
+  persistToServer: boolean = true
+): void {
+  const normalized = normalizeDatasetForSave(dataset);
+  commitDatasetToLocalCache(normalized);
 
   if (persistToServer) {
     api.saveFinanceProgramBudget(dataset.id, normalized).catch((err) => {

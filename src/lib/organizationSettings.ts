@@ -107,35 +107,58 @@ export async function saveOrganizationSettingsToServer(
   patch: Partial<OrganizationSettings>,
   actorName?: string
 ): Promise<OrganizationSettings> {
-  const optimistic = setLocalOrganizationSettings({
-    ...patch,
-    updatedAt: new Date().toISOString(),
-    updatedByName: actorName,
-  });
   const token = getAuthToken();
   if (!token) {
-    return optimistic;
+    throw new Error('Sesi otentikasi tidak ditemukan. Silakan login kembali.');
   }
-  try {
-    const res = await fetch('/api/organization-settings', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        ...optimistic,
-        updatedByName: actorName,
-      }),
-    });
-    if (res.ok) {
-      const saved = await res.json();
-      return setLocalOrganizationSettings(saved);
+
+  const current = getOrganizationSettings();
+  const payload: OrganizationSettings = {
+    ...current,
+    ...patch,
+    organizationName:
+      patch.organizationName !== undefined && patch.organizationName.trim()
+        ? patch.organizationName.trim()
+        : current.organizationName,
+    sidebarBrandName:
+      patch.sidebarBrandName !== undefined && patch.sidebarBrandName.trim()
+        ? patch.sidebarBrandName.trim()
+        : patch.organizationName !== undefined && patch.organizationName.trim()
+        ? patch.organizationName.trim()
+        : current.sidebarBrandName,
+    sidebarSubtitle:
+      patch.sidebarSubtitle !== undefined && patch.sidebarSubtitle.trim()
+        ? patch.sidebarSubtitle.trim()
+        : current.sidebarSubtitle,
+    updatedAt: new Date().toISOString(),
+    updatedByName: actorName,
+  };
+
+  const res = await fetch('/api/organization-settings', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    let errMsg = `Gagal menyimpan pengaturan organisasi ke database (HTTP ${res.status}).`;
+    try {
+      const errBody = await res.json();
+      if (errBody && typeof errBody.error === 'string' && errBody.error.trim()) {
+        errMsg = errBody.error.trim();
+      }
+    } catch {
+      // ignore non-json error body
     }
-  } catch {
-    // keep optimistic local state
+    throw new Error(errMsg);
   }
-  return optimistic;
+
+  const saved = await res.json();
+  return setLocalOrganizationSettings(saved);
 }
 
 export function useOrganizationSettings() {

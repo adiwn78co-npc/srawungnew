@@ -43,7 +43,8 @@
       "accountStatus": "Aktif",
       "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
       "passwordUpdatedAt": "2026-01-10T08:00:00Z",
-      "mustChangePassword": true
+      "mustChangePassword": true,
+      "lastLoginAt": "2026-11-11T04:52:10.281Z"
     },
     {
       "id": "user-finance",
@@ -156,7 +157,7 @@
       "mustChangePassword": true
     }
   ],
-  "currentUserId": "user-admin",
+  "currentUserId": "user-director",
   "programs": [],
   "outcomes": [],
   "outputs": [],
@@ -165,6 +166,50 @@
   "tors": [],
   "approvalRecords": [],
   "auditLogs": [
+    {
+      "id": "log-1794372730417",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Penghapusan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794372730401",
+      "details": "Menghapus Program Selesai: Program Integrasi Write Verification Updated",
+      "timestamp": "2026-11-11T04:52:10.417Z"
+    },
+    {
+      "id": "log-1794372730409",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembaruan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794372730401",
+      "details": "Memperbarui informasi Program: Program Integrasi Write Verification Updated",
+      "timestamp": "2026-11-11T04:52:10.409Z"
+    },
+    {
+      "id": "log-1794372730401",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794372730401",
+      "details": "Membuat Program baru: Program Integrasi Write Verification Temp di Jakarta",
+      "timestamp": "2026-11-11T04:52:10.401Z"
+    },
+    {
+      "id": "log-login-ok-1794372730336",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-director",
+      "details": "Pengguna Dr. Hendra Wijaya (Executive Director · Direktorat Eksekutif) berhasil login ke sistem.",
+      "timestamp": "2026-11-11T04:52:10.281Z"
+    },
     {
       "id": "log-logout-1793976222937",
       "actorId": "user-admin",
@@ -327,5 +372,7 @@
   },
   "cashAdvanceSummaries": {},
   "cashAdvanceAuditLogs": {},
-  "programBudgets": {}
+  "programBudgets": {},
+  "cleanResetPrj3581V1": true,
+  "cleanResetPrj3581V2": true
 }

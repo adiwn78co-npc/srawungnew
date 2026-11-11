@@ -60,6 +60,7 @@ import {
   ExcelImportPreviewRow,
   getOrCreateProgramBudgetDataset,
   saveProgramBudgetDataset,
+  saveProgramBudgetDatasetAsync,
   saveAllProgramBudgetDatasets,
   loadAllProgramBudgetDatasets,
   getActivePeriods,
@@ -653,7 +654,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     setDraftCustom((prev) => prev.filter((p) => p.id !== periodId));
   };
 
-  const handleSaveBudgetAndPeriods = () => {
+  const handleSaveBudgetAndPeriods = async () => {
     const computedAnnualBudget = draftTotalPeriodAllocated;
     const safeTotalProgramBudget = Math.max(0, Number(draftTotalProgramBudget) || 0);
 
@@ -712,17 +713,24 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       updatedBy: currentUser?.name || 'Finance User',
     };
 
-    saveProgramBudgetDataset(updatedDataset, true);
-    setDataset(updatedDataset);
-    setStatusBanner({
-      type: 'success',
-      message: `Finance Program (${dataset.programName}) berhasil disimpan: Total Program Budget ${formatRupiah(
-        safeTotalProgramBudget
-      )} dan Annual Budget FY ${selectedFiscalYear} ${formatRupiah(
-        computedAnnualBudget
-      )} (${draftStructureType.toUpperCase()}).`,
-    });
-    onRefreshData?.();
+    try {
+      const persisted = await saveProgramBudgetDatasetAsync(updatedDataset);
+      setDataset(persisted);
+      setStatusBanner({
+        type: 'success',
+        message: `Finance Program (${dataset.programName}) berhasil disimpan: Total Program Budget ${formatRupiah(
+          safeTotalProgramBudget
+        )} dan Annual Budget FY ${selectedFiscalYear} ${formatRupiah(
+          computedAnnualBudget
+        )} (${draftStructureType.toUpperCase()}).`,
+      });
+      onRefreshData?.();
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        message: err?.message || 'Gagal menyimpan konfigurasi anggaran ke database server.',
+      });
+    }
   };
 
   // Module 2: Program Master Handlers
@@ -821,7 +829,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     setShowAddCodeModal(true);
   };
 
-  const handleSaveMasterCode = (e: React.FormEvent) => {
+  const handleSaveMasterCode = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanCode = newCodeValue.trim();
     const cleanCat = newCategoryValue.trim();
@@ -893,16 +901,22 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       ],
     };
 
-    saveProgramBudgetDataset(updatedDataset, true);
-    setDataset(updatedDataset);
-    setShowAddCodeModal(false);
-    setStatusBanner({
-      type: 'success',
-      message: `Master Budget Code ${cleanCode} (${cleanCat}) berhasil disimpan dan terhubung ke seluruh modul.`,
-    });
+    try {
+      const persisted = await saveProgramBudgetDatasetAsync(updatedDataset);
+      setDataset(persisted);
+      setShowAddCodeModal(false);
+      setStatusBanner({
+        type: 'success',
+        message: `Master Budget Code ${cleanCode} (${cleanCat}) berhasil disimpan dan terhubung ke seluruh modul.`,
+      });
+    } catch (err: any) {
+      setCodeFormError(
+        err?.message || 'Gagal menyimpan Master Budget Code ke database server.'
+      );
+    }
   };
 
-  const handleDeleteMasterCode = (item: ProgramMasterBudgetCode) => {
+  const handleDeleteMasterCode = async (item: ProgramMasterBudgetCode) => {
     const updatedCodes = dataset.masterBudgetCodes.filter(
       (c) => c.id !== item.id
     );
@@ -924,8 +938,15 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         ...dataset.revisions,
       ],
     };
-    saveProgramBudgetDataset(updatedDataset, true);
-    setDataset(updatedDataset);
+    try {
+      const persisted = await saveProgramBudgetDatasetAsync(updatedDataset);
+      setDataset(persisted);
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        message: err?.message || 'Gagal menghapus Master Budget Code pada database server.',
+      });
+    }
   };
 
   // Excel Upload & Preview Handlers
@@ -956,7 +977,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     }
   };
 
-  const handleConfirmExcelImport = () => {
+  const handleConfirmExcelImport = async () => {
     const validRows = excelPreviewRows.filter((r) => r.status === 'valid');
     if (validRows.length === 0) {
       setShowExcelPreviewModal(false);
@@ -999,13 +1020,20 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       ],
     };
 
-    saveProgramBudgetDataset(updatedDataset, true);
-    setDataset(updatedDataset);
-    setShowExcelPreviewModal(false);
-    setStatusBanner({
-      type: 'success',
-      message: `Berhasil mengimpor ${validRows.length} Master Budget Code dari "${excelFileName}".`,
-    });
+    try {
+      const persisted = await saveProgramBudgetDatasetAsync(updatedDataset);
+      setDataset(persisted);
+      setShowExcelPreviewModal(false);
+      setStatusBanner({
+        type: 'success',
+        message: `Berhasil mengimpor ${validRows.length} Master Budget Code dari "${excelFileName}".`,
+      });
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        message: err?.message || 'Gagal menyimpan hasil impor Excel ke database server.',
+      });
+    }
   };
 
   // Module 5: Master ToR Financial Update Handler

@@ -67,6 +67,7 @@ import {
   ExcelImportPreviewRow,
   getOrCreateProgramBudgetDataset,
   saveProgramBudgetDataset,
+  saveProgramBudgetDatasetAsync,
   saveAllProgramBudgetDatasets,
   loadAllProgramBudgetDatasets,
   getActivePeriods,
@@ -326,15 +327,29 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     fetchBudgetAndFinancialRecords();
   }, [fetchBudgetAndFinancialRecords]);
 
-  // Persist helper to both localStorage and server db.json
-  const persistDatasetToServerAndLocal = async (updated: ProgramBudgetDataset) => {
-    saveProgramBudgetDataset(updated);
-    setDataset(updated);
+  // Persist helper: waits for authoritative server/MySQL commit before updating local cache & UI state
+  const persistDatasetToServerAndLocal = async (
+    updated: ProgramBudgetDataset,
+    onModalError?: (msg: string) => void
+  ): Promise<boolean> => {
     const key = `${updated.programId}__${updated.fiscalYear}`;
     try {
-      await api.saveFinanceProgramBudget(key, updated);
-    } catch (err) {
-      console.error('Failed to persist program budget to server:', err);
+      const persisted = await saveProgramBudgetDatasetAsync({
+        ...updated,
+        id: key,
+      });
+      setDataset(persisted);
+      return true;
+    } catch (err: any) {
+      const errMsg =
+        err?.message ||
+        'Gagal menyimpan perubahan anggaran ke database server. Perubahan dibatalkan.';
+      if (onModalError) {
+        onModalError(errMsg);
+      } else {
+        setErrorMessage(errMsg);
+      }
+      return false;
     }
   };
 
@@ -886,7 +901,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
       `Kode & Periode (${normalizedPeriods.map((p) => p.code).join(', ')}) berhasil di-update oleh Direktur dan langsung terhubung ke TOR (${activePeriod?.code}). Menunggu konfirmasi Finance.`
     );
@@ -937,7 +952,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
       `Finance berhasil mengonfirmasi perubahan Kode & Periode (${normalizedPeriods.map((p) => p.code).join(', ')}).`
     );
@@ -1011,7 +1026,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
       isDirector
         ? `Anggaran & Custom Period "${dataset.programName}" berhasil disimpan dan di-ACC Direktur.`
@@ -1059,7 +1074,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setShowBudgetRevisionInput(false);
     setBudgetRevisionNotesInput('');
     setSuccessMessage(
@@ -1098,7 +1113,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setShowBudgetRevisionInput(false);
     setBudgetRevisionNotesInput('');
     setSuccessMessage(`Permintaan revisi anggaran berhasil dikirim ke Finance.`);
@@ -1155,7 +1170,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
       `Time Period Aktif (TOR) berhasil diatur ke "${targetPeriod?.code} — ${targetPeriod?.label}".`
     );
@@ -1251,7 +1266,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated, setCodeFormError))) return;
     setShowAddCodeModal(false);
     setSuccessMessage(`${actionLabel} berhasil disimpan. Silakan klik Konfirmasi Update Master Kode untuk mengonfirmasi.`);
   };
@@ -1295,7 +1310,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         ...(dataset.revisions || []),
       ],
     };
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(`Master Budget Code ${item.code} berhasil dihapus.`);
   };
 
@@ -1337,7 +1352,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
       `Konfirmasi Update Master Kode (${dataset.masterBudgetCodes.length} kode aktif) berhasil disahkan dan tercatat di Track Audit.`
     );
@@ -1394,7 +1409,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ],
     };
 
-    await persistDatasetToServerAndLocal(updated);
+    if (!(await persistDatasetToServerAndLocal(updated))) return;
     setShowExcelPreviewModal(false);
     setExcelPreviewRows([]);
     setSuccessMessage(

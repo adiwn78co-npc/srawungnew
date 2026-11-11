@@ -121,6 +121,27 @@ async function startServer() {
   await db.ready();
 
   const app = express();
+  // Pastikan seluruh async route handler pada Express 4 meneruskan Promise rejection ke error middleware
+  for (const method of ['get', 'post', 'put', 'patch', 'delete'] as const) {
+    const origRegister = (app as any)[method].bind(app);
+    (app as any)[method] = (routePath: any, ...handlers: any[]) => {
+      const wrappedHandlers = handlers.map((fn) => {
+        if (typeof fn !== 'function' || fn.length > 3) return fn;
+        return (req: Request, res: Response, next: express.NextFunction) => {
+          try {
+            const ret = fn(req, res, next);
+            if (ret && typeof ret.catch === 'function') {
+              ret.catch(next);
+            }
+          } catch (syncErr) {
+            next(syncErr);
+          }
+        };
+      });
+      return origRegister(routePath, ...wrappedHandlers);
+    };
+  }
+
   app.set('trust proxy', 1);
   const PORT = Number(process.env.PORT) || 3000;
 
@@ -460,6 +481,7 @@ async function startServer() {
           u.mustChangePassword = false;
         }
       }
+      db.syncCleanBaseline();
       return;
     }
 
@@ -711,10 +733,27 @@ async function startServer() {
     if (req.path === '/health') {
       return next();
     }
+
+    const methodUpper = (req.method || 'GET').toUpperCase();
+    const isWriteMethod =
+      methodUpper === 'POST' ||
+      methodUpper === 'PUT' ||
+      methodUpper === 'PATCH' ||
+      methodUpper === 'DELETE';
+
+    if (isWriteMethod) {
+      console.log(`[WRITE] WRITE REQUEST RECEIVED: ${methodUpper} /api${req.path}`);
+    }
+
     // 0. Database Operational Guard (Prevents serving placeholder/seed state or losing writes if MySQL is unreachable)
     if (!db.isOperational()) {
       await db.ready();
       if (!db.isOperational()) {
+        if (isWriteMethod) {
+          console.error(
+            `[WRITE] DATABASE UNAVAILABLE: ${methodUpper} /api${req.path} rejected (503)`
+          );
+        }
         return res.status(503).json({
           error: 'Database utama sedang tidak dapat dijangkau. Permintaan ditangguhkan sementara untuk melindungi integritas data.',
         });
@@ -729,6 +768,85 @@ async function startServer() {
           }
         })
         .catch(() => {});
+    }
+
+    // Segarkan cache memori dari MySQL apabila stale agar pembacaan (refresh halaman) & basis mutasi selalu akurat
+    if (db.isMysqlReady()) {
+      const refreshedFromMysql = await db.refreshFromMysqlIfStale(1500);
+      if (refreshedFromMysql) {
+        ensureUserSecurityFieldsInitialized();
+      }
+    }
+
+    // Pasang interceptor sinkronisasi MySQL pada setiap operasi WRITE agar API tidak pernah mengembalikan 2xx palsu
+    // sebelum transaksi INSERT / UPDATE / DELETE benar-benar berhasil di-commit di MySQL.
+    if (isWriteMethod) {
+      const originalSend = res.send.bind(res);
+      let sendIntercepted = false;
+      const isSessionAuditOnlyRoute =
+        req.path === '/auth/login' || req.path === '/auth/logout';
+
+      res.send = ((body?: any): Response => {
+        if (sendIntercepted) {
+          return originalSend(body);
+        }
+        sendIntercepted = true;
+
+        if (isSessionAuditOnlyRoute) {
+          if (db.hasUncommittedChanges()) {
+            void db
+              .commitPendingWrites(`${methodUpper} /api${req.path} [session]`)
+              .catch(() => {
+                db.rollbackUncommittedChanges();
+              })
+              .finally(() => {
+                originalSend(body);
+              });
+            return res;
+          }
+          return originalSend(body);
+        }
+
+        if (res.statusCode < 400) {
+          console.log(
+            `[WRITE] AUTHORIZED & VALIDATED: ${methodUpper} /api${req.path} (status=${res.statusCode})`
+          );
+          if (!db.hasUncommittedChanges()) {
+            return originalSend(body);
+          }
+          void db
+            .commitPendingWrites(`${methodUpper} /api${req.path}`)
+            .then(() => {
+              originalSend(body);
+            })
+            .catch((commitErr: any) => {
+              const errStatus = Number(commitErr?.httpStatus || commitErr?.status || 500);
+              const errMsg =
+                commitErr?.userMessage ||
+                'Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.';
+              res.status(errStatus);
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              originalSend(JSON.stringify({ error: errMsg }));
+            });
+          return res;
+        }
+
+        console.warn(
+          `[WRITE] REJECTED BEFORE COMMIT: ${methodUpper} /api${req.path} (status=${res.statusCode})`
+        );
+        if (db.hasUncommittedChanges()) {
+          void db
+            .commitPendingWrites(`${methodUpper} /api${req.path} [audit]`)
+            .catch(() => {
+              db.rollbackUncommittedChanges();
+            })
+            .finally(() => {
+              originalSend(body);
+            });
+          return res;
+        }
+        return originalSend(body);
+      }) as typeof res.send;
     }
 
     // 1. Sliding-Window API Rate Limiting (600 requests / minute per client session or IP)
@@ -775,9 +893,18 @@ async function startServer() {
     // 4. Strict Zero-Trust Bearer Token Verification (No x-user-id header fallback allowed)
     const verifiedUser = authenticateBearerToken(req);
     if (!verifiedUser) {
+      if (isWriteMethod) {
+        console.warn(`[WRITE] UNAUTHENTICATED: ${methodUpper} /api${req.path} rejected (401)`);
+      }
       return res.status(401).json({
         error: 'Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali menggunakan kredensial resmi Anda.',
       });
+    }
+
+    if (isWriteMethod) {
+      console.log(
+        `[WRITE] AUTHENTICATED: ${methodUpper} /api${req.path} (user=${verifiedUser.id}, role=${verifiedUser.role})`
+      );
     }
 
     // Perpanjang token otomatis secara transparan (Sliding Session) jika pengguna sedang aktif bekerja
@@ -1254,7 +1381,11 @@ async function startServer() {
       });
     });
 
-    await db.syncUserImmediately(loggedInUser);
+    await db.syncUserImmediately(loggedInUser, {
+      bestEffortMetadataOnly: true,
+      contextLabel: 'POST /api/auth/login [metadata]',
+    });
+    loggedInUser = db.getData().users.find((u) => u.id === targetUser.id) || targetUser;
 
     const sessionToken = createSessionToken(loggedInUser);
 
@@ -1412,7 +1543,11 @@ async function startServer() {
         updatedTarget = d.users[idx];
       }
     });
-    await db.syncUserImmediately(updatedTarget);
+    await db.syncUserImmediately(updatedTarget, {
+      bestEffortMetadataOnly: true,
+      contextLabel: 'POST /api/auth/switch-user [metadata]',
+    });
+    updatedTarget = db.getData().users.find((u) => u.id === user.id) || user;
     const sessionToken = createSessionToken(updatedTarget);
     res.json({
       message: `Berhasil beralih ke ${user.name} (${user.roleTitle})`,
@@ -7062,7 +7197,8 @@ async function startServer() {
       currentUser.role !== 'finance' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
-      currentUser.role !== 'admin'
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManagePrograms
     ) {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Finance, Direktur, atau Program Manager yang berwenang memperbarui Master Budget.',
@@ -10215,14 +10351,20 @@ async function startServer() {
   });
 
   // Safe Production Error Handler for API routes (No stack traces or sensitive secrets leaked)
-  app.use('/api', (err: any, _req: Request, res: Response, _next: express.NextFunction) => {
+  app.use('/api', (err: any, req: Request, res: Response, _next: express.NextFunction) => {
+    db.rollbackUncommittedChanges();
     const safeErrMsg = String(err?.message || 'Unexpected error')
       .replace(/Bearer\s+[^\s]+/gi, 'Bearer ***')
       .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
-    console.error('[API Security Error]:', safeErrMsg);
+    console.error(`[API Error] ${req.method} /api${req.path}:`, safeErrMsg);
     if (res.headersSent) return;
-    res.status(err?.status || 500).json({
-      error: 'Terjadi kesalahan pemrosesan pada server. Silakan periksa kembali data yang dikirimkan.',
+    const statusCode = Number(err?.httpStatus || err?.status || 500);
+    res.status(statusCode).json({
+      error:
+        err?.userMessage ||
+        (statusCode === 401
+          ? 'Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali.'
+          : 'Terjadi kesalahan pemrosesan pada server saat menyimpan atau memuat data.'),
     });
   });
 

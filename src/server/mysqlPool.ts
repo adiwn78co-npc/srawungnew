@@ -173,6 +173,7 @@ export function isMysqlConfigured(): boolean {
 export async function resetMysqlPool(): Promise<void> {
   const existing = cachedPool;
   cachedPool = null;
+  tableColumnsCache.clear();
   if (existing) {
     try {
       await existing.end();
@@ -816,6 +817,600 @@ export async function loadDatabaseFromMysql(
   };
 }
 
+// ============================================================================
+// MYSQL PRIVILEGE INSPECTION & ADAPTIVE WRITE ENGINE
+// (Menyesuaikan kolom aktual di Hostinger MySQL, mencegah NaN/DATETIME error,
+//  tidak melakukan DELETE massal, dan mencatat log diagnostik aman)
+// ============================================================================
+
+export interface MysqlPrivilegeSummary {
+  checked: boolean;
+  canSelect: boolean;
+  canInsert: boolean;
+  canUpdate: boolean;
+  canDelete: boolean;
+  rawSummary: string;
+}
+
+interface MysqlColumnMeta {
+  name: string;
+  type: string;
+  nullable: boolean;
+  key: string;
+  hasDefault: boolean;
+  extra: string;
+}
+
+const tableColumnsCache = new Map<string, Map<string, MysqlColumnMeta>>();
+
+function safeFiniteNumber(val: any, fallback: number | null = 0): number | null {
+  if (val === null || val === undefined || val === '') return fallback;
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  const num = typeof val === 'number' ? val : Number(val);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function toMysqlDateTimeString(val: any): string | null {
+  if (val === null || val === undefined || val === '') return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    return val.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s} 00:00:00`;
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  return null;
+}
+
+function toMysqlDateOnlyString(val: any): string | null {
+  if (val === null || val === undefined || val === '') return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    return val.toISOString().slice(0, 10);
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
+  const typeLower = (colMeta.type || '').toLowerCase();
+  const canLeaveNull =
+    colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes('auto_increment');
+
+  const fallbackForStrictNotNull = (): any => {
+    if (
+      typeLower.includes('int') ||
+      typeLower.includes('decimal') ||
+      typeLower.includes('numeric') ||
+      typeLower.includes('float') ||
+      typeLower.includes('double') ||
+      typeLower.includes('bit')
+    ) {
+      return 0;
+    }
+    if (typeLower.startsWith('datetime') || typeLower.startsWith('timestamp')) {
+      return new Date().toISOString().slice(0, 19).replace('T', ' ');
+    }
+    if (typeLower === 'date') {
+      return new Date().toISOString().slice(0, 10);
+    }
+    if (typeLower.includes('json')) {
+      return '{}';
+    }
+    return '';
+  };
+
+  if (val === undefined || val === null) {
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+
+  if (typeLower.startsWith('datetime') || typeLower.startsWith('timestamp')) {
+    const dt = toMysqlDateTimeString(val);
+    if (dt !== null) return dt;
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+
+  if (typeLower === 'date') {
+    const d = toMysqlDateOnlyString(val);
+    if (d !== null) return d;
+    return canLeaveNull ? null : fallbackForStrictNotNull();
+  }
+
+  if (
+    typeLower.includes('int') ||
+    typeLower.includes('decimal') ||
+    typeLower.includes('numeric') ||
+    typeLower.includes('float') ||
+    typeLower.includes('double') ||
+    typeLower.includes('bit')
+  ) {
+    const num = safeFiniteNumber(val, null);
+    if (num !== null) return num;
+    return canLeaveNull ? null : 0;
+  }
+
+  if (typeLower.includes('json')) {
+    if (typeof val === 'string') {
+      try {
+        JSON.parse(val);
+        return val;
+      } catch {
+        return JSON.stringify(val);
+      }
+    }
+    return JSON.stringify(val);
+  }
+
+  const strVal = typeof val === 'object' ? JSON.stringify(val) : String(val);
+  const lenMatch = typeLower.match(/(?:var)?char\((\d+)\)/);
+  if (lenMatch) {
+    const maxLen = parseInt(lenMatch[1], 10);
+    if (Number.isFinite(maxLen) && maxLen > 0 && strVal.length > maxLen) {
+      return strVal.slice(0, maxLen);
+    }
+  }
+  return strVal;
+}
+
+async function ensureSingleMissingTableFromSchema(connOrPool: any, tableName: string): Promise<void> {
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'database', 'schema.sql'),
+    path.resolve(__poolDir, 'database', 'schema.sql'),
+    path.resolve(__poolDir, '..', '..', 'database', 'schema.sql'),
+  ];
+  const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (!schemaPath) return;
+
+  const sqlContent = fs.readFileSync(schemaPath, 'utf-8');
+  const cleanedSql = sqlContent.replace(/^\s*--.*$/gm, '');
+  const statements = cleanedSql
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const targetRegex = new RegExp(
+    `^CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\s+\`?${tableName}\`?\\b`,
+    'i'
+  );
+  for (const stmt of statements) {
+    if (targetRegex.test(stmt)) {
+      await connOrPool.query(stmt);
+      return;
+    }
+  }
+}
+
+async function describeTableColumns(
+  connOrPool: any,
+  tableName: string
+): Promise<Map<string, MysqlColumnMeta>> {
+  const cached = tableColumnsCache.get(tableName);
+  if (cached && cached.size > 0) {
+    return cached;
+  }
+
+  let rows: any[];
+  try {
+    const [res] = await connOrPool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+    rows = Array.isArray(res) ? res : [];
+  } catch (err: any) {
+    if (err?.code === 'ER_NO_SUCH_TABLE') {
+      await ensureSingleMissingTableFromSchema(connOrPool, tableName);
+      const [retryRes] = await connOrPool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+      rows = Array.isArray(retryRes) ? retryRes : [];
+    } else {
+      throw err;
+    }
+  }
+
+  const colMap = new Map<string, MysqlColumnMeta>();
+  for (const r of rows) {
+    const fieldName = String(r.Field || r.field || '').trim();
+    if (!fieldName) continue;
+    colMap.set(fieldName, {
+      name: fieldName,
+      type: String(r.Type || r.type || 'varchar(255)'),
+      nullable: String(r.Null || r.null || 'YES').toUpperCase() === 'YES',
+      key: String(r.Key || r.key || ''),
+      hasDefault: r.Default !== null && r.Default !== undefined,
+      extra: String(r.Extra || r.extra || '').toLowerCase(),
+    });
+  }
+
+  if (colMap.size > 0) {
+    tableColumnsCache.set(tableName, colMap);
+  }
+  return colMap;
+}
+
+/**
+ * Memeriksa hak akses user database MySQL secara non-destructive menggunakan SHOW GRANTS FOR CURRENT_USER().
+ * Tidak pernah mengubah privilege, membuat user baru, atau mengekspos password/host sensitif.
+ */
+export async function checkMysqlWritePrivileges(pool: MysqlPoolLike): Promise<MysqlPrivilegeSummary> {
+  try {
+    const [rows]: any = await pool.query('SHOW GRANTS FOR CURRENT_USER()');
+    const grantLines: string[] = Array.isArray(rows)
+      ? rows.map((r: any) => String(Object.values(r || {})[0] || '').toUpperCase())
+      : [];
+
+    let canSelect = false;
+    let canInsert = false;
+    let canUpdate = false;
+    let canDelete = false;
+
+    for (const line of grantLines) {
+      const match = line.match(/^GRANT\s+(.+?)\s+ON\s+/i);
+      const privPart = match ? match[1] : line;
+      if (privPart.includes('ALL PRIVILEGES') || /\bALL\b/.test(privPart)) {
+        canSelect = true;
+        canInsert = true;
+        canUpdate = true;
+        canDelete = true;
+      } else {
+        if (/\bSELECT\b/.test(privPart)) canSelect = true;
+        if (/\bINSERT\b/.test(privPart)) canInsert = true;
+        if (/\bUPDATE\b/.test(privPart)) canUpdate = true;
+        if (/\bDELETE\b/.test(privPart)) canDelete = true;
+      }
+    }
+
+    const summaryText = `SELECT=${canSelect}, INSERT=${canInsert}, UPDATE=${canUpdate}, DELETE=${canDelete}`;
+    if (!canInsert || !canUpdate) {
+      console.warn(
+        `[DB] WARNING: MySQL database user may lack write privileges (${summaryText}). Ensure INSERT and UPDATE privileges are granted in Hostinger MySQL Databases.`
+      );
+    } else {
+      console.log(`[DB] MySQL privilege verification OK (${summaryText}).`);
+    }
+
+    return {
+      checked: true,
+      canSelect,
+      canInsert,
+      canUpdate,
+      canDelete,
+      rawSummary: summaryText,
+    };
+  } catch {
+    return {
+      checked: false,
+      canSelect: true,
+      canInsert: true,
+      canUpdate: true,
+      canDelete: true,
+      rawSummary: 'Privilege inspection skipped (SHOW GRANTS restricted by host)',
+    };
+  }
+}
+
+interface AdaptiveUpsertOptions {
+  primaryKeyColumn?: string;
+  immutableOnUpdateColumns?: string[];
+  preserveNonEmptyColumns?: string[];
+  coalesceIfNullColumns?: string[];
+}
+
+async function executeAdaptiveUpsert(
+  connOrPool: any,
+  tableName: string,
+  candidateRow: Record<string, any>,
+  options?: AdaptiveUpsertOptions
+): Promise<number> {
+  const colMetaMap = await describeTableColumns(connOrPool, tableName);
+  const pkCol = options?.primaryKeyColumn || 'id';
+  const immutableSet = new Set<string>([
+    pkCol,
+    ...(options?.immutableOnUpdateColumns || ['created_at']),
+  ]);
+  const preserveNonEmptySet = new Set<string>(options?.preserveNonEmptyColumns || []);
+  const coalesceIfNullSet = new Set<string>(options?.coalesceIfNullColumns || []);
+
+  const selectedCols: string[] = [];
+  const params: any[] = [];
+
+  for (const [colName, colMeta] of colMetaMap.entries()) {
+    if (colMeta.extra.includes('auto_increment') && candidateRow[colName] === undefined) {
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(candidateRow, colName)) {
+      selectedCols.push(colName);
+      params.push(formatValueForMysqlColumn(candidateRow[colName], colMeta));
+    } else if (!colMeta.nullable && !colMeta.hasDefault && !colMeta.extra.includes('auto_increment')) {
+      // Sediakan nilai fallback aman jika tabel produksi Hostinger memiliki kolom tambahan NOT NULL tanpa default
+      selectedCols.push(colName);
+      params.push(formatValueForMysqlColumn(null, colMeta));
+    }
+  }
+
+  if (selectedCols.length === 0) {
+    throw new Error(`No matching columns found for MySQL table '${tableName}'.`);
+  }
+
+  const quotedCols = selectedCols.map((c) => `\`${c}\``).join(', ');
+  const placeholders = selectedCols.map(() => '?').join(', ');
+
+  const updateAssignments: string[] = [];
+  for (const colName of selectedCols) {
+    if (immutableSet.has(colName)) continue;
+    if (preserveNonEmptySet.has(colName)) {
+      updateAssignments.push(
+        `\`${colName}\` = COALESCE(NULLIF(VALUES(\`${colName}\`), ''), \`${tableName}\`.\`${colName}\`)`
+      );
+    } else if (coalesceIfNullSet.has(colName)) {
+      updateAssignments.push(
+        `\`${colName}\` = COALESCE(VALUES(\`${colName}\`), \`${tableName}\`.\`${colName}\`)`
+      );
+    } else {
+      updateAssignments.push(`\`${colName}\` = VALUES(\`${colName}\`)`);
+    }
+  }
+
+  if (updateAssignments.length === 0) {
+    updateAssignments.push(`\`${pkCol}\` = \`${tableName}\`.\`${pkCol}\``);
+  }
+
+  const sql = `INSERT INTO \`${tableName}\` (${quotedCols}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateAssignments.join(', ')}`;
+  const [result]: any = await connOrPool.query(sql, params);
+  return Number(result?.affectedRows || 0);
+}
+
+function buildUserCandidateRow(u: any, nowIso: string): Record<string, any> {
+  const effectiveHash =
+    (typeof u.passwordHash === 'string' && u.passwordHash.trim()) ||
+    (typeof u.password_hash === 'string' && u.password_hash.trim()) ||
+    null;
+  const effectiveUsername =
+    u.username || deriveUsernameFallback(u.email || '', u.name || '', String(u.id || ''));
+  const permsJson = JSON.stringify(u.permissions || {});
+  return {
+    id: String(u.id).slice(0, 128),
+    username: truncStr(effectiveUsername, 128),
+    name: truncStr(u.name, 255) || '',
+    email: truncStr(u.email, 255) || '',
+    password_hash: truncStr(effectiveHash, 255),
+    password: truncStr(effectiveHash, 255),
+    role: truncStr(u.role, 64) || 'staff',
+    role_title: truncStr(u.roleTitle, 255) || truncStr(u.role, 64) || 'Staff',
+    department: truncStr(u.department, 255),
+    is_active: u.isActive === false ? 0 : 1,
+    account_status: truncStr(u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'), 64),
+    must_change_password: u.mustChangePassword ? 1 : 0,
+    password_updated_at: u.passwordUpdatedAt || null,
+    permissions_json: permsJson,
+    permissions: permsJson,
+    last_login_at: u.lastLoginAt || null,
+    created_at: u.createdAt || nowIso,
+    updated_at: nowIso,
+    raw_json: JSON.stringify(u),
+  };
+}
+
+function buildProgramCandidateRow(p: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(p.id).slice(0, 128),
+    code: truncStr(p.code, 64),
+    name: truncStr(p.name, 255) || '',
+    location: truncStr(p.location, 255),
+    description: p.description || null,
+    donor: truncStr(p.donor, 255),
+    start_date: truncStr(p.startDate, 32),
+    end_date: truncStr(p.endDate, 32),
+    total_budget: safeFiniteNumber(p.totalBudget ?? p.budget, 0),
+    currency: truncStr(p.currency || 'IDR', 16),
+    status: truncStr(p.status || 'Aktif', 64),
+    created_at: p.createdAt || nowIso,
+    updated_at: p.updatedAt || nowIso,
+    raw_json: JSON.stringify(p),
+  };
+}
+
+function buildOutcomeCandidateRow(oc: any): Record<string, any> {
+  return {
+    id: String(oc.id).slice(0, 128),
+    program_id: truncStr(oc.programId, 128) || '',
+    code: truncStr(oc.code, 64),
+    name: truncStr(oc.name || oc.title, 500) || '',
+    description: oc.description || null,
+    budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
+    raw_json: JSON.stringify(oc),
+  };
+}
+
+function buildOutputCandidateRow(op: any): Record<string, any> {
+  return {
+    id: String(op.id).slice(0, 128),
+    program_id: truncStr(op.programId, 128),
+    outcome_id: truncStr(op.outcomeId, 128) || '',
+    code: truncStr(op.code, 64),
+    name: truncStr(op.name || op.title, 500) || '',
+    description: op.description || null,
+    budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
+    raw_json: JSON.stringify(op),
+  };
+}
+
+function buildActivityCandidateRow(ac: any): Record<string, any> {
+  return {
+    id: String(ac.id).slice(0, 128),
+    program_id: truncStr(ac.programId, 128),
+    outcome_id: truncStr(ac.outcomeId, 128),
+    output_id: truncStr(ac.outputId, 128) || '',
+    code: truncStr(ac.code, 64),
+    name: truncStr(ac.name || ac.title, 500) || '',
+    description: ac.description || null,
+    budget_allocated: safeFiniteNumber(ac.budgetAllocated ?? ac.budget, 0),
+    raw_json: JSON.stringify(ac),
+  };
+}
+
+function buildSubActivityCandidateRow(sa: any): Record<string, any> {
+  return {
+    id: String(sa.id).slice(0, 128),
+    activity_id: truncStr(sa.activityId, 128) || '',
+    code: truncStr(sa.code, 64),
+    name: truncStr(sa.name, 500) || '',
+    description: sa.description || null,
+    budget_allocated: safeFiniteNumber(sa.budgetAllocated ?? sa.budget, 0),
+    raw_json: JSON.stringify(sa),
+  };
+}
+
+function buildTorCandidateRow(t: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(t.id).slice(0, 128),
+    tor_number: truncStr(t.torNumber || t.documentNumber, 128),
+    title: truncStr(t.title, 500) || '',
+    program_id: truncStr(t.programId, 128),
+    outcome_id: truncStr(t.outcomeId, 128),
+    output_id: truncStr(t.outputId, 128),
+    activity_id: truncStr(t.activityId, 128),
+    created_by_user_id: truncStr(t.createdByUserId || t.createdById || t.picId, 128),
+    created_by_name: truncStr(t.createdByName || t.picName, 255),
+    status: truncStr(t.submissionStatus || t.status || 'Draft', 128),
+    current_stage: safeFiniteNumber(t.currentWorkflowStage ?? t.currentStage, 1),
+    budget_requested: safeFiniteNumber(t.budgetRequested, null),
+    budget_actual_spent: safeFiniteNumber(t.budgetActualSpent, null),
+    start_date: truncStr(t.startDate, 32),
+    end_date: truncStr(t.endDate, 32),
+    location: truncStr(t.location, 255),
+    created_at: t.createdAt || nowIso,
+    updated_at: t.updatedAt || nowIso,
+    raw_json: JSON.stringify(t),
+  };
+}
+
+function buildApprovalRecordCandidateRow(ar: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(ar.id).slice(0, 128),
+    tor_id: truncStr(ar.torId, 128) || '',
+    // Mendukung stage bertipe INT maupun VARCHAR tanpa pernah menghasilkan NaN
+    stage: ar.stage ?? null,
+    approver_user_id: truncStr(ar.approverUserId || ar.approverId || ar.reviewerId, 128),
+    approver_name: truncStr(ar.approverName || ar.reviewerName, 255),
+    role: truncStr(ar.role || ar.reviewerRole, 128),
+    action: truncStr(ar.action || ar.decision, 128),
+    notes: ar.notes ?? ar.comment ?? null,
+    timestamp: ar.timestamp || nowIso,
+    raw_json: JSON.stringify(ar),
+  };
+}
+
+function buildCashAdvanceCandidateRow(ca: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(ca.id).slice(0, 128),
+    ca_number: truncStr(ca.caNumber || ca.documentNumber, 128),
+    tor_id: truncStr(ca.torId, 128),
+    program_id: truncStr(ca.programId, 128),
+    activity_id: truncStr(ca.activityId, 128),
+    requester_user_id: truncStr(ca.requesterUserId || ca.requesterId || ca.submittedByUserId, 128),
+    requester_name: truncStr(ca.requesterName || ca.submittedByName, 255),
+    total_amount: safeFiniteNumber(ca.totalAmount ?? ca.requestedAmount, 0),
+    realized_amount: safeFiniteNumber(ca.realizedAmount ?? ca.actualSpentAmount, null),
+    status: truncStr(ca.status || 'Draft', 128),
+    report_approval_status: truncStr(ca.reportApprovalStatus, 128),
+    created_at: ca.createdAt || nowIso,
+    updated_at: ca.updatedAt || nowIso,
+    raw_json: JSON.stringify(ca),
+  };
+}
+
+function buildMeetingMinuteCandidateRow(mm: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(mm.id).slice(0, 128),
+    tor_id: truncStr(mm.torId, 128),
+    activity_id: truncStr(mm.activityId, 128),
+    title: truncStr(mm.title || mm.agenda, 500),
+    meeting_date: truncStr(mm.meetingDate || mm.date, 32),
+    location: truncStr(mm.location, 255),
+    created_by_user_id: truncStr(mm.createdByUserId || mm.createdById, 128),
+    status: truncStr(mm.status, 64),
+    created_at: mm.createdAt || nowIso,
+    raw_json: JSON.stringify(mm),
+  };
+}
+
+function buildParticipantCandidateRow(pt: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(pt.id).slice(0, 128),
+    participant_type: truncStr(pt.entityType || pt.participantType || 'INDIVIDUAL', 64),
+    name: truncStr(pt.fullName || pt.groupName || pt.name, 255) || '',
+    gender: truncStr(pt.gender, 32),
+    organization_or_group: truncStr(pt.institutionName || pt.groupName, 255),
+    phone: truncStr(pt.phoneNumber || pt.contactPhone, 64),
+    village_or_city: truncStr(pt.cityOrRegency || pt.villageOrSubdistrict, 255),
+    created_at: pt.createdAt || nowIso,
+    raw_json: JSON.stringify(pt),
+  };
+}
+
+function buildAttendanceRecordCandidateRow(att: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(att.id).slice(0, 128),
+    record_date: truncStr(att.date, 32) || '',
+    user_id: truncStr(att.userId, 128) || '',
+    user_name: truncStr(att.userName, 255),
+    record_type: truncStr(att.recordType || 'ATTENDANCE', 64),
+    clock_in_time: truncStr(att.clockInTime, 64),
+    clock_out_time: truncStr(att.clockOutTime, 64),
+    total_work_hours: safeFiniteNumber(att.totalWorkHours, 0),
+    is_outside_work_location: att.isOutsideWorkLocation ? 1 : 0,
+    created_at: att.createdAt || nowIso,
+    updated_at: att.updatedAt || nowIso,
+    raw_json: JSON.stringify(att),
+  };
+}
+
+function buildAuditLogCandidateRow(al: any, nowIso: string): Record<string, any> {
+  return {
+    id: String(al.id).slice(0, 128),
+    tor_id: truncStr(al.torId || (al.entityType === 'TOR' ? al.entityId : null), 128),
+    user_id: truncStr(al.userId || al.actorId, 128),
+    user_name: truncStr(al.userName || al.actorName, 255),
+    user_role: truncStr(al.userRole || al.actorRole, 64),
+    action: truncStr(al.action, 255) || '',
+    details: al.details || null,
+    timestamp: al.timestamp || nowIso,
+    raw_json: JSON.stringify(al),
+  };
+}
+
+function extractKvSnapshot(data: DatabaseSchema): Record<string, any> {
+  const kvEntries: Record<string, any> = {
+    currentUserId: data.currentUserId,
+    cashAdvanceSummaries: data.cashAdvanceSummaries || {},
+    cashAdvanceAuditLogs: data.cashAdvanceAuditLogs || {},
+    activityDocumentations: data.activityDocumentations || {},
+    activityDocumentationList: data.activityDocumentationList || [],
+    outputRaciRecords: data.outputRaciRecords || {},
+    activityMonitoringRecords: data.activityMonitoringRecords || {},
+    monitoringReports: data.monitoringReports || {},
+    approvalHubItems: data.approvalHubItems || {},
+    approvalWorkflowConfigs: data.approvalWorkflowConfigs || {},
+    approvalNotifications: data.approvalNotifications || [],
+    programBudgets: data.programBudgets || {},
+    attendanceSystem: data.attendanceSystem || {},
+    cleanResetPrj3581V1: data.cleanResetPrj3581V1 ?? true,
+    cleanResetPrj3581V2: data.cleanResetPrj3581V2 ?? true,
+  };
+  if (data.organizationSettings !== undefined) {
+    kvEntries.organizationSettings = data.organizationSettings;
+  }
+  return kvEntries;
+}
+
 /**
  * Menyimpan entri metadata spesifik ke system_kv_store secara non-destructive (tanpa menyentuh tabel operasional)
  */
@@ -826,552 +1421,351 @@ export async function upsertMysqlKvEntries(
   const nowIso = new Date().toISOString();
   for (const [k, v] of Object.entries(entries)) {
     if (v === undefined) continue;
-    await pool.query(
-      `INSERT INTO system_kv_store (store_key, store_value, updated_at)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         store_value = VALUES(store_value),
-         updated_at = VALUES(updated_at)`,
-      [k, JSON.stringify(v), nowIso]
+    await executeAdaptiveUpsert(
+      pool,
+      'system_kv_store',
+      {
+        store_key: String(k).slice(0, 128),
+        store_value: JSON.stringify(v),
+        updated_at: nowIso,
+      },
+      {
+        primaryKeyColumn: 'store_key',
+        immutableOnUpdateColumns: [],
+      }
     );
   }
 }
 
 /**
  * Menyimpan 1 baris pengguna (termasuk perubahan username, email, role, atau passwordHash)
- * secara langsung & atomik ke tabel users MySQL agar tidak pernah tertunda atau ikut ter-rollback tabel lain.
+ * secara langsung & atomik ke tabel users MySQL sesuai struktur kolom aktual di Hostinger.
  */
-export async function upsertMysqlUserRow(pool: MysqlPoolLike, u: any): Promise<void> {
-  if (!u || !u.id) return;
-  await pool.query(
-    `INSERT INTO users (
-      id, username, name, email, password_hash, role, role_title, department,
-      is_active, account_status, permissions_json, last_login_at, created_at, raw_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      username = VALUES(username),
-      name = VALUES(name),
-      email = VALUES(email),
-      password_hash = COALESCE(NULLIF(VALUES(password_hash), ''), users.password_hash),
-      role = VALUES(role),
-      role_title = VALUES(role_title),
-      department = VALUES(department),
-      is_active = VALUES(is_active),
-      account_status = VALUES(account_status),
-      permissions_json = VALUES(permissions_json),
-      last_login_at = VALUES(last_login_at),
-      raw_json = VALUES(raw_json)`,
-    [
-      String(u.id).slice(0, 128),
-      truncStr(u.username, 128),
-      truncStr(u.name, 255) || '',
-      truncStr(u.email, 255) || '',
-      truncStr(u.passwordHash, 255),
-      truncStr(u.role, 64) || 'staff',
-      truncStr(u.roleTitle, 255),
-      truncStr(u.department, 255),
-      u.isActive === false ? 0 : 1,
-      truncStr(u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'), 64),
-      JSON.stringify(u.permissions || {}),
-      truncStr(u.lastLoginAt, 64),
-      truncStr(u.createdAt || new Date().toISOString(), 64),
-      JSON.stringify(u),
-    ]
-  );
+export async function upsertMysqlUserRow(pool: MysqlPoolLike, u: any): Promise<number> {
+  if (!u || !u.id) return 0;
+  const nowIso = new Date().toISOString();
+  return executeAdaptiveUpsert(pool, 'users', buildUserCandidateRow(u, nowIso), {
+    primaryKeyColumn: 'id',
+    immutableOnUpdateColumns: ['created_at'],
+    preserveNonEmptyColumns: ['password_hash', 'password'],
+    coalesceIfNullColumns: ['last_login_at'],
+  });
 }
 
-export async function deleteMysqlUserRow(pool: MysqlPoolLike, userId: string): Promise<void> {
-  if (!userId) return;
-  await pool.query('DELETE FROM users WHERE id = ?', [String(userId).slice(0, 128)]);
+export async function deleteMysqlUserRow(pool: MysqlPoolLike, userId: string): Promise<number> {
+  if (!userId) return 0;
+  const [result]: any = await pool.query('DELETE FROM `users` WHERE `id` = ?', [
+    String(userId).slice(0, 128),
+  ]);
+  return Number(result?.affectedRows || 0);
 }
 
-async function syncTableById(
-  conn: any,
-  tableName: string,
-  rows: any[],
-  insertSql: string,
-  mapRowParams: (item: any) => any[],
-  options?: { allowDeleteMissing?: boolean }
-) {
-  const safeRows = Array.isArray(rows) ? rows.filter((r) => r && r.id) : [];
-  const currentIds = safeRows.map((r) => String(r.id));
-  const allowDelete = options?.allowDeleteMissing !== false;
+interface EntityTableSyncSpec {
+  tableName: string;
+  getRows: (d: DatabaseSchema) => any[];
+  buildCandidate: (item: any, nowIso: string) => Record<string, any>;
+  allowTargetedDelete: boolean;
+  upsertOptions?: AdaptiveUpsertOptions;
+}
 
-  if (currentIds.length === 0) {
-    if (allowDelete && tableName !== 'users') {
-      await conn.query(`DELETE FROM ${tableName}`);
+const ENTITY_TABLE_SPECS: EntityTableSyncSpec[] = [
+  {
+    tableName: 'users',
+    getRows: (d) => d.users || [],
+    buildCandidate: buildUserCandidateRow,
+    allowTargetedDelete: false, // Penghapusan user hanya boleh melalui deleteMysqlUserRow eksplisit
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: ['created_at'],
+      preserveNonEmptyColumns: ['password_hash', 'password'],
+      coalesceIfNullColumns: ['last_login_at'],
+    },
+  },
+  {
+    tableName: 'programs',
+    getRows: (d) => d.programs || [],
+    buildCandidate: buildProgramCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'outcomes',
+    getRows: (d) => d.outcomes || [],
+    buildCandidate: (oc) => buildOutcomeCandidateRow(oc),
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'outputs',
+    getRows: (d) => d.outputs || [],
+    buildCandidate: (op) => buildOutputCandidateRow(op),
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'activities',
+    getRows: (d) => d.activities || [],
+    buildCandidate: (ac) => buildActivityCandidateRow(ac),
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'sub_activities',
+    getRows: (d) => d.subActivities || [],
+    buildCandidate: (sa) => buildSubActivityCandidateRow(sa),
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'tors',
+    getRows: (d) => d.tors || [],
+    buildCandidate: buildTorCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'approval_records',
+    getRows: (d) => d.approvalRecords || [],
+    buildCandidate: buildApprovalRecordCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'cash_advances',
+    getRows: (d) => d.cashAdvances || [],
+    buildCandidate: buildCashAdvanceCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'meeting_minutes',
+    getRows: (d) => d.meetingMinutes || [],
+    buildCandidate: buildMeetingMinuteCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'participants',
+    getRows: (d) => d.participantDatabase || [],
+    buildCandidate: buildParticipantCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'attendance_records',
+    getRows: (d) => d.attendanceSystem?.records || [],
+    buildCandidate: buildAttendanceRecordCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'audit_logs',
+    getRows: (d) => d.auditLogs || [],
+    buildCandidate: buildAuditLogCandidateRow,
+    allowTargetedDelete: false,
+  },
+];
+
+export interface MysqlDiffSaveSummary {
+  upsertedRows: number;
+  deletedRows: number;
+  updatedKvKeys: number;
+  totalAffectedRows: number;
+  touchedTables: string[];
+}
+
+/**
+ * Menyimpan HANYA baris dan koleksi yang benar-benar berubah antara `prevData` dan `nextData`
+ * dalam satu transaksi MySQL yang atomik:
+ * - Operasi CREATE & UPDATE murni hanya mengeksekusi INSERT ... ON DUPLICATE KEY UPDATE (tanpa DELETE).
+ * - Operasi DELETE hanya mengeksekusi DELETE FROM `table` WHERE `id` = ? pada ID yang benar-benar dihapus.
+ * - Jika terjadi kegagalan pada satu query pun, seluruh transaksi di-rollback dan error dilempar ke pemanggil.
+ */
+export async function saveDiffToMysql(
+  pool: MysqlPoolLike,
+  prevData: DatabaseSchema,
+  nextData: DatabaseSchema,
+  contextLabel = 'write'
+): Promise<MysqlDiffSaveSummary> {
+  const nowIso = new Date().toISOString();
+
+  interface PlannedTableOps {
+    spec: EntityTableSyncSpec;
+    toUpsert: any[];
+    toDeleteIds: string[];
+  }
+
+  const plannedOps: PlannedTableOps[] = [];
+  for (const spec of ENTITY_TABLE_SPECS) {
+    const prevRows = (spec.getRows(prevData) || []).filter((r) => r && r.id);
+    const nextRows = (spec.getRows(nextData) || []).filter((r) => r && r.id);
+
+    const prevSerializedById = new Map<string, string>();
+    for (const r of prevRows) {
+      prevSerializedById.set(String(r.id), JSON.stringify(r));
     }
-    return;
+
+    const nextIds = new Set<string>();
+    const toUpsert: any[] = [];
+    for (const r of nextRows) {
+      const id = String(r.id);
+      nextIds.add(id);
+      const serialized = JSON.stringify(r);
+      if (prevSerializedById.get(id) !== serialized) {
+        toUpsert.push(r);
+      }
+    }
+
+    const toDeleteIds: string[] = [];
+    if (spec.allowTargetedDelete) {
+      for (const prevId of prevSerializedById.keys()) {
+        if (!nextIds.has(prevId)) {
+          toDeleteIds.push(prevId);
+        }
+      }
+    }
+
+    if (toUpsert.length > 0 || toDeleteIds.length > 0) {
+      plannedOps.push({ spec, toUpsert, toDeleteIds });
+    }
   }
 
-  if (allowDelete && tableName !== 'users') {
-    const placeholders = currentIds.map(() => '?').join(', ');
-    await conn.query(
-      `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
-      currentIds
+  const prevKv = extractKvSnapshot(prevData);
+  const nextKv = extractKvSnapshot(nextData);
+  const changedKvEntries: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(nextKv)) {
+    if (v === undefined) continue;
+    const nextSerialized = JSON.stringify(v);
+    const prevSerialized = prevKv[k] !== undefined ? JSON.stringify(prevKv[k]) : undefined;
+    if (nextSerialized !== prevSerialized) {
+      changedKvEntries.push([k, nextSerialized]);
+    }
+  }
+
+  if (plannedOps.length === 0 && changedKvEntries.length === 0) {
+    return {
+      upsertedRows: 0,
+      deletedRows: 0,
+      updatedKvKeys: 0,
+      totalAffectedRows: 0,
+      touchedTables: [],
+    };
+  }
+
+  const touchedTables = [
+    ...plannedOps.map((p) => p.spec.tableName),
+    ...(changedKvEntries.length > 0 ? ['system_kv_store'] : []),
+  ];
+
+  console.log(
+    `[WRITE] DATABASE QUERY STARTED (${contextLabel}) -> tables=[${touchedTables.join(', ')}]`
+  );
+
+  const conn = await pool.getConnection();
+  let totalAffectedRows = 0;
+  let upsertedRows = 0;
+  let deletedRows = 0;
+
+  try {
+    await conn.beginTransaction();
+
+    for (const op of plannedOps) {
+      for (const delId of op.toDeleteIds) {
+        const [delRes]: any = await conn.query(
+          `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
+          [delId.slice(0, 128)]
+        );
+        deletedRows += 1;
+        totalAffectedRows += Number(delRes?.affectedRows || 0);
+      }
+
+      for (const item of op.toUpsert) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          op.spec.tableName,
+          op.spec.buildCandidate(item, nowIso),
+          op.spec.upsertOptions
+        );
+        upsertedRows += 1;
+        totalAffectedRows += affected;
+      }
+    }
+
+    for (const [kvKey, kvJson] of changedKvEntries) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        'system_kv_store',
+        {
+          store_key: kvKey.slice(0, 128),
+          store_value: kvJson,
+          updated_at: nowIso,
+        },
+        {
+          primaryKeyColumn: 'store_key',
+          immutableOnUpdateColumns: [],
+        }
+      );
+      totalAffectedRows += affected;
+    }
+
+    await conn.commit();
+    console.log(
+      `[WRITE] DATABASE QUERY SUCCESS (${contextLabel}) -> upserted=${upsertedRows}, deleted=${deletedRows}, kvUpdated=${changedKvEntries.length}, affectedRows=${totalAffectedRows}`
     );
-  }
 
-  for (const item of safeRows) {
-    await conn.query(insertSql, mapRowParams(item));
+    return {
+      upsertedRows,
+      deletedRows,
+      updatedKvKeys: changedKvEntries.length,
+      totalAffectedRows,
+      touchedTables,
+    };
+  } catch (err: any) {
+    try {
+      await conn.rollback();
+    } catch {
+      // ignore rollback secondary failure
+    }
+    const safeCode = err?.code ? ` [${err.code}]` : '';
+    const safeMsg = String(err?.message || err || 'Unknown SQL error')
+      .replace(/mysql2?:\/\/[^\s@]+@/gi, 'mysql://***@')
+      .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
+    console.error(`[WRITE] DATABASE QUERY FAILED (${contextLabel})${safeCode}: ${safeMsg}`);
+    throw err;
+  } finally {
+    conn.release();
   }
 }
 
 /**
- * Menyimpan seluruh perubahan data ke tabel-tabel MySQL (INSERT / UPDATE / DELETE).
- * Catatan penting untuk tabel `users`:
- * - Penghapusan baris `users` TIDAK PERNAH dilakukan secara massal di fungsi ini (hanya melalui deleteMysqlUserRow).
- * - Kolom `password_hash` yang sudah ada di MySQL dilindungi agar tidak pernah tertimpa nilai kosong,
- *   sedangkan pembaruan password dilakukan secara atomik melalui upsertMysqlUserRow.
+ * Menyimpan seluruh snapshot DatabaseSchema ke MySQL menggunakan adaptive upsert (tanpa DELETE massal).
+ * Digunakan hanya saat migrasi eksplisit (CLI) atau inisialisasi database yang benar-benar kosong.
  */
 export async function saveDatabaseToMysql(
   pool: MysqlPoolLike,
   data: DatabaseSchema
 ): Promise<void> {
+  const nowIso = new Date().toISOString();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
-    // 1. Tabel users (Protected: allowDeleteMissing = false, preserves existing password_hash)
-    await syncTableById(
-      conn,
-      'users',
-      data.users || [],
-      `INSERT INTO users (
-        id, username, name, email, password_hash, role, role_title, department,
-        is_active, account_status, permissions_json, last_login_at, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        username = VALUES(username),
-        name = VALUES(name),
-        email = VALUES(email),
-        password_hash = COALESCE(NULLIF(users.password_hash, ''), VALUES(password_hash)),
-        role = VALUES(role),
-        role_title = VALUES(role_title),
-        department = VALUES(department),
-        is_active = VALUES(is_active),
-        account_status = VALUES(account_status),
-        permissions_json = VALUES(permissions_json),
-        last_login_at = COALESCE(VALUES(last_login_at), users.last_login_at),
-        raw_json = VALUES(raw_json)`,
-      (u) => [
-        String(u.id).slice(0, 128),
-        truncStr(u.username, 128),
-        truncStr(u.name, 255) || '',
-        truncStr(u.email, 255) || '',
-        truncStr(u.passwordHash, 255),
-        truncStr(u.role, 64) || 'staff',
-        truncStr(u.roleTitle, 255),
-        truncStr(u.department, 255),
-        u.isActive === false ? 0 : 1,
-        truncStr(u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'), 64),
-        JSON.stringify(u.permissions || {}),
-        truncStr(u.lastLoginAt, 64),
-        truncStr(u.createdAt || new Date().toISOString(), 64),
-        JSON.stringify(u),
-      ],
-      { allowDeleteMissing: false }
-    );
-
-    // 2. Tabel programs
-    await syncTableById(
-      conn,
-      'programs',
-      data.programs || [],
-      `INSERT INTO programs (
-        id, code, name, description, donor, start_date, end_date,
-        total_budget, currency, status, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        code = VALUES(code),
-        name = VALUES(name),
-        description = VALUES(description),
-        donor = VALUES(donor),
-        start_date = VALUES(start_date),
-        end_date = VALUES(end_date),
-        total_budget = VALUES(total_budget),
-        currency = VALUES(currency),
-        status = VALUES(status),
-        raw_json = VALUES(raw_json)`,
-      (p) => [
-        String(p.id).slice(0, 128),
-        truncStr(p.code, 64),
-        truncStr(p.name, 255) || '',
-        p.description || null,
-        truncStr(p.donor, 255),
-        truncStr(p.startDate, 32),
-        truncStr(p.endDate, 32),
-        Number(p.totalBudget || p.budget || 0),
-        truncStr(p.currency || 'IDR', 16),
-        truncStr(p.status || 'Active', 64),
-        truncStr(p.createdAt || new Date().toISOString(), 64),
-        JSON.stringify(p),
-      ]
-    );
-
-    // 3. Tabel outcomes
-    await syncTableById(
-      conn,
-      'outcomes',
-      data.outcomes || [],
-      `INSERT INTO outcomes (id, program_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (oc) => [
-        oc.id,
-        oc.programId || '',
-        oc.code || null,
-        oc.name || oc.title || '',
-        oc.description || null,
-        Number(oc.budgetAllocated || oc.budget || 0),
-        JSON.stringify(oc),
-      ]
-    );
-
-    // 4. Tabel outputs
-    await syncTableById(
-      conn,
-      'outputs',
-      data.outputs || [],
-      `INSERT INTO outputs (id, program_id, outcome_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         outcome_id = VALUES(outcome_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (op) => [
-        op.id,
-        op.programId || null,
-        op.outcomeId || '',
-        op.code || null,
-        op.name || op.title || '',
-        op.description || null,
-        Number(op.budgetAllocated || op.budget || 0),
-        JSON.stringify(op),
-      ]
-    );
-
-    // 5. Tabel activities
-    await syncTableById(
-      conn,
-      'activities',
-      data.activities || [],
-      `INSERT INTO activities (id, program_id, outcome_id, output_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         program_id = VALUES(program_id),
-         outcome_id = VALUES(outcome_id),
-         output_id = VALUES(output_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (ac) => [
-        ac.id,
-        ac.programId || null,
-        ac.outcomeId || null,
-        ac.outputId || '',
-        ac.code || null,
-        ac.name || ac.title || '',
-        ac.description || null,
-        Number(ac.budgetAllocated || ac.budget || 0),
-        JSON.stringify(ac),
-      ]
-    );
-
-    // 6. Tabel sub_activities
-    await syncTableById(
-      conn,
-      'sub_activities',
-      data.subActivities || [],
-      `INSERT INTO sub_activities (id, activity_id, code, name, description, budget_allocated, raw_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         activity_id = VALUES(activity_id),
-         code = VALUES(code),
-         name = VALUES(name),
-         description = VALUES(description),
-         budget_allocated = VALUES(budget_allocated),
-         raw_json = VALUES(raw_json)`,
-      (sa) => [
-        sa.id,
-        sa.activityId || '',
-        sa.code || null,
-        sa.name || '',
-        sa.description || null,
-        Number(sa.budgetAllocated || sa.budget || 0),
-        JSON.stringify(sa),
-      ]
-    );
-
-    // 7. Tabel tors
-    await syncTableById(
-      conn,
-      'tors',
-      data.tors || [],
-      `INSERT INTO tors (
-        id, tor_number, title, program_id, outcome_id, output_id, activity_id,
-        created_by_user_id, created_by_name, status, current_stage,
-        budget_requested, budget_actual_spent, start_date, end_date, location,
-        created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        tor_number = VALUES(tor_number),
-        title = VALUES(title),
-        program_id = VALUES(program_id),
-        outcome_id = VALUES(outcome_id),
-        output_id = VALUES(output_id),
-        activity_id = VALUES(activity_id),
-        status = VALUES(status),
-        current_stage = VALUES(current_stage),
-        budget_requested = VALUES(budget_requested),
-        budget_actual_spent = VALUES(budget_actual_spent),
-        start_date = VALUES(start_date),
-        end_date = VALUES(end_date),
-        location = VALUES(location),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (t) => [
-        String(t.id).slice(0, 128),
-        truncStr(t.torNumber, 128),
-        truncStr(t.title, 500) || '',
-        truncStr(t.programId, 128),
-        truncStr(t.outcomeId, 128),
-        truncStr(t.outputId, 128),
-        truncStr(t.activityId, 128),
-        truncStr(t.createdByUserId || t.createdById, 128),
-        truncStr(t.createdByName || t.picName, 255),
-        truncStr(t.status || 'Draft', 128),
-        Number(t.currentWorkflowStage || 1),
-        t.budgetRequested != null ? Number(t.budgetRequested) : null,
-        t.budgetActualSpent != null ? Number(t.budgetActualSpent) : null,
-        truncStr(t.startDate, 32),
-        truncStr(t.endDate, 32),
-        truncStr(t.location, 255),
-        truncStr(t.createdAt || new Date().toISOString(), 64),
-        truncStr(t.updatedAt || new Date().toISOString(), 64),
-        JSON.stringify(t),
-      ]
-    );
-
-    // 8. Tabel approval_records
-    await syncTableById(
-      conn,
-      'approval_records',
-      data.approvalRecords || [],
-      `INSERT INTO approval_records (
-        id, tor_id, stage, approver_user_id, approver_name, role, action, notes, timestamp, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        action = VALUES(action),
-        notes = VALUES(notes),
-        timestamp = VALUES(timestamp),
-        raw_json = VALUES(raw_json)`,
-      (ar) => [
-        ar.id,
-        ar.torId || '',
-        ar.stage != null ? Number(ar.stage) : null,
-        ar.approverUserId || null,
-        ar.approverName || null,
-        ar.role || null,
-        ar.action || null,
-        ar.notes || null,
-        ar.timestamp || new Date().toISOString(),
-        JSON.stringify(ar),
-      ]
-    );
-
-    // 9. Tabel cash_advances
-    await syncTableById(
-      conn,
-      'cash_advances',
-      data.cashAdvances || [],
-      `INSERT INTO cash_advances (
-        id, ca_number, tor_id, program_id, activity_id, requester_user_id, requester_name,
-        total_amount, realized_amount, status, report_approval_status, created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        ca_number = VALUES(ca_number),
-        total_amount = VALUES(total_amount),
-        realized_amount = VALUES(realized_amount),
-        status = VALUES(status),
-        report_approval_status = VALUES(report_approval_status),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (ca) => [
-        ca.id,
-        ca.caNumber || ca.documentNumber || null,
-        ca.torId || null,
-        ca.programId || null,
-        ca.activityId || null,
-        ca.requesterUserId || ca.submittedByUserId || null,
-        ca.requesterName || ca.submittedByName || null,
-        Number(ca.totalAmount || 0),
-        ca.realizedAmount != null ? Number(ca.realizedAmount) : null,
-        ca.status || 'Draft',
-        ca.reportApprovalStatus || null,
-        ca.createdAt || new Date().toISOString(),
-        ca.updatedAt || new Date().toISOString(),
-        JSON.stringify(ca),
-      ]
-    );
-
-    // 10. Tabel meeting_minutes
-    await syncTableById(
-      conn,
-      'meeting_minutes',
-      data.meetingMinutes || [],
-      `INSERT INTO meeting_minutes (
-        id, tor_id, activity_id, title, meeting_date, location, created_by_user_id, status, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        title = VALUES(title),
-        meeting_date = VALUES(meeting_date),
-        location = VALUES(location),
-        status = VALUES(status),
-        raw_json = VALUES(raw_json)`,
-      (mm) => [
-        mm.id,
-        mm.torId || null,
-        mm.activityId || null,
-        mm.title || mm.agenda || null,
-        mm.meetingDate || mm.date || null,
-        mm.location || null,
-        mm.createdByUserId || null,
-        mm.status || null,
-        mm.createdAt || new Date().toISOString(),
-        JSON.stringify(mm),
-      ]
-    );
-
-    // 11. Tabel participants
-    await syncTableById(
-      conn,
-      'participants',
-      data.participantDatabase || [],
-      `INSERT INTO participants (
-        id, participant_type, name, gender, organization_or_group, phone, village_or_city, created_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        participant_type = VALUES(participant_type),
-        name = VALUES(name),
-        gender = VALUES(gender),
-        organization_or_group = VALUES(organization_or_group),
-        phone = VALUES(phone),
-        village_or_city = VALUES(village_or_city),
-        raw_json = VALUES(raw_json)`,
-      (pt: any) => [
-        pt.id,
-        pt.entityType || pt.participantType || 'INDIVIDUAL',
-        pt.fullName || pt.groupName || pt.name || '',
-        pt.gender || null,
-        pt.institutionName || pt.groupName || null,
-        pt.phoneNumber || pt.contactPhone || null,
-        pt.cityOrRegency || pt.villageOrSubdistrict || null,
-        pt.createdAt || new Date().toISOString(),
-        JSON.stringify(pt),
-      ]
-    );
-
-    // 12. Tabel attendance_records
-    await syncTableById(
-      conn,
-      'attendance_records',
-      data.attendanceSystem?.records || [],
-      `INSERT INTO attendance_records (
-        id, record_date, user_id, user_name, record_type, clock_in_time, clock_out_time,
-        total_work_hours, is_outside_work_location, created_at, updated_at, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        clock_in_time = VALUES(clock_in_time),
-        clock_out_time = VALUES(clock_out_time),
-        total_work_hours = VALUES(total_work_hours),
-        is_outside_work_location = VALUES(is_outside_work_location),
-        updated_at = VALUES(updated_at),
-        raw_json = VALUES(raw_json)`,
-      (att) => [
-        att.id,
-        att.date || '',
-        att.userId || '',
-        att.userName || null,
-        att.recordType || 'ATTENDANCE',
-        att.clockInTime || null,
-        att.clockOutTime || null,
-        Number(att.totalWorkHours || 0),
-        att.isOutsideWorkLocation ? 1 : 0,
-        att.createdAt || new Date().toISOString(),
-        att.updatedAt || new Date().toISOString(),
-        JSON.stringify(att),
-      ]
-    );
-
-    // 13. Tabel audit_logs
-    await syncTableById(
-      conn,
-      'audit_logs',
-      data.auditLogs || [],
-      `INSERT INTO audit_logs (
-        id, tor_id, user_id, user_name, user_role, action, details, timestamp, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        action = VALUES(action),
-        details = VALUES(details),
-        raw_json = VALUES(raw_json)`,
-      (al) => [
-        String(al.id).slice(0, 128),
-        truncStr(al.torId || (al.entityType === 'TOR' ? al.entityId : null), 128),
-        truncStr(al.userId || al.actorId, 128),
-        truncStr(al.userName || al.actorName, 255),
-        truncStr(al.userRole || al.actorRole, 64),
-        truncStr(al.action, 255) || '',
-        al.details || null,
-        truncStr(al.timestamp || new Date().toISOString(), 64) || new Date().toISOString(),
-        JSON.stringify(al),
-      ]
-    );
-
-    // 14. Tabel system_kv_store untuk koleksi terstruktur lainnya
-    const nowIso = new Date().toISOString();
-    const kvEntries: Record<string, any> = {
-      currentUserId: data.currentUserId,
-      cashAdvanceSummaries: data.cashAdvanceSummaries || {},
-      cashAdvanceAuditLogs: data.cashAdvanceAuditLogs || {},
-      activityDocumentations: data.activityDocumentations || {},
-      activityDocumentationList: data.activityDocumentationList || [],
-      outputRaciRecords: data.outputRaciRecords || {},
-      activityMonitoringRecords: data.activityMonitoringRecords || {},
-      monitoringReports: data.monitoringReports || {},
-      approvalHubItems: data.approvalHubItems || {},
-      approvalWorkflowConfigs: data.approvalWorkflowConfigs || {},
-      approvalNotifications: data.approvalNotifications || [],
-      programBudgets: data.programBudgets || {},
-      attendanceSystem: data.attendanceSystem || {},
-      cleanResetPrj3581V1: data.cleanResetPrj3581V1 ?? true,
-      cleanResetPrj3581V2: data.cleanResetPrj3581V2 ?? true,
-    };
-    if (data.organizationSettings !== undefined) {
-      kvEntries.organizationSettings = data.organizationSettings;
+    for (const spec of ENTITY_TABLE_SPECS) {
+      const rows = (spec.getRows(data) || []).filter((r) => r && r.id);
+      for (const item of rows) {
+        await executeAdaptiveUpsert(
+          conn,
+          spec.tableName,
+          spec.buildCandidate(item, nowIso),
+          spec.upsertOptions
+        );
+      }
     }
 
+    const kvEntries = extractKvSnapshot(data);
     for (const [k, v] of Object.entries(kvEntries)) {
-      await conn.query(
-        `INSERT INTO system_kv_store (store_key, store_value, updated_at)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           store_value = VALUES(store_value),
-           updated_at = VALUES(updated_at)`,
-        [k, JSON.stringify(v), nowIso]
+      if (v === undefined) continue;
+      await executeAdaptiveUpsert(
+        conn,
+        'system_kv_store',
+        {
+          store_key: k.slice(0, 128),
+          store_value: JSON.stringify(v),
+          updated_at: nowIso,
+        },
+        {
+          primaryKeyColumn: 'store_key',
+          immutableOnUpdateColumns: [],
+        }
       );
     }
 
@@ -1383,3 +1777,4 @@ export async function saveDatabaseToMysql(
     conn.release();
   }
 }
+
