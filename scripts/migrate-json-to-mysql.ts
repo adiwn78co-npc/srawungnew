@@ -26,7 +26,7 @@ async function runMigration() {
 
   if (!isMysqlConfigured()) {
     console.error(
-      'ERROR: Variabel environment MYSQL_HOST, MYSQL_USER, dan MYSQL_DATABASE wajib diisi sebelum menjalankan migrasi.'
+      'ERROR: Variabel environment MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, dan MYSQL_DATABASE wajib diisi sebelum menjalankan migrasi.'
     );
     process.exit(1);
   }
@@ -75,10 +75,18 @@ async function runMigration() {
   }
 
   try {
-    console.log('\n[2/4] Membuat tabel-tabel MySQL (database/schema.sql)...');
+    console.log('\n[2/4] Memastikan tabel-tabel MySQL tersedia (CREATE TABLE IF NOT EXISTS)...');
     await ensureMysqlSchema(pool);
 
-    console.log('[3/4] Memindahkan seluruh data JSON ke tabel MySQL (INSERT / UPDATE)...');
+    const [existingUsers] = await pool.query('SELECT COUNT(*) AS total FROM users');
+    const existingUserCount = Number(existingUsers?.[0]?.total || 0);
+    if (existingUserCount > 0 && process.env.FORCE_MIGRATE_OVERWRITE !== 'true') {
+      console.log(
+        `[SAFEGUARD] Tabel users di MySQL sudah berisi ${existingUserCount} akun. Password hash yang sudah ada di MySQL dilindungi dan TIDAK akan ditimpa oleh JSON.`
+      );
+    }
+
+    console.log('[3/4] Memindahkan data JSON ke tabel MySQL secara aman (INSERT / UPDATE non-destruktif)...');
     await saveDatabaseToMysql(pool, jsonData);
 
     const tables = Object.keys(beforeCounts) as (keyof typeof beforeCounts)[];

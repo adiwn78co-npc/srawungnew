@@ -23,15 +23,19 @@ import type {
   AttendanceSystemBundle,
 } from '../types/index.ts';
 import {
+  fetchUsersFromMysql,
   getMysqlPool,
   isCloudRunEnvironment,
   isMysqlConfigured,
+  isProductionHostingerEnvironment,
   loadDatabaseFromMysql,
   resetMysqlPool,
   saveDatabaseToMysql,
   upsertMysqlKvEntries,
   upsertMysqlUserRow,
   deleteMysqlUserRow,
+  validateMysqlEnvConfiguration,
+  verifyAndGetMysqlPool,
 } from './mysqlPool.ts';
 import {
   SEED_PROGRAMS,
@@ -265,7 +269,43 @@ function createDefaultSeed(): DatabaseSchema {
   };
 }
 
-function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
+function createEmptyDatabaseState(): DatabaseSchema {
+  return {
+    users: [],
+    currentUserId: '',
+    programs: [],
+    outcomes: [],
+    outputs: [],
+    activities: [],
+    subActivities: [],
+    tors: [],
+    approvalRecords: [],
+    auditLogs: [],
+    cashAdvances: [],
+    cashAdvanceSummaries: {},
+    cashAdvanceAuditLogs: {},
+    meetingMinutes: [],
+    activityDocumentations: {},
+    activityDocumentationList: [],
+    outputRaciRecords: {},
+    activityMonitoringRecords: {},
+    monitoringReports: {},
+    approvalHubItems: {},
+    approvalWorkflowConfigs: {},
+    approvalNotifications: [],
+    programBudgets: {},
+    participantDatabase: [],
+    cleanResetPrj3581V1: true,
+    cleanResetPrj3581V2: true,
+  };
+}
+
+function normalizeSchema(
+  parsed: DatabaseSchema,
+  options?: { isFromMysql?: boolean }
+): DatabaseSchema {
+  const isFromMysql = Boolean(options?.isFromMysql);
+
   // Migrasi skema bersifat murni additive & non-destructive:
   // Ketiadaan flag migrasi tidak pernah menghapus atau menimpa data operasional yang sudah ada.
   if (parsed.cleanResetPrj3581V1 === undefined) {
@@ -273,10 +313,6 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   }
   if (parsed.cleanResetPrj3581V2 === undefined) {
     parsed.cleanResetPrj3581V2 = true;
-  }
-
-  if (!parsed.currentUserId) {
-    parsed.currentUserId = 'user-director';
   }
 
   if (!Array.isArray(parsed.programs)) {
@@ -294,7 +330,8 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
   };
 
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-    parsed.users = cloneInitialUsers();
+    // Jika dimuat dari MySQL, JANGAN menyuntikkan dummy INITIAL_USERS.
+    parsed.users = isFromMysql ? [] : cloneInitialUsers();
   } else {
     parsed.users = parsed.users.map((u) => {
       const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
@@ -313,20 +350,27 @@ function normalizeSchema(parsed: DatabaseSchema): DatabaseSchema {
       };
     });
 
-    const hasAdmin = parsed.users.some(
-      (u) => u.role === 'admin' || u.permissions?.canManageUsers
-    );
-    if (!hasAdmin) {
-      const defaultAdmin = INITIAL_USERS.find((u) => u.role === 'admin');
-      if (defaultAdmin) {
-        parsed.users.push({
-          ...defaultAdmin,
-          permissions: { ...defaultAdmin.permissions },
-          isActive: true,
-          accountStatus: 'Aktif',
-        });
+    // Hanya tambahkan default admin pada mode preview lokal (bukan pada database MySQL produksi)
+    if (!isFromMysql) {
+      const hasAdmin = parsed.users.some(
+        (u) => u.role === 'admin' || u.permissions?.canManageUsers
+      );
+      if (!hasAdmin) {
+        const defaultAdmin = INITIAL_USERS.find((u) => u.role === 'admin');
+        if (defaultAdmin) {
+          parsed.users.push({
+            ...defaultAdmin,
+            permissions: { ...defaultAdmin.permissions },
+            isActive: true,
+            accountStatus: 'Aktif',
+          });
+        }
       }
     }
+  }
+
+  if (!parsed.currentUserId) {
+    parsed.currentUserId = parsed.users[0]?.id || 'user-director';
   }
 
   if (!Array.isArray(parsed.outcomes)) {
@@ -447,14 +491,33 @@ class Database {
   private mysqlWriteChain: Promise<void> = Promise.resolve();
   private initPromise: Promise<void> | null = null;
   private mysqlStatus: 'unconfigured' | 'ready' | 'failed' = 'unconfigured';
+  private lastMysqlErrorSummary = '';
+  private lastUsersRefreshAt = 0;
 
   constructor() {
     this.ensureDirectory();
-    // Jika MySQL dikonfigurasi, jangan pernah memuat db.json atau db.backup.json ke memori operasional.
-    this.data = isMysqlConfigured()
-      ? normalizeSchema(createDefaultSeed())
-      : this.loadInitialLocalDevData();
+    // Jika MySQL dikonfigurasi atau berjalan di lingkungan produksi Hostinger,
+    // JANGAN PERNAH memuat data/db.json, db.backup.json, atau dummy seed ke memori.
+    if (this.isStrictMysqlRequired()) {
+      this.data = createEmptyDatabaseState();
+    } else {
+      this.data = this.loadInitialLocalDevData();
+    }
     this.initPromise = this.initializeMysqlStorage();
+  }
+
+  /**
+   * Bernilai true apabila aplikasi wajib menggunakan MySQL tanpa fallback ke JSON/mock data:
+   * - Kredensial MySQL (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE) dikonfigurasi, ATAU
+   * - Berjalan di environment produksi Hostinger (bukan container preview Cloud Run), ATAU
+   * - MYSQL_STRICT_REQUIRED='true'.
+   */
+  public isStrictMysqlRequired(): boolean {
+    return (
+      isMysqlConfigured() ||
+      isProductionHostingerEnvironment() ||
+      process.env.MYSQL_STRICT_REQUIRED === 'true'
+    );
   }
 
   /**
@@ -464,7 +527,7 @@ class Database {
   public async ready(): Promise<void> {
     if (
       !this.initPromise ||
-      (isMysqlConfigured() && this.mysqlStatus === 'failed' && !this.isInitializing)
+      (this.isStrictMysqlRequired() && this.mysqlStatus === 'failed' && !this.isInitializing)
     ) {
       this.initPromise = this.initializeMysqlStorage();
     }
@@ -479,17 +542,37 @@ class Database {
     return this.mysqlStatus === 'ready';
   }
 
+  public getLastErrorSummary(): string {
+    return this.lastMysqlErrorSummary;
+  }
+
+  public getDiagnostics() {
+    const envCheck = validateMysqlEnvConfiguration();
+    return {
+      provider: this.isStrictMysqlRequired() ? 'mysql' : 'preview-local',
+      status: this.mysqlStatus,
+      operational: this.isOperational(),
+      mysqlConfigured: envCheck.configured,
+      missingEnvVars: envCheck.missingVars,
+      lastError: this.lastMysqlErrorSummary || undefined,
+      counts: {
+        users: (this.data.users || []).length,
+        programs: (this.data.programs || []).length,
+        tors: (this.data.tors || []).length,
+      },
+    };
+  }
+
   /**
    * Jika MySQL dikonfigurasi namun sempat gagal saat startup (misal MySQL server baru aktif),
-   * coba hubungkan ulang secara berkala dengan exponential backoff agar aplikasi otomatis kembali ke MySQL
-   * tanpa membebani latensi API.
+   * coba hubungkan ulang secara berkala dengan exponential backoff.
    */
   public async retryMysqlIfNeeded(): Promise<boolean> {
-    if (!isMysqlConfigured() || this.isMysqlReady() || this.isInitializing) {
+    if (!this.isStrictMysqlRequired() || this.isMysqlReady() || this.isInitializing) {
       return false;
     }
     const now = Date.now();
-    const backoffMs = Math.min(300_000, 30_000 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
+    const backoffMs = Math.min(60_000, 5_000 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
     if (now - this.lastFailedMysqlAttemptAt < backoffMs) {
       return false;
     }
@@ -500,18 +583,15 @@ class Database {
 
   /**
    * Bernilai true apabila database siap melayani aplikasi:
-   * - MySQL tidak dikonfigurasi (mode lokal), ATAU
-   * - MySQL berhasil dimuat ('ready'), ATAU
-   * - Mode fallback lokal aktif ketika MySQL tidak terjangkau di environment preview (kecuali MYSQL_STRICT_REQUIRED=true).
+   * - Pada mode produksi / MySQL: HANYA bernilai true jika koneksi & pembacaan MySQL berhasil ('ready').
+   *   Tidak ada fallback otomatis ke JSON atau in-memory seed apabila MySQL gagal terhubung.
+   * - Pada mode preview Cloud Run (tanpa MySQL): bernilai true menggunakan penyimpanan preview.
    */
   public isOperational(): boolean {
-    if (!isMysqlConfigured() || this.mysqlStatus === 'ready') {
-      return true;
+    if (this.isStrictMysqlRequired()) {
+      return this.mysqlStatus === 'ready';
     }
-    if (process.env.MYSQL_STRICT_REQUIRED === 'true') {
-      return false;
-    }
-    return this.mysqlStatus === 'failed';
+    return true;
   }
 
   /**
@@ -519,6 +599,32 @@ class Database {
    */
   public async flushWrites(): Promise<void> {
     await this.mysqlWriteChain;
+  }
+
+  /**
+   * Membaca ulang daftar pengguna & password_hash terbaru langsung dari tabel `users` MySQL
+   * agar login dan pengelolaan akun selalu menggunakan Single Source of Truth di MySQL.
+   */
+  public async refreshUsersFromMysql(force = false): Promise<User[]> {
+    if (!isMysqlConfigured() || this.mysqlStatus !== 'ready') {
+      return this.data.users || [];
+    }
+    const now = Date.now();
+    if (!force && now - this.lastUsersRefreshAt < 2_000 && this.data.users.length > 0) {
+      return this.data.users;
+    }
+    try {
+      const pool = await getMysqlPool();
+      if (!pool) return this.data.users || [];
+      const freshUsers = await fetchUsersFromMysql(pool);
+      if (Array.isArray(freshUsers) && freshUsers.length > 0) {
+        this.data.users = freshUsers as User[];
+        this.lastUsersRefreshAt = now;
+      }
+    } catch (err) {
+      console.warn(`[DB] Warning refreshing users from MySQL: ${sanitizeDbError(err)}`);
+    }
+    return this.data.users || [];
   }
 
   /**
@@ -531,6 +637,7 @@ class Database {
         const pool = await getMysqlPool();
         if (pool) {
           await upsertMysqlUserRow(pool, user);
+          this.lastUsersRefreshAt = Date.now();
         }
       } catch (err) {
         console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
@@ -545,6 +652,7 @@ class Database {
         const pool = await getMysqlPool();
         if (pool) {
           await deleteMysqlUserRow(pool, userId);
+          this.lastUsersRefreshAt = Date.now();
         }
       } catch (err) {
         console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
@@ -560,11 +668,14 @@ class Database {
   }
 
   private persistLocalJsonOnly(snapshot: DatabaseSchema) {
+    if (this.isStrictMysqlRequired()) {
+      return; // Jangan pernah menulis ke data/db.json ketika menggunakan MySQL / produksi
+    }
     try {
       const jsonText = JSON.stringify(snapshot, null, 2);
       fs.writeFileSync(DB_FILE, jsonText, 'utf-8');
     } catch {
-      // abaikan jika filesystem bersifat read-only pada environment produksi
+      // abaikan jika filesystem bersifat read-only
     }
   }
 
@@ -578,31 +689,41 @@ class Database {
   }
 
   /**
-   * Hanya digunakan untuk mode fallback development lokal ketika MySQL TIDAK dikonfigurasi
-   * atau ketika host MySQL produksi tidak dapat dijangkau dari container preview.
-   * Catatan penting: db.backup.json tidak pernah dibaca secara otomatis, dan data ini TIDAK PERNAH ditulis ke MySQL.
+   * Hanya digunakan untuk mode preview Cloud Run ketika tidak ada MySQL eksternal yang dikonfigurasi.
+   * Tidak pernah dipanggil di lingkungan produksi Hostinger atau ketika MySQL dikonfigurasi.
    */
   private loadInitialLocalDevData(): DatabaseSchema {
     try {
       if (fs.existsSync(DB_FILE)) {
         const fileContent = fs.readFileSync(DB_FILE, 'utf-8');
         const rawParsed: DatabaseSchema = JSON.parse(fileContent);
-        const normalized = normalizeSchema(rawParsed);
+        const normalized = normalizeSchema(rawParsed, { isFromMysql: false });
         this.persistLocalJsonOnly(normalized);
         return normalized;
       }
     } catch (err) {
-      console.warn('[DB] Failed to read local development data/db.json, using default seed:', sanitizeDbError(err));
+      console.warn('[DB] Failed to read preview data/db.json, using default seed:', sanitizeDbError(err));
     }
 
-    const fresh = normalizeSchema(createDefaultSeed());
+    const fresh = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistLocalJsonOnly(fresh);
     return fresh;
   }
 
   private async initializeMysqlStorage(maxAttempts = 3): Promise<void> {
+    const envCheck = validateMysqlEnvConfiguration();
+
     if (!isMysqlConfigured()) {
-      this.mysqlStatus = 'unconfigured';
+      if (this.isStrictMysqlRequired()) {
+        this.mysqlStatus = 'failed';
+        this.data = createEmptyDatabaseState();
+        this.lastMysqlErrorSummary = `Missing required MySQL environment variables (${envCheck.missingVars.join(', ')})`;
+        console.error(
+          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD.`
+        );
+      } else {
+        this.mysqlStatus = 'unconfigured';
+      }
       return;
     }
 
@@ -612,15 +733,11 @@ class Database {
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          const pool = await getMysqlPool();
-          if (!pool) {
-            throw new Error('MySQL connection pool is unavailable.');
-          }
+          // 1. Buat & verifikasi koneksi ke MySQL dengan query ringan (SELECT 1)
+          const pool = await verifyAndGetMysqlPool();
+          console.log(`[DB] MySQL connected successfully (${envCheck.safeSummary}).`);
 
-          // Verifikasi koneksi aktif ke server MySQL sebelum menyatakan terhubung
-          await pool.query('SELECT 1');
-          console.log('[DB] MySQL connected successfully.');
-
+          // 2. Muat data existing dari MySQL
           const existingFromMysql = await loadDatabaseFromMysql(pool);
           if (existingFromMysql) {
             const missingFlags: Record<string, boolean> = {};
@@ -631,69 +748,63 @@ class Database {
               missingFlags.cleanResetPrj3581V2 = true;
             }
 
-            this.data = normalizeSchema(existingFromMysql);
+            this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
             this.mysqlStatus = 'ready';
+            this.lastMysqlErrorSummary = '';
             this.failedMysqlCycles = 0;
+            this.lastUsersRefreshAt = Date.now();
 
             if (Object.keys(missingFlags).length > 0) {
               await upsertMysqlKvEntries(pool, missingFlags);
             }
 
-            console.log('[DB] Existing application data loaded from MySQL.');
+            console.log(
+              `[DB] Existing application data loaded from MySQL (users=${this.data.users.length}, programs=${this.data.programs.length}, tors=${this.data.tors.length}).`
+            );
             return;
           }
 
-          // Kondisi: MySQL berhasil terhubung DAN database benar-benar baru / kosong
+          // 3. Hanya jika seluruh tabel di database MySQL benar-benar kosong (0 baris di semua tabel)
           console.log('[DB] Database is empty. Initial seed is being created.');
-          const initialSeed = normalizeSchema(createDefaultSeed());
+          const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
           this.mysqlStatus = 'ready';
+          this.lastMysqlErrorSummary = '';
           this.failedMysqlCycles = 0;
+          this.lastUsersRefreshAt = Date.now();
           console.log('[DB] Initial seed saved successfully to MySQL.');
           return;
         } catch (err) {
           lastError = err;
           await resetMysqlPool();
           if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 800));
+            await new Promise((resolve) => setTimeout(resolve, 1000));
           }
         }
       }
 
       this.lastFailedMysqlAttemptAt = Date.now();
       this.failedMysqlCycles += 1;
-      const wasAlreadyFailed = this.mysqlStatus === 'failed';
       this.mysqlStatus = 'failed';
-      if (!wasAlreadyFailed && process.env.MYSQL_STRICT_REQUIRED !== 'true') {
-        this.data = this.loadInitialLocalDevData();
-      }
-      if (isCloudRunEnvironment() && process.env.MYSQL_STRICT_REQUIRED !== 'true') {
-        if (!wasAlreadyFailed) {
-          console.log(
-            `[DB] MySQL unreachable from Cloud Run preview; using local preview storage (${sanitizeDbError(lastError)}).`
-          );
-        }
-      } else {
-        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
-      }
+      this.lastMysqlErrorSummary = sanitizeDbError(lastError);
+      // Proteksi mutlak: JANGAN memuat data/db.json atau dummy seed apabila MySQL gagal terhubung!
+      this.data = createEmptyDatabaseState();
+      console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
     }
   }
 
   private persistToMysql(snapshot: DatabaseSchema) {
-    if (!isMysqlConfigured()) {
+    if (!this.isStrictMysqlRequired()) {
       this.persistLocalJsonOnly(snapshot);
       return;
     }
 
     // Proteksi mutlak: jika pembacaan awal MySQL belum berhasil ('ready'),
-    // JANGAN PERNAH menulis atau menimpa tabel MySQL dengan state memori/lokal.
+    // JANGAN PERNAH menulis atau menimpa tabel MySQL maupun JSON lokal.
     if (this.mysqlStatus !== 'ready') {
-      if (process.env.MYSQL_STRICT_REQUIRED !== 'true') {
-        this.persistLocalJsonOnly(snapshot);
-      }
       return;
     }
 
@@ -706,7 +817,7 @@ class Database {
         await saveDatabaseToMysql(pool, clonedSnapshot);
       })
       .catch((err) => {
-        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(err)}`);
+        console.error(`[DB] MySQL write error: ${sanitizeDbError(err)}`);
       });
   }
 
@@ -721,9 +832,12 @@ class Database {
   }
 
   public resetToSeed(): DatabaseSchema {
-    this.data = normalizeSchema(createDefaultSeed());
+    if (this.isStrictMysqlRequired()) {
+      throw new Error('Reset to seed is strictly prohibited when connected to MySQL production database.');
+    }
+    this.data = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistExplicitBackup(this.data);
-    this.persistToMysql(this.data);
+    this.persistLocalJsonOnly(this.data);
     return this.data;
   }
 }

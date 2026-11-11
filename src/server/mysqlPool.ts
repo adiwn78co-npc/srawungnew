@@ -4,7 +4,21 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import type { DatabaseSchema } from './db.ts';
 
-dotenv.config();
+const __poolFile = fileURLToPath(import.meta.url);
+const __poolDir = path.dirname(__poolFile);
+
+for (const envCandidate of [
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), '.env.production'),
+  path.resolve(process.cwd(), '.env.local'),
+  path.resolve(__poolDir, '.env'),
+  path.resolve(__poolDir, '..', '..', '.env'),
+  path.resolve(__poolDir, '..', '..', '.env.production'),
+]) {
+  if (fs.existsSync(envCandidate)) {
+    dotenv.config({ path: envCandidate, override: false });
+  }
+}
 
 export interface MysqlPoolLike {
   query: (sql: string, values?: any[]) => Promise<[any, any]>;
@@ -20,11 +34,33 @@ export interface MysqlPoolLike {
   end: () => Promise<void>;
 }
 
+export interface ResolvedMysqlConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+  socketPath?: string;
+}
+
 let cachedPool: MysqlPoolLike | null = null;
+let cachedPoolHostOverride: string | null = null;
 let loggedCloudRunLoopbackNotice = false;
 
 export function isCloudRunEnvironment(): boolean {
   return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+}
+
+export function isProductionHostingerEnvironment(): boolean {
+  if (isCloudRunEnvironment()) {
+    return false;
+  }
+  return (
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.IN_PASSENGER) ||
+    Boolean(process.env.PASSENGER_APP_ENV) ||
+    Boolean(process.env.MYSQL_HOST || process.env.MYSQL_DATABASE || process.env.MYSQL_USER)
+  );
 }
 
 function isLoopbackMysqlHost(rawHost: string | undefined): boolean {
@@ -38,34 +74,94 @@ function isLoopbackMysqlHost(rawHost: string | undefined): boolean {
   );
 }
 
-function hasPlaceholderMysqlCredentials(): boolean {
-  const user = String(process.env.MYSQL_USER || '').trim();
-  const dbName = String(process.env.MYSQL_DATABASE || '').trim();
-  return user === 'your_mysql_user' || dbName === 'your_mysql_database';
+function isPlaceholderValue(val: string): boolean {
+  const clean = val.trim().toLowerCase();
+  return (
+    !clean ||
+    clean === 'your_mysql_user' ||
+    clean === 'your_mysql_database' ||
+    clean === 'your_mysql_password'
+  );
+}
+
+/**
+ * Membaca konfigurasi MySQL dari MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE.
+ */
+export function resolveMysqlConfig(): ResolvedMysqlConfig {
+  const mysqlHost = String(process.env.MYSQL_HOST || '').trim();
+  const mysqlUser = String(process.env.MYSQL_USER || '').trim();
+  const mysqlName = String(process.env.MYSQL_DATABASE || '').trim();
+
+  const rawPort = process.env.MYSQL_PORT || '3306';
+  const port = Number(rawPort) > 0 ? Number(rawPort) : 3306;
+
+  const rawPassword = process.env.MYSQL_PASSWORD ?? '';
+  const password = isPlaceholderValue(String(rawPassword)) ? '' : String(rawPassword);
+
+  const user = !isPlaceholderValue(mysqlUser) ? mysqlUser : '';
+  const database = !isPlaceholderValue(mysqlName) ? mysqlName : '';
+
+  let host = mysqlHost;
+  if (!host && user && database && !isCloudRunEnvironment()) {
+    host = '127.0.0.1';
+  }
+
+  const socketPath = String(process.env.MYSQL_SOCKET_PATH || '').trim() || undefined;
+
+  return {
+    host,
+    port,
+    user,
+    password,
+    database,
+    socketPath,
+  };
+}
+
+export function validateMysqlEnvConfiguration(): {
+  configured: boolean;
+  missingVars: string[];
+  safeSummary: string;
+} {
+  const cfg = resolveMysqlConfig();
+  const missingVars: string[] = [];
+  if (!cfg.host) missingVars.push('MYSQL_HOST');
+  if (!cfg.user) missingVars.push('MYSQL_USER');
+  if (!cfg.database) missingVars.push('MYSQL_DATABASE');
+
+  if (missingVars.length > 0) {
+    return {
+      configured: false,
+      missingVars,
+      safeSummary: `unconfigured (missing: ${missingVars.join(', ')})`,
+    };
+  }
+
+  return {
+    configured: true,
+    missingVars: [],
+    safeSummary: `host=${cfg.host}, port=${cfg.port}, database=${cfg.database}, user=${cfg.user}`,
+  };
 }
 
 export function isMysqlConfigured(): boolean {
-  const host = String(process.env.MYSQL_HOST || '').trim();
-  const user = String(process.env.MYSQL_USER || '').trim();
-  const dbName = String(process.env.MYSQL_DATABASE || '').trim();
-
-  if (!host || !user || !dbName || hasPlaceholderMysqlCredentials()) {
+  const cfg = resolveMysqlConfig();
+  if (!cfg.host || !cfg.user || !cfg.database) {
     return false;
   }
 
   // Di container Cloud Run / AI Studio Preview tidak terdapat service MySQL lokal pada 127.0.0.1:3306.
-  // Jika MYSQL_HOST bernilai localhost/127.0.0.1 (konfigurasi untuk server produksi seperti Hostinger/cPanel),
-  // gunakan penyimpanan lokal pada mode preview agar tidak memicu ECONNREFUSED, sedangkan pada server hosting
-  // produksi (tanpa variabel K_SERVICE) koneksi MySQL localhost tetap berjalan penuh.
+  // Jika host bernilai localhost/127.0.0.1 pada Cloud Run Preview, gunakan penyimpanan preview,
+  // sedangkan pada server Hostinger produksi (tanpa K_SERVICE) koneksi MySQL localhost tetap berjalan penuh.
   if (
     isCloudRunEnvironment() &&
-    isLoopbackMysqlHost(host) &&
+    isLoopbackMysqlHost(cfg.host) &&
     process.env.MYSQL_STRICT_REQUIRED !== 'true'
   ) {
     if (!loggedCloudRunLoopbackNotice) {
       loggedCloudRunLoopbackNotice = true;
       console.log(
-        `[DB] Cloud Run preview detected with local MYSQL_HOST (${host}); using local preview storage.`
+        `[DB] Cloud Run preview detected with local MySQL host (${cfg.host}); using preview storage.`
       );
     }
     return false;
@@ -88,52 +184,94 @@ export async function resetMysqlPool(): Promise<void> {
 
 /**
  * Membuat koneksi pool MySQL menggunakan mysql2/promise sesuai konfigurasi environment:
- * MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT
+ * MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE.
  */
-export async function getMysqlPool(): Promise<MysqlPoolLike | null> {
+export async function getMysqlPool(hostOverride?: string): Promise<MysqlPoolLike | null> {
   if (!isMysqlConfigured()) {
     return null;
   }
-  if (cachedPool) {
+  if (cachedPool && (!hostOverride || cachedPoolHostOverride === hostOverride)) {
     return cachedPool;
   }
+  if (cachedPool && hostOverride && cachedPoolHostOverride !== hostOverride) {
+    await resetMysqlPool();
+  }
+
+  const cfg = resolveMysqlConfig();
+  const effectiveHost = hostOverride || cachedPoolHostOverride || cfg.host;
 
   const modName = 'mysql2/promise';
   const mysqlModule: any = await import(/* @vite-ignore */ modName);
   const mysql = mysqlModule.default || mysqlModule;
 
-  cachedPool = mysql.createPool({
-    host: process.env.MYSQL_HOST?.trim(),
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER?.trim(),
-    password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE?.trim(),
-    connectTimeout: 8000,
+  const poolConfig: Record<string, any> = {
+    host: effectiveHost,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    database: cfg.database,
+    connectTimeout: 10000,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-  });
+    charset: 'utf8mb4',
+  };
+  if (cfg.socketPath) {
+    poolConfig.socketPath = cfg.socketPath;
+  }
+
+  cachedPoolHostOverride = effectiveHost;
+  cachedPool = mysql.createPool(poolConfig);
 
   return cachedPool;
 }
 
 /**
- * Menjalankan DDL pembuatan tabel MySQL dari database/schema.sql
+ * Membuka pool MySQL dan memverifikasi koneksi dengan query ringan (SELECT 1).
+ * Jika host='localhost' gagal karena resolusi IPv6 (::1) pada Linux/Hostinger, otomatis mencoba IPv4 '127.0.0.1'.
+ */
+export async function verifyAndGetMysqlPool(): Promise<MysqlPoolLike> {
+  const cfg = resolveMysqlConfig();
+  let pool = await getMysqlPool();
+  if (!pool) {
+    throw new Error('MySQL connection pool is unavailable.');
+  }
+
+  try {
+    await pool.query('SELECT 1');
+    return pool;
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    if (
+      cfg.host.toLowerCase() === 'localhost' &&
+      cachedPoolHostOverride !== '127.0.0.1' &&
+      (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH')
+    ) {
+      await resetMysqlPool();
+      pool = await getMysqlPool('127.0.0.1');
+      if (pool) {
+        await pool.query('SELECT 1');
+        return pool;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Menjalankan DDL pembuatan tabel MySQL dari database/schema.sql secara non-destructive (CREATE TABLE IF NOT EXISTS)
  */
 export async function ensureMysqlSchema(pool: MysqlPoolLike): Promise<void> {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const candidatePaths = [
     path.resolve(process.cwd(), 'database', 'schema.sql'),
-    path.resolve(moduleDir, 'database', 'schema.sql'),
-    path.resolve(moduleDir, '..', '..', 'database', 'schema.sql'),
+    path.resolve(__poolDir, 'database', 'schema.sql'),
+    path.resolve(__poolDir, '..', '..', 'database', 'schema.sql'),
   ];
   const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
   if (!schemaPath) {
     return;
   }
   const sqlContent = fs.readFileSync(schemaPath, 'utf-8');
-  // Hapus baris komentar SQL terlebih dahulu agar statement pertama (CREATE TABLE users)
-  // yang berada tepat di bawah header komentar tidak terlewati oleh filter.
   const cleanedSql = sqlContent.replace(/^\s*--.*$/gm, '');
   const statements = cleanedSql
     .split(';')
@@ -141,6 +279,10 @@ export async function ensureMysqlSchema(pool: MysqlPoolLike): Promise<void> {
     .filter((s) => s.length > 0);
 
   for (const stmt of statements) {
+    // Proteksi mutlak: jangan pernah mengeksekusi statement destruktif
+    if (/^\s*(DROP|TRUNCATE|DELETE)\b/i.test(stmt)) {
+      continue;
+    }
     await pool.query(stmt);
   }
 }
@@ -161,6 +303,173 @@ function safeJsonParse<T>(raw: any, fallback: T): T {
   }
 }
 
+const DEFAULT_PERMS_BY_ROLE: Record<string, any> = {
+  admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+  director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+  finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+  staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false },
+};
+
+function normalizeMysqlUserRole(rawRole: any): string {
+  const clean = String(rawRole || '').trim().toLowerCase();
+  if (clean === 'admin' || clean === 'administrator' || clean === 'system administrator' || clean === 'superadmin') {
+    return 'admin';
+  }
+  if (clean === 'director' || clean === 'direktur' || clean === 'executive director') {
+    return 'director';
+  }
+  if (clean === 'finance' || clean === 'keuangan' || clean === 'finance & hr manager' || clean === 'finance_hr') {
+    return 'finance';
+  }
+  if (clean === 'hr' || clean === 'hrd' || clean === 'human resources') {
+    return 'hr';
+  }
+  if (clean === 'program_manager' || clean === 'program manager' || clean === 'pm') {
+    return 'program_manager';
+  }
+  if (clean === 'meal' || clean === 'meal coordinator' || clean === 'monitoring') {
+    return 'meal';
+  }
+  if (clean === 'staff' || clean === 'staf') {
+    return 'staff';
+  }
+  return clean || 'staff';
+}
+
+function deriveUsernameFallback(email: string, name: string, id: string): string {
+  const fromEmail = (email || '').split('@')[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+  if (fromEmail) return fromEmail;
+  const fromName = (name || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '');
+  return fromName || `user.${id}`;
+}
+
+/**
+ * Hidrasi baris tabel `users` MySQL dengan memprioritaskan kolom relasional MySQL
+ * (`id`, `username`, `name`, `email`, `password_hash`, `role`, `role_title`, `department`,
+ * `is_active`, `account_status`, `permissions_json`) dan melengkapinya dengan `raw_json`.
+ */
+export function hydrateMysqlUserRow(r: any): any {
+  const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+  const colPerms = safeJsonParse<Record<string, any> | null>(
+    r?.permissions_json ?? r?.permissions,
+    null
+  );
+  const resolvedRole = normalizeMysqlUserRole(r?.role || raw.role || 'staff');
+  const basePerms = DEFAULT_PERMS_BY_ROLE[resolvedRole] || DEFAULT_PERMS_BY_ROLE.staff;
+  const rawPerms =
+    raw.permissions && typeof raw.permissions === 'object'
+      ? raw.permissions
+      : colPerms && typeof colPerms === 'object'
+      ? colPerms
+      : {};
+  const mergedPerms = {
+    canManagePrograms:
+      colPerms?.canManagePrograms ?? rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+    canCreateTor: colPerms?.canCreateTor ?? rawPerms.canCreateTor ?? basePerms.canCreateTor,
+    canApproveTor:
+      resolvedRole === 'admin'
+        ? false
+        : colPerms?.canApproveTor ?? rawPerms.canApproveTor ?? basePerms.canApproveTor,
+    canManageUsers:
+      resolvedRole === 'admin'
+        ? true
+        : colPerms?.canManageUsers ?? rawPerms.canManageUsers ?? basePerms.canManageUsers,
+    canViewAllTors:
+      colPerms?.canViewAllTors ?? rawPerms.canViewAllTors ?? basePerms.canViewAllTors,
+  };
+
+  const sqlColPasswordHash =
+    (typeof r?.password_hash === 'string' && r.password_hash.trim()) ||
+    (typeof r?.password === 'string' && r.password.trim()) ||
+    (typeof r?.passwordHash === 'string' && r.passwordHash.trim()) ||
+    undefined;
+
+  const rawJsonPasswordHash =
+    (typeof raw.passwordHash === 'string' && raw.passwordHash.trim()) ||
+    (typeof raw.password_hash === 'string' && raw.password_hash.trim()) ||
+    (typeof raw.password === 'string' && raw.password.trim()) ||
+    undefined;
+
+  const resolvedPasswordHash = sqlColPasswordHash || rawJsonPasswordHash;
+
+  // Jika password_hash di kolom SQL berbeda dengan raw_json (misal baru diubah di database),
+  // jangan paksa mustChangePassword dari raw_json lama.
+  const sqlHashDiffersFromRaw =
+    Boolean(sqlColPasswordHash && rawJsonPasswordHash && sqlColPasswordHash !== rawJsonPasswordHash);
+
+  const resolvedMustChangePassword =
+    r?.must_change_password !== undefined && r?.must_change_password !== null
+      ? Boolean(Number(r.must_change_password))
+      : sqlHashDiffersFromRaw
+      ? false
+      : raw.mustChangePassword !== undefined
+      ? Boolean(raw.mustChangePassword)
+      : false;
+
+  const resolvedIsActive =
+    r?.is_active !== undefined && r?.is_active !== null
+      ? Boolean(Number(r.is_active))
+      : raw.isActive !== false;
+
+  const resolvedAccountStatus =
+    (typeof r?.account_status === 'string' && r.account_status.trim()) ||
+    raw.accountStatus ||
+    (resolvedIsActive ? 'Aktif' : 'Nonaktif');
+
+  const id = String(r?.id || raw.id || '');
+  const name = (typeof r?.name === 'string' && r.name.trim()) || raw.name || '';
+  const email = (typeof r?.email === 'string' && r.email.trim()) || raw.email || '';
+  const username =
+    (typeof r?.username === 'string' && r.username.trim()) ||
+    (typeof raw.username === 'string' && raw.username.trim()) ||
+    deriveUsernameFallback(email, name, id);
+
+  return {
+    ...raw,
+    id,
+    username,
+    name,
+    email,
+    passwordHash: resolvedPasswordHash,
+    mustChangePassword: resolvedMustChangePassword,
+    passwordUpdatedAt:
+      r?.password_updated_at || raw.passwordUpdatedAt || r?.created_at || raw.createdAt || undefined,
+    role: resolvedRole,
+    roleTitle:
+      (typeof r?.role_title === 'string' && r.role_title.trim()) ||
+      raw.roleTitle ||
+      resolvedRole.toUpperCase(),
+    department:
+      (typeof r?.department === 'string' && r.department.trim()) || raw.department || '',
+    isActive: resolvedAccountStatus === 'Aktif' && resolvedIsActive,
+    accountStatus: resolvedAccountStatus,
+    permissions: mergedPerms,
+    lastLoginAt: r?.last_login_at || raw.lastLoginAt || undefined,
+    createdAt: r?.created_at || raw.createdAt || '2026-01-10T08:00:00Z',
+  };
+}
+
+/**
+ * Mengambil daftar pengguna langsung dari tabel `users` MySQL secara real-time.
+ */
+export async function fetchUsersFromMysql(pool: MysqlPoolLike): Promise<any[]> {
+  const [userRows] = await pool.query('SELECT * FROM users');
+  if (!Array.isArray(userRows)) {
+    return [];
+  }
+  const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
+  hydrated.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  return hydrated;
+}
+
 /**
  * Membaca seluruh data aplikasi dari tabel-tabel MySQL menggunakan query SELECT
  */
@@ -170,8 +479,8 @@ export async function loadDatabaseFromMysql(
 ): Promise<DatabaseSchema | null> {
   await ensureMysqlSchema(pool);
 
-  const [userRows] = await pool.query('SELECT * FROM users ORDER BY created_at ASC');
-  const hasUsers = Array.isArray(userRows) && userRows.length > 0;
+  const users = await fetchUsersFromMysql(pool);
+  const hasUsers = users.length > 0;
 
   if (!hasUsers) {
     const [countRows] = await pool.query(
@@ -191,22 +500,22 @@ export async function loadDatabaseFromMysql(
     const totalExistingRecords = Number(countRows?.[0]?.total_cnt || 0);
 
     if (totalExistingRecords === 0) {
-      return null; // Seluruh tabel aplikasi MySQL benar-benar kosong, aman untuk seed satu kali
+      return null; // Seluruh tabel aplikasi MySQL benar-benar kosong
     }
   }
 
-  const [programRows] = await pool.query('SELECT * FROM programs ORDER BY created_at DESC');
+  const [programRows] = await pool.query('SELECT * FROM programs');
   const [outcomeRows] = await pool.query('SELECT * FROM outcomes');
   const [outputRows] = await pool.query('SELECT * FROM outputs');
   const [activityRows] = await pool.query('SELECT * FROM activities');
   const [subActivityRows] = await pool.query('SELECT * FROM sub_activities');
-  const [torRows] = await pool.query('SELECT * FROM tors ORDER BY created_at DESC');
-  const [approvalRows] = await pool.query('SELECT * FROM approval_records ORDER BY timestamp ASC');
-  const [caRows] = await pool.query('SELECT * FROM cash_advances ORDER BY created_at DESC');
-  const [minutesRows] = await pool.query('SELECT * FROM meeting_minutes ORDER BY created_at DESC');
-  const [participantRows] = await pool.query('SELECT * FROM participants ORDER BY created_at DESC');
-  const [attendanceRows] = await pool.query('SELECT * FROM attendance_records ORDER BY record_date DESC');
-  const [auditRows] = await pool.query('SELECT * FROM audit_logs ORDER BY timestamp DESC');
+  const [torRows] = await pool.query('SELECT * FROM tors');
+  const [approvalRows] = await pool.query('SELECT * FROM approval_records');
+  const [caRows] = await pool.query('SELECT * FROM cash_advances');
+  const [minutesRows] = await pool.query('SELECT * FROM meeting_minutes');
+  const [participantRows] = await pool.query('SELECT * FROM participants');
+  const [attendanceRows] = await pool.query('SELECT * FROM attendance_records');
+  const [auditRows] = await pool.query('SELECT * FROM audit_logs');
   const [kvRows] = await pool.query('SELECT store_key, store_value FROM system_kv_store');
 
   const kvMap: Record<string, any> = {};
@@ -216,84 +525,233 @@ export async function loadDatabaseFromMysql(
     }
   }
 
-  const parseRowList = <T>(rows: any[]): T[] =>
-    Array.isArray(rows)
-      ? rows.map((r) => safeJsonParse<T>(r.raw_json, r as T))
-      : [];
-
-  const defaultPermsByRole: Record<string, any> = {
-    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
-    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
-    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
-    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false },
+  const parseAndHydrateRows = <T>(
+    rows: any[],
+    hydrator: (r: any, raw: Record<string, any>) => Record<string, any>
+  ): T[] => {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((r) => {
+        const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+        return hydrator(r, raw) as T;
+      })
+      .filter((item: any) => Boolean(item && item.id));
   };
 
-  const hydrateMysqlUserRow = (r: any) => {
-    const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
-    const colPerms = safeJsonParse<Record<string, any> | null>(r?.permissions_json, null);
-    const resolvedRole = String(r?.role || raw.role || 'staff');
-    const basePerms = defaultPermsByRole[resolvedRole] || defaultPermsByRole.staff;
-    const rawPerms =
-      raw.permissions && typeof raw.permissions === 'object'
-        ? raw.permissions
-        : colPerms && typeof colPerms === 'object'
-        ? colPerms
-        : {};
-    const mergedPerms = {
-      canManagePrograms: rawPerms.canManagePrograms ?? colPerms?.canManagePrograms ?? basePerms.canManagePrograms,
-      canCreateTor: rawPerms.canCreateTor ?? colPerms?.canCreateTor ?? basePerms.canCreateTor,
-      canApproveTor:
-        resolvedRole === 'admin'
-          ? false
-          : rawPerms.canApproveTor ?? colPerms?.canApproveTor ?? basePerms.canApproveTor,
-      canManageUsers:
-        resolvedRole === 'admin'
-          ? true
-          : rawPerms.canManageUsers ?? colPerms?.canManageUsers ?? basePerms.canManageUsers,
-      canViewAllTors: rawPerms.canViewAllTors ?? colPerms?.canViewAllTors ?? basePerms.canViewAllTors,
-    };
+  const programs = parseAndHydrateRows<any>(programRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || '',
+    description: r?.description ?? raw.description ?? '',
+    donor: r?.donor ?? raw.donor ?? '',
+    startDate: r?.start_date || raw.startDate || '',
+    endDate: r?.end_date || raw.endDate || '',
+    totalBudget:
+      r?.total_budget !== undefined && r?.total_budget !== null
+        ? Number(r.total_budget)
+        : Number(raw.totalBudget ?? raw.budget ?? 0),
+    budget:
+      raw.budget !== undefined
+        ? Number(raw.budget)
+        : r?.total_budget !== undefined && r?.total_budget !== null
+        ? Number(r.total_budget)
+        : Number(raw.totalBudget ?? 0),
+    currency: r?.currency || raw.currency || 'IDR',
+    status: r?.status || raw.status || 'Active',
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
-    const resolvedPasswordHash =
-      (typeof r?.password_hash === 'string' && r.password_hash.trim()) ||
-      (typeof raw.passwordHash === 'string' && raw.passwordHash.trim()) ||
-      (typeof raw.password_hash === 'string' && raw.password_hash.trim()) ||
-      undefined;
+  const outcomes = parseAndHydrateRows<any>(outcomeRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    programId: r?.program_id || raw.programId || '',
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || raw.title || '',
+    title: raw.title || r?.name || raw.name || '',
+    description: r?.description ?? raw.description ?? '',
+    budgetAllocated:
+      r?.budget_allocated !== undefined && r?.budget_allocated !== null
+        ? Number(r.budget_allocated)
+        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+  }));
 
-    const resolvedIsActive =
-      r?.is_active !== undefined && r?.is_active !== null
-        ? Boolean(Number(r.is_active))
-        : raw.isActive !== false;
+  const outputs = parseAndHydrateRows<any>(outputRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    programId: r?.program_id || raw.programId || '',
+    outcomeId: r?.outcome_id || raw.outcomeId || '',
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || raw.title || '',
+    title: raw.title || r?.name || raw.name || '',
+    description: r?.description ?? raw.description ?? '',
+    budgetAllocated:
+      r?.budget_allocated !== undefined && r?.budget_allocated !== null
+        ? Number(r.budget_allocated)
+        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+  }));
 
-    const resolvedAccountStatus =
-      (typeof r?.account_status === 'string' && r.account_status.trim()) ||
-      raw.accountStatus ||
-      (resolvedIsActive ? 'Aktif' : 'Nonaktif');
+  const activities = parseAndHydrateRows<any>(activityRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    programId: r?.program_id || raw.programId || '',
+    outcomeId: r?.outcome_id || raw.outcomeId || '',
+    outputId: r?.output_id || raw.outputId || '',
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || raw.title || '',
+    title: raw.title || r?.name || raw.name || '',
+    description: r?.description ?? raw.description ?? '',
+    budgetAllocated:
+      r?.budget_allocated !== undefined && r?.budget_allocated !== null
+        ? Number(r.budget_allocated)
+        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+  }));
 
-    return {
-      ...raw,
-      id: String(r?.id || raw.id || ''),
-      username:
-        (typeof r?.username === 'string' && r.username.trim()) || raw.username || undefined,
-      name: (typeof r?.name === 'string' && r.name.trim()) || raw.name || '',
-      email: (typeof r?.email === 'string' && r.email.trim()) || raw.email || '',
-      passwordHash: resolvedPasswordHash,
-      role: resolvedRole,
-      roleTitle:
-        (typeof r?.role_title === 'string' && r.role_title.trim()) ||
-        raw.roleTitle ||
-        resolvedRole.toUpperCase(),
-      department:
-        (typeof r?.department === 'string' && r.department.trim()) || raw.department || '',
-      isActive: resolvedAccountStatus === 'Aktif',
-      accountStatus: resolvedAccountStatus,
-      permissions: mergedPerms,
-      lastLoginAt: r?.last_login_at || raw.lastLoginAt || undefined,
-      createdAt: r?.created_at || raw.createdAt || '2026-01-10T08:00:00Z',
-    };
-  };
+  const subActivities = parseAndHydrateRows<any>(subActivityRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    activityId: r?.activity_id || raw.activityId || '',
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || '',
+    description: r?.description ?? raw.description ?? '',
+    budgetAllocated:
+      r?.budget_allocated !== undefined && r?.budget_allocated !== null
+        ? Number(r.budget_allocated)
+        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+  }));
+
+  const tors = parseAndHydrateRows<any>(torRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    torNumber: r?.tor_number ?? raw.torNumber,
+    title: r?.title || raw.title || '',
+    programId: r?.program_id || raw.programId || '',
+    outcomeId: r?.outcome_id || raw.outcomeId || '',
+    outputId: r?.output_id || raw.outputId || '',
+    activityId: r?.activity_id || raw.activityId || '',
+    createdById: raw.createdById || r?.created_by_user_id || '',
+    createdByName: r?.created_by_name || raw.createdByName || '',
+    status: r?.status || raw.status || 'Draft',
+    currentWorkflowStage:
+      r?.current_stage !== undefined && r?.current_stage !== null
+        ? Number(r.current_stage)
+        : Number(raw.currentWorkflowStage ?? 1),
+    budgetRequested:
+      r?.budget_requested !== undefined && r?.budget_requested !== null
+        ? Number(r.budget_requested)
+        : Number(raw.budgetRequested ?? 0),
+    budgetActualSpent:
+      r?.budget_actual_spent !== undefined && r?.budget_actual_spent !== null
+        ? Number(r.budget_actual_spent)
+        : Number(raw.budgetActualSpent ?? 0),
+    startDate: r?.start_date || raw.startDate || '',
+    endDate: r?.end_date || raw.endDate || '',
+    location: r?.location || raw.location || '',
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const approvalRecords = parseAndHydrateRows<any>(approvalRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    torId: r?.tor_id || raw.torId || '',
+    stage: r?.stage ?? raw.stage ?? 1,
+    approverId: raw.approverId || r?.approver_user_id || '',
+    approverName: r?.approver_name || raw.approverName || '',
+    role: r?.role || raw.role || '',
+    action: r?.action || raw.action || '',
+    notes: r?.notes ?? raw.notes ?? raw.comment ?? '',
+    comment: raw.comment ?? r?.notes ?? raw.notes ?? '',
+    timestamp: r?.timestamp || raw.timestamp || new Date().toISOString(),
+  })).sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+
+  const cashAdvances = parseAndHydrateRows<any>(caRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    caNumber: r?.ca_number || raw.caNumber || raw.documentNumber || '',
+    documentNumber: raw.documentNumber || r?.ca_number || raw.caNumber || '',
+    torId: r?.tor_id || raw.torId || '',
+    programId: r?.program_id || raw.programId || '',
+    activityId: r?.activity_id || raw.activityId || '',
+    requesterId: raw.requesterId || r?.requester_user_id || '',
+    requesterName: r?.requester_name || raw.requesterName || '',
+    totalAmount:
+      r?.total_amount !== undefined && r?.total_amount !== null
+        ? Number(r.total_amount)
+        : Number(raw.totalAmount ?? 0),
+    realizedAmount:
+      r?.realized_amount !== undefined && r?.realized_amount !== null
+        ? Number(r.realized_amount)
+        : raw.realizedAmount !== undefined
+        ? Number(raw.realizedAmount)
+        : undefined,
+    status: r?.status || raw.status || 'Draft',
+    reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const meetingMinutes = parseAndHydrateRows<any>(minutesRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    torId: r?.tor_id || raw.torId || '',
+    activityId: r?.activity_id || raw.activityId || '',
+    title: r?.title || raw.title || '',
+    meetingDate: r?.meeting_date || raw.meetingDate || raw.date || '',
+    date: raw.date || r?.meeting_date || raw.meetingDate || '',
+    location: r?.location || raw.location || '',
+    createdById: raw.createdById || r?.created_by_user_id || '',
+    status: r?.status || raw.status || 'Draft',
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const participantDatabase = parseAndHydrateRows<any>(participantRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    entityType: raw.entityType || r?.participant_type || 'INDIVIDUAL',
+    fullName: raw.fullName || r?.name || raw.name || '',
+    name: r?.name || raw.name || raw.fullName || '',
+    gender: r?.gender || raw.gender || undefined,
+    institutionName: raw.institutionName || r?.organization_or_group || undefined,
+    phoneNumber: raw.phoneNumber || r?.phone || undefined,
+    cityOrRegency: raw.cityOrRegency || r?.village_or_city || undefined,
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const hydratedAttendanceRecords = parseAndHydrateRows<any>(attendanceRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    date: r?.record_date || raw.date || '',
+    userId: r?.user_id || raw.userId || '',
+    userName: r?.user_name || raw.userName || '',
+    recordType: r?.record_type || raw.recordType || 'ATTENDANCE',
+    clockInTime: r?.clock_in_time ?? raw.clockInTime,
+    clockOutTime: r?.clock_out_time ?? raw.clockOutTime,
+    totalWorkHours:
+      r?.total_work_hours !== undefined && r?.total_work_hours !== null
+        ? Number(r.total_work_hours)
+        : Number(raw.totalWorkHours ?? 0),
+    isOutsideWorkLocation:
+      r?.is_outside_work_location !== undefined && r?.is_outside_work_location !== null
+        ? Boolean(Number(r.is_outside_work_location))
+        : Boolean(raw.isOutsideWorkLocation),
+    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+  })).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+  const auditLogs = parseAndHydrateRows<any>(auditRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    torId: r?.tor_id || raw.torId || undefined,
+    actorId: raw.actorId || r?.user_id || 'system',
+    actorName: raw.actorName || r?.user_name || 'System',
+    actorRole: raw.actorRole || r?.user_role || '',
+    action: r?.action || raw.action || '',
+    entityType: raw.entityType || (r?.tor_id ? 'TOR' : 'SYSTEM'),
+    entityId: raw.entityId || r?.tor_id || 'system',
+    details: r?.details || raw.details || '',
+    timestamp: r?.timestamp || raw.timestamp || new Date().toISOString(),
+  })).sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
 
   const attendanceSystem = kvMap['attendanceSystem'] || {
     locationConfig: {
@@ -316,25 +774,25 @@ export async function loadDatabaseFromMysql(
     auditTrail: [],
   };
 
-  if (Array.isArray(attendanceRows) && (attendanceRows.length > 0 || Boolean(kvMap['attendanceSystem']))) {
-    attendanceSystem.records = parseRowList(attendanceRows);
+  if (hydratedAttendanceRecords.length > 0 || !Array.isArray(attendanceSystem.records)) {
+    attendanceSystem.records = hydratedAttendanceRecords;
   }
 
   return {
-    users: Array.isArray(userRows) ? (userRows.map(hydrateMysqlUserRow) as any) : [],
-    currentUserId: kvMap['currentUserId'] || 'user-director',
-    programs: parseRowList(programRows),
-    outcomes: parseRowList(outcomeRows),
-    outputs: parseRowList(outputRows),
-    activities: parseRowList(activityRows),
-    subActivities: parseRowList(subActivityRows),
-    tors: parseRowList(torRows),
-    approvalRecords: parseRowList(approvalRows),
-    auditLogs: parseRowList(auditRows),
-    cashAdvances: parseRowList(caRows),
+    users: users as any,
+    currentUserId: kvMap['currentUserId'] || users[0]?.id || 'user-director',
+    programs,
+    outcomes,
+    outputs,
+    activities,
+    subActivities,
+    tors,
+    approvalRecords,
+    auditLogs,
+    cashAdvances,
     cashAdvanceSummaries: kvMap['cashAdvanceSummaries'] || {},
     cashAdvanceAuditLogs: kvMap['cashAdvanceAuditLogs'] || {},
-    meetingMinutes: parseRowList(minutesRows),
+    meetingMinutes,
     activityDocumentations: kvMap['activityDocumentations'] || {},
     activityDocumentationList: kvMap['activityDocumentationList'] || [],
     outputRaciRecords: kvMap['outputRaciRecords'] || {},
@@ -344,7 +802,7 @@ export async function loadDatabaseFromMysql(
     approvalWorkflowConfigs: kvMap['approvalWorkflowConfigs'] || {},
     approvalNotifications: kvMap['approvalNotifications'] || [],
     programBudgets: kvMap['programBudgets'] || {},
-    participantDatabase: parseRowList(participantRows),
+    participantDatabase,
     attendanceSystem,
     organizationSettings: kvMap['organizationSettings'] || undefined,
     cleanResetPrj3581V1:
@@ -394,7 +852,7 @@ export async function upsertMysqlUserRow(pool: MysqlPoolLike, u: any): Promise<v
       username = VALUES(username),
       name = VALUES(name),
       email = VALUES(email),
-      password_hash = VALUES(password_hash),
+      password_hash = COALESCE(NULLIF(VALUES(password_hash), ''), users.password_hash),
       role = VALUES(role),
       role_title = VALUES(role_title),
       department = VALUES(department),
@@ -432,21 +890,27 @@ async function syncTableById(
   tableName: string,
   rows: any[],
   insertSql: string,
-  mapRowParams: (item: any) => any[]
+  mapRowParams: (item: any) => any[],
+  options?: { allowDeleteMissing?: boolean }
 ) {
   const safeRows = Array.isArray(rows) ? rows.filter((r) => r && r.id) : [];
   const currentIds = safeRows.map((r) => String(r.id));
+  const allowDelete = options?.allowDeleteMissing !== false;
 
   if (currentIds.length === 0) {
-    await conn.query(`DELETE FROM ${tableName}`);
+    if (allowDelete && tableName !== 'users') {
+      await conn.query(`DELETE FROM ${tableName}`);
+    }
     return;
   }
 
-  const placeholders = currentIds.map(() => '?').join(', ');
-  await conn.query(
-    `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
-    currentIds
-  );
+  if (allowDelete && tableName !== 'users') {
+    const placeholders = currentIds.map(() => '?').join(', ');
+    await conn.query(
+      `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
+      currentIds
+    );
+  }
 
   for (const item of safeRows) {
     await conn.query(insertSql, mapRowParams(item));
@@ -454,7 +918,11 @@ async function syncTableById(
 }
 
 /**
- * Menyimpan seluruh perubahan data ke tabel-tabel MySQL (INSERT / UPDATE / DELETE)
+ * Menyimpan seluruh perubahan data ke tabel-tabel MySQL (INSERT / UPDATE / DELETE).
+ * Catatan penting untuk tabel `users`:
+ * - Penghapusan baris `users` TIDAK PERNAH dilakukan secara massal di fungsi ini (hanya melalui deleteMysqlUserRow).
+ * - Kolom `password_hash` yang sudah ada di MySQL dilindungi agar tidak pernah tertimpa nilai kosong,
+ *   sedangkan pembaruan password dilakukan secara atomik melalui upsertMysqlUserRow.
  */
 export async function saveDatabaseToMysql(
   pool: MysqlPoolLike,
@@ -464,7 +932,7 @@ export async function saveDatabaseToMysql(
   try {
     await conn.beginTransaction();
 
-    // 1. Tabel users
+    // 1. Tabel users (Protected: allowDeleteMissing = false, preserves existing password_hash)
     await syncTableById(
       conn,
       'users',
@@ -477,14 +945,14 @@ export async function saveDatabaseToMysql(
         username = VALUES(username),
         name = VALUES(name),
         email = VALUES(email),
-        password_hash = VALUES(password_hash),
+        password_hash = COALESCE(NULLIF(users.password_hash, ''), VALUES(password_hash)),
         role = VALUES(role),
         role_title = VALUES(role_title),
         department = VALUES(department),
         is_active = VALUES(is_active),
         account_status = VALUES(account_status),
         permissions_json = VALUES(permissions_json),
-        last_login_at = VALUES(last_login_at),
+        last_login_at = COALESCE(VALUES(last_login_at), users.last_login_at),
         raw_json = VALUES(raw_json)`,
       (u) => [
         String(u.id).slice(0, 128),
@@ -501,7 +969,8 @@ export async function saveDatabaseToMysql(
         truncStr(u.lastLoginAt, 64),
         truncStr(u.createdAt || new Date().toISOString(), 64),
         JSON.stringify(u),
-      ]
+      ],
+      { allowDeleteMissing: false }
     );
 
     // 2. Tabel programs

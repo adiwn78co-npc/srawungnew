@@ -121,6 +121,7 @@ async function startServer() {
   await db.ready();
 
   const app = express();
+  app.set('trust proxy', 1);
   const PORT = Number(process.env.PORT) || 3000;
 
   // Security Headers, Sensitive Path Shield & Body Size Limit (Defense in Depth — compatible with AI Studio Preview iframe)
@@ -248,19 +249,136 @@ async function startServer() {
     return `scrypt$${salt}$${derived}`;
   }
 
-  function verifyPassword(plainPassword: string, storedHash?: string): boolean {
-    if (!storedHash || !storedHash.startsWith('scrypt$')) return false;
-    const parts = storedHash.split('$');
-    if (parts.length !== 3) return false;
-    const [, salt, originalHex] = parts;
+  function safeHexEqual(hexA: string, hexB: string): boolean {
     try {
-      const derived = crypto.scryptSync(plainPassword, salt, 64);
-      const originalBuf = Buffer.from(originalHex, 'hex');
-      if (derived.length !== originalBuf.length) return false;
-      return crypto.timingSafeEqual(derived, originalBuf);
+      const bufA = Buffer.from(hexA, 'hex');
+      const bufB = Buffer.from(hexB, 'hex');
+      if (bufA.length === 0 || bufA.length !== bufB.length) return false;
+      return crypto.timingSafeEqual(bufA, bufB);
     } catch {
       return false;
     }
+  }
+
+  function verifyPasswordWithMigration(
+    plainPassword: string,
+    storedHash?: string
+  ): { valid: boolean; needsRehash: boolean } {
+    if (!storedHash || typeof storedHash !== 'string') {
+      return { valid: false, needsRehash: false };
+    }
+    const trimmedHash = storedHash.trim();
+    if (!trimmedHash) {
+      return { valid: false, needsRehash: false };
+    }
+
+    // 1. Format utama: scrypt$<salt>$<hex> atau scrypt:<salt>:<hex>
+    if (trimmedHash.startsWith('scrypt$') || trimmedHash.startsWith('scrypt:')) {
+      const sep = trimmedHash.startsWith('scrypt$') ? '$' : ':';
+      const parts = trimmedHash.split(sep);
+      if (parts.length !== 3) return { valid: false, needsRehash: false };
+      const [, salt, originalHex] = parts;
+      try {
+        const derivedHex = crypto.scryptSync(plainPassword, salt, 64).toString('hex');
+        const valid = safeHexEqual(derivedHex, originalHex);
+        return { valid, needsRehash: valid && sep === ':' };
+      } catch {
+        return { valid: false, needsRehash: false };
+      }
+    }
+
+    // 2. Format PBKDF2: pbkdf2$<iterations>$<salt>$<hex>
+    if (trimmedHash.startsWith('pbkdf2$')) {
+      const parts = trimmedHash.split('$');
+      if (parts.length === 4) {
+        const [, iterStr, salt, originalHex] = parts;
+        const iterations = parseInt(iterStr, 10) || 10000;
+        try {
+          const keyLen = Math.floor(originalHex.length / 2) || 64;
+          const derivedHex = crypto
+            .pbkdf2Sync(plainPassword, salt, iterations, keyLen, 'sha512')
+            .toString('hex');
+          const valid = safeHexEqual(derivedHex, originalHex);
+          return { valid, needsRehash: valid };
+        } catch {
+          return { valid: false, needsRehash: false };
+        }
+      }
+    }
+
+    // 3. Format SHA-256 dengan salt: sha256$<salt>$<hex>
+    if (trimmedHash.startsWith('sha256$')) {
+      const parts = trimmedHash.split('$');
+      if (parts.length === 3) {
+        const [, salt, originalHex] = parts;
+        const digestHex = crypto
+          .createHash('sha256')
+          .update(`${salt}${plainPassword}`)
+          .digest('hex');
+        const digestHexAlt = crypto
+          .createHash('sha256')
+          .update(`${plainPassword}${salt}`)
+          .digest('hex');
+        const valid =
+          safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
+        return { valid, needsRehash: valid };
+      }
+    }
+
+    // 4. Format SHA-512 dengan salt: sha512$<salt>$<hex>
+    if (trimmedHash.startsWith('sha512$')) {
+      const parts = trimmedHash.split('$');
+      if (parts.length === 3) {
+        const [, salt, originalHex] = parts;
+        const digestHex = crypto
+          .createHash('sha512')
+          .update(`${salt}${plainPassword}`)
+          .digest('hex');
+        const digestHexAlt = crypto
+          .createHash('sha512')
+          .update(`${plainPassword}${salt}`)
+          .digest('hex');
+        const valid =
+          safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
+        return { valid, needsRehash: valid };
+      }
+    }
+
+    // 5. Raw SHA-256 hex (64 hex chars, misalnya dari SQL SHA2(password, 256))
+    if (/^[a-fA-F0-9]{64}$/.test(trimmedHash)) {
+      const sha256Hex = crypto.createHash('sha256').update(plainPassword).digest('hex');
+      const valid = safeHexEqual(sha256Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+
+    // 6. Raw SHA-512 hex (128 hex chars, misalnya dari SQL SHA2(password, 512))
+    if (/^[a-fA-F0-9]{128}$/.test(trimmedHash)) {
+      const sha512Hex = crypto.createHash('sha512').update(plainPassword).digest('hex');
+      const valid = safeHexEqual(sha512Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+
+    // 7. Raw MD5 hex (32 hex chars, misalnya dari phpMyAdmin MD5(password))
+    if (/^[a-fA-F0-9]{32}$/.test(trimmedHash)) {
+      const md5Hex = crypto.createHash('md5').update(plainPassword).digest('hex');
+      const valid = safeHexEqual(md5Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+
+    // 8. Fallback plaintext terukur hanya jika nilai di DB bukan format hash kriptografis
+    if (!trimmedHash.startsWith('$2') && !trimmedHash.startsWith('$argon2') && !trimmedHash.includes('$')) {
+      const plainBuf = Buffer.from(plainPassword, 'utf-8');
+      const storedBuf = Buffer.from(trimmedHash, 'utf-8');
+      if (plainBuf.length === storedBuf.length && crypto.timingSafeEqual(plainBuf, storedBuf)) {
+        return { valid: true, needsRehash: true };
+      }
+    }
+
+    return { valid: false, needsRehash: false };
+  }
+
+  function verifyPassword(plainPassword: string, storedHash?: string): boolean {
+    return verifyPasswordWithMigration(plainPassword, storedHash).valid;
   }
 
   // Dummy hash konstan untuk mencegah enumerasi akun melalui analisis waktu respons (timing side-channel)
@@ -292,8 +410,10 @@ async function startServer() {
   }
 
   function sanitizeUser(user: User): User {
-    const isUsingDefaultPassword = isDefaultTestingPasswordHash(user.passwordHash);
+    const effectiveHash = user.passwordHash || (user as any).password_hash;
+    const isUsingDefaultPassword = isDefaultTestingPasswordHash(effectiveHash);
     const { passwordHash: _removed, ...safeUser } = user;
+    delete (safeUser as any).password_hash;
     const resolvedStatus: UserAccountStatus =
       safeUser.accountStatus || (safeUser.isActive === false ? 'Nonaktif' : 'Aktif');
     return {
@@ -306,10 +426,43 @@ async function startServer() {
     };
   }
 
-  // Pastikan seluruh akun yang ada memiliki username, accountStatus, permissions, dan passwordHash terenkripsi
-  // tanpa pernah menimpa passwordHash yang sudah diubah oleh pengguna.
+  // Pastikan seluruh akun yang ada memiliki username, accountStatus, dan permissions yang valid
+  // TANPA PERNAH menimpa passwordHash atau mereset akun pengguna di MySQL ke password default.
   function ensureUserSecurityFieldsInitialized() {
     const current = db.getData();
+    const isMysqlMode = db.isMysqlReady() || db.isStrictMysqlRequired();
+
+    // Dalam mode MySQL / Produksi Hostinger: JANGAN PERNAH memanggil db.update() saat startup
+    // atau mengisi password default ke akun existing. Cukup lengkapi field in-memory secara non-destruktif.
+    if (isMysqlMode) {
+      const usedUsernames = new Set<string>();
+      for (const u of current.users || []) {
+        let baseUsername = (u.username || deriveDefaultUsername(u.email, u.name)).toLowerCase();
+        if (!baseUsername) baseUsername = `user.${u.id}`;
+        let candidate = baseUsername;
+        let counter = 2;
+        while (usedUsernames.has(candidate)) {
+          candidate = `${baseUsername}${counter}`;
+          counter += 1;
+        }
+        usedUsernames.add(candidate);
+        u.username = candidate;
+        if (!u.accountStatus) {
+          u.accountStatus = u.isActive === false ? 'Nonaktif' : 'Aktif';
+        }
+        u.isActive = u.accountStatus === 'Aktif';
+        u.permissions = normalizeRolePermissions(u.role, u.permissions);
+        const existingLegacyHash = (u as any).password_hash;
+        if (!u.passwordHash && typeof existingLegacyHash === 'string' && existingLegacyHash.trim()) {
+          u.passwordHash = existingLegacyHash.trim();
+        }
+        if (u.mustChangePassword === undefined) {
+          u.mustChangePassword = false;
+        }
+      }
+      return;
+    }
+
     const needsInit = (current.users || []).some(
       (u) =>
         (!u.passwordHash && !(u as any).password_hash) ||
@@ -358,7 +511,9 @@ async function startServer() {
 
     if (db.isOperational()) {
       ensureUserSecurityFieldsInitialized();
-      await db.flushWrites();
+      if (!db.isMysqlReady() && !db.isStrictMysqlRequired()) {
+        await db.flushWrites();
+      }
     }
 
   // Cryptographic HMAC-SHA256 Session Token (bound to user passwordHash, role, and active status)
@@ -494,6 +649,13 @@ async function startServer() {
     if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
       return true;
     }
+    // Custom headers cannot be sent cross-origin without preflight approval
+    if (
+      req.headers['x-requested-with'] === 'XMLHttpRequest' ||
+      (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer '))
+    ) {
+      return true;
+    }
     const originHeader = String(req.headers.origin || '').trim();
     if (!originHeader || originHeader === 'null') {
       return true;
@@ -501,12 +663,13 @@ async function startServer() {
     try {
       const parsedOrigin = new URL(originHeader);
       const originHost = parsedOrigin.host.toLowerCase();
-      const originHostname = parsedOrigin.hostname.toLowerCase();
+      const originHostname = parsedOrigin.hostname.toLowerCase().replace(/^www\./, '');
       const reqHost = String(req.headers['x-forwarded-host'] || req.headers.host || '')
         .split(',')[0]
         .trim()
         .toLowerCase();
-      if (reqHost && originHost === reqHost) {
+      const reqHostname = reqHost.split(':')[0].replace(/^www\./, '');
+      if (reqHost && (originHost === reqHost || originHostname === reqHostname)) {
         return true;
       }
       if (
@@ -514,7 +677,9 @@ async function startServer() {
         originHostname === '127.0.0.1' ||
         originHostname.endsWith('.run.app') ||
         originHostname.endsWith('.google.com') ||
-        originHostname.endsWith('.usercontent.goog')
+        originHostname.endsWith('.usercontent.goog') ||
+        originHostname.endsWith('.hostingersite.com') ||
+        originHostname.endsWith('.hostinger.com')
       ) {
         return true;
       }
@@ -526,13 +691,26 @@ async function startServer() {
 
   // Zero-Trust API Security Gate (Enforces Rate Limiting, Deep Sanitization, and Strict Authentication on /api/*)
   const PUBLIC_API_PATHS = new Set([
+    '/health',
     '/auth/login',
     '/auth/register',
     '/register',
     '/auth/signup',
   ]);
 
+  app.get('/api/health', async (_req: Request, res: Response) => {
+    const diag = db.getDiagnostics();
+    res.status(diag.operational ? 200 : 503).json({
+      status: diag.operational ? 'ok' : 'unavailable',
+      database: diag,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   app.use('/api', async (req: Request, res: Response, next: express.NextFunction) => {
+    if (req.path === '/health') {
+      return next();
+    }
     // 0. Database Operational Guard (Prevents serving placeholder/seed state or losing writes if MySQL is unreachable)
     if (!db.isOperational()) {
       await db.ready();
@@ -542,14 +720,12 @@ async function startServer() {
         });
       }
       ensureUserSecurityFieldsInitialized();
-      await db.flushWrites();
     } else {
       void db
         .retryMysqlIfNeeded()
         .then((reconnected) => {
           if (reconnected) {
             ensureUserSecurityFieldsInitialized();
-            void db.flushWrites();
           }
         })
         .catch(() => {});
@@ -921,8 +1097,8 @@ async function startServer() {
   app.post('/api/register', handleBlockedPublicRegistration);
   app.post('/api/auth/signup', handleBlockedPublicRegistration);
 
-  // Autentikasi Login Pengguna (Username / Email + Password Terenkripsi + Rate Limiting)
-  app.post('/api/auth/login', (req: Request, res: Response) => {
+  // Autentikasi Login Pengguna (Query langsung ke tabel users di MySQL + Verifikasi password_hash + Rate Limiting)
+  app.post('/api/auth/login', async (req: Request, res: Response) => {
     const rawIdentifier = String(req.body?.identifier || req.body?.username || req.body?.email || '')
       .trim()
       .toLowerCase();
@@ -967,6 +1143,9 @@ async function startServer() {
         });
       }
     };
+
+    // Selalu muat daftar pengguna terbaru langsung dari tabel `users` MySQL sebelum mengecek kredensial
+    await db.refreshUsersFromMysql(true);
 
     const data = db.getData();
     const targetUser = data.users.find((u) => {
@@ -1024,8 +1203,10 @@ async function startServer() {
       });
     }
 
-    const isPasswordValid = verifyPassword(rawPassword, targetUser.passwordHash);
-    if (!isPasswordValid) {
+    const effectiveStoredHash =
+      targetUser.passwordHash || ((targetUser as any).password_hash as string | undefined);
+    const verification = verifyPasswordWithMigration(rawPassword, effectiveStoredHash);
+    if (!verification.valid) {
       recordFailedAttempt();
       db.update((d) => {
         d.auditLogs.unshift({
@@ -1048,11 +1229,16 @@ async function startServer() {
     loginRateLimits.delete(rateKey);
 
     let loggedInUser: User = targetUser;
+    const upgradedHash = verification.needsRehash ? hashPassword(rawPassword) : undefined;
     db.update((d) => {
       d.currentUserId = targetUser.id;
       const idx = d.users.findIndex((u) => u.id === targetUser.id);
       if (idx !== -1) {
         d.users[idx].lastLoginAt = nowIso;
+        if (upgradedHash) {
+          d.users[idx].passwordHash = upgradedHash;
+          d.users[idx].passwordUpdatedAt = d.users[idx].passwordUpdatedAt || nowIso;
+        }
         loggedInUser = d.users[idx];
       }
       d.auditLogs.unshift({
@@ -1067,6 +1253,8 @@ async function startServer() {
         timestamp: nowIso,
       });
     });
+
+    await db.syncUserImmediately(loggedInUser);
 
     const sessionToken = createSessionToken(loggedInUser);
 
@@ -1099,13 +1287,16 @@ async function startServer() {
       });
     }
 
+    await db.refreshUsersFromMysql(true);
     const data = db.getData();
     const targetUser = data.users.find((u) => u.id === currentUser.id);
     if (!targetUser) {
       return res.status(404).json({ error: 'Akun pengguna tidak ditemukan.' });
     }
 
-    if (!verifyPassword(currentPassword, targetUser.passwordHash)) {
+    const storedHash =
+      targetUser.passwordHash || ((targetUser as any).password_hash as string | undefined);
+    if (!verifyPassword(currentPassword, storedHash)) {
       return res.status(401).json({
         error: 'Password saat ini yang Anda masukkan tidak sesuai.',
       });
@@ -1182,7 +1373,8 @@ async function startServer() {
     res.json({ message: 'Sesi berhasil diakhiri.' });
   });
 
-  app.get('/api/auth/current-user', (req: Request, res: Response) => {
+  app.get('/api/auth/current-user', async (req: Request, res: Response) => {
+    await db.refreshUsersFromMysql(false);
     const user = getCurrentUser(req);
     if (user.isActive === false) {
       return res.status(403).json({ error: 'Akun pengguna sedang dinonaktifkan.' });
@@ -1190,13 +1382,14 @@ async function startServer() {
     res.json(sanitizeUser(user));
   });
 
-  app.post('/api/auth/switch-user', (req: Request, res: Response) => {
+  app.post('/api/auth/switch-user', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
         error: 'Fitur peralihan sesi tanpa password telah dinonaktifkan demi keamanan produksi. Silakan login menggunakan kredensial resmi.',
       });
     }
+    await db.refreshUsersFromMysql(false);
     const { userId } = req.body;
     const data = db.getData();
     const user = data.users.find((u) => u.id === userId);
@@ -1219,6 +1412,7 @@ async function startServer() {
         updatedTarget = d.users[idx];
       }
     });
+    await db.syncUserImmediately(updatedTarget);
     const sessionToken = createSessionToken(updatedTarget);
     res.json({
       message: `Berhasil beralih ke ${user.name} (${user.roleTitle})`,
@@ -1227,7 +1421,8 @@ async function startServer() {
     });
   });
 
-  app.get('/api/users', (_req: Request, res: Response) => {
+  app.get('/api/users', async (_req: Request, res: Response) => {
+    await db.refreshUsersFromMysql(false);
     const data = db.getData();
     res.json((data.users || []).map(sanitizeUser));
   });

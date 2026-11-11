@@ -15,33 +15,93 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-dotenv.config();
+var __poolFile = fileURLToPath(import.meta.url);
+var __poolDir = path.dirname(__poolFile);
+for (const envCandidate of [
+  path.resolve(process.cwd(), ".env"),
+  path.resolve(process.cwd(), ".env.production"),
+  path.resolve(process.cwd(), ".env.local"),
+  path.resolve(__poolDir, ".env"),
+  path.resolve(__poolDir, "..", "..", ".env"),
+  path.resolve(__poolDir, "..", "..", ".env.production")
+]) {
+  if (fs.existsSync(envCandidate)) {
+    dotenv.config({ path: envCandidate, override: false });
+  }
+}
 var cachedPool = null;
+var cachedPoolHostOverride = null;
 var loggedCloudRunLoopbackNotice = false;
 function isCloudRunEnvironment() {
   return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+}
+function isProductionHostingerEnvironment() {
+  if (isCloudRunEnvironment()) {
+    return false;
+  }
+  return process.env.NODE_ENV === "production" || Boolean(process.env.IN_PASSENGER) || Boolean(process.env.PASSENGER_APP_ENV) || Boolean(process.env.MYSQL_HOST || process.env.MYSQL_DATABASE || process.env.MYSQL_USER);
 }
 function isLoopbackMysqlHost(rawHost) {
   const host = String(rawHost || "").trim().toLowerCase();
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0";
 }
-function hasPlaceholderMysqlCredentials() {
-  const user = String(process.env.MYSQL_USER || "").trim();
-  const dbName = String(process.env.MYSQL_DATABASE || "").trim();
-  return user === "your_mysql_user" || dbName === "your_mysql_database";
+function isPlaceholderValue(val) {
+  const clean = val.trim().toLowerCase();
+  return !clean || clean === "your_mysql_user" || clean === "your_mysql_database" || clean === "your_mysql_password";
+}
+function resolveMysqlConfig() {
+  const mysqlHost = String(process.env.MYSQL_HOST || "").trim();
+  const mysqlUser = String(process.env.MYSQL_USER || "").trim();
+  const mysqlName = String(process.env.MYSQL_DATABASE || "").trim();
+  const rawPort = process.env.MYSQL_PORT || "3306";
+  const port = Number(rawPort) > 0 ? Number(rawPort) : 3306;
+  const rawPassword = process.env.MYSQL_PASSWORD ?? "";
+  const password = isPlaceholderValue(String(rawPassword)) ? "" : String(rawPassword);
+  const user = !isPlaceholderValue(mysqlUser) ? mysqlUser : "";
+  const database = !isPlaceholderValue(mysqlName) ? mysqlName : "";
+  let host = mysqlHost;
+  if (!host && user && database && !isCloudRunEnvironment()) {
+    host = "127.0.0.1";
+  }
+  const socketPath = String(process.env.MYSQL_SOCKET_PATH || "").trim() || void 0;
+  return {
+    host,
+    port,
+    user,
+    password,
+    database,
+    socketPath
+  };
+}
+function validateMysqlEnvConfiguration() {
+  const cfg = resolveMysqlConfig();
+  const missingVars = [];
+  if (!cfg.host) missingVars.push("MYSQL_HOST");
+  if (!cfg.user) missingVars.push("MYSQL_USER");
+  if (!cfg.database) missingVars.push("MYSQL_DATABASE");
+  if (missingVars.length > 0) {
+    return {
+      configured: false,
+      missingVars,
+      safeSummary: `unconfigured (missing: ${missingVars.join(", ")})`
+    };
+  }
+  return {
+    configured: true,
+    missingVars: [],
+    safeSummary: `host=${cfg.host}, port=${cfg.port}, database=${cfg.database}, user=${cfg.user}`
+  };
 }
 function isMysqlConfigured() {
-  const host = String(process.env.MYSQL_HOST || "").trim();
-  const user = String(process.env.MYSQL_USER || "").trim();
-  const dbName = String(process.env.MYSQL_DATABASE || "").trim();
-  if (!host || !user || !dbName || hasPlaceholderMysqlCredentials()) {
+  const cfg = resolveMysqlConfig();
+  if (!cfg.host || !cfg.user || !cfg.database) {
     return false;
   }
-  if (isCloudRunEnvironment() && isLoopbackMysqlHost(host) && process.env.MYSQL_STRICT_REQUIRED !== "true") {
+  if (isCloudRunEnvironment() && isLoopbackMysqlHost(cfg.host) && process.env.MYSQL_STRICT_REQUIRED !== "true") {
     if (!loggedCloudRunLoopbackNotice) {
       loggedCloudRunLoopbackNotice = true;
       console.log(
-        `[DB] Cloud Run preview detected with local MYSQL_HOST (${host}); using local preview storage.`
+        `[DB] Cloud Run preview detected with local MySQL host (${cfg.host}); using preview storage.`
       );
     }
     return false;
@@ -58,38 +118,70 @@ async function resetMysqlPool() {
     }
   }
 }
-async function getMysqlPool() {
+async function getMysqlPool(hostOverride) {
   if (!isMysqlConfigured()) {
     return null;
   }
-  if (cachedPool) {
+  if (cachedPool && (!hostOverride || cachedPoolHostOverride === hostOverride)) {
     return cachedPool;
   }
+  if (cachedPool && hostOverride && cachedPoolHostOverride !== hostOverride) {
+    await resetMysqlPool();
+  }
+  const cfg = resolveMysqlConfig();
+  const effectiveHost = hostOverride || cachedPoolHostOverride || cfg.host;
   const modName = "mysql2/promise";
   const mysqlModule = await import(
     /* @vite-ignore */
     modName
   );
   const mysql = mysqlModule.default || mysqlModule;
-  cachedPool = mysql.createPool({
-    host: process.env.MYSQL_HOST?.trim(),
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER?.trim(),
-    password: process.env.MYSQL_PASSWORD || "",
-    database: process.env.MYSQL_DATABASE?.trim(),
-    connectTimeout: 8e3,
+  const poolConfig = {
+    host: effectiveHost,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    database: cfg.database,
+    connectTimeout: 1e4,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
-  });
+    queueLimit: 0,
+    charset: "utf8mb4"
+  };
+  if (cfg.socketPath) {
+    poolConfig.socketPath = cfg.socketPath;
+  }
+  cachedPoolHostOverride = effectiveHost;
+  cachedPool = mysql.createPool(poolConfig);
   return cachedPool;
 }
+async function verifyAndGetMysqlPool() {
+  const cfg = resolveMysqlConfig();
+  let pool = await getMysqlPool();
+  if (!pool) {
+    throw new Error("MySQL connection pool is unavailable.");
+  }
+  try {
+    await pool.query("SELECT 1");
+    return pool;
+  } catch (err) {
+    const code = String(err?.code || "");
+    if (cfg.host.toLowerCase() === "localhost" && cachedPoolHostOverride !== "127.0.0.1" && (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EHOSTUNREACH")) {
+      await resetMysqlPool();
+      pool = await getMysqlPool("127.0.0.1");
+      if (pool) {
+        await pool.query("SELECT 1");
+        return pool;
+      }
+    }
+    throw err;
+  }
+}
 async function ensureMysqlSchema(pool) {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const candidatePaths = [
     path.resolve(process.cwd(), "database", "schema.sql"),
-    path.resolve(moduleDir, "database", "schema.sql"),
-    path.resolve(moduleDir, "..", "..", "database", "schema.sql")
+    path.resolve(__poolDir, "database", "schema.sql"),
+    path.resolve(__poolDir, "..", "..", "database", "schema.sql")
   ];
   const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
   if (!schemaPath) {
@@ -99,6 +191,9 @@ async function ensureMysqlSchema(pool) {
   const cleanedSql = sqlContent.replace(/^\s*--.*$/gm, "");
   const statements = cleanedSql.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
   for (const stmt of statements) {
+    if (/^\s*(DROP|TRUNCATE|DELETE)\b/i.test(stmt)) {
+      continue;
+    }
     await pool.query(stmt);
   }
 }
@@ -116,10 +211,105 @@ function safeJsonParse(raw, fallback) {
     return fallback;
   }
 }
+var DEFAULT_PERMS_BY_ROLE = {
+  admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
+  director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+  finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
+  meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
+  staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false }
+};
+function normalizeMysqlUserRole(rawRole) {
+  const clean = String(rawRole || "").trim().toLowerCase();
+  if (clean === "admin" || clean === "administrator" || clean === "system administrator" || clean === "superadmin") {
+    return "admin";
+  }
+  if (clean === "director" || clean === "direktur" || clean === "executive director") {
+    return "director";
+  }
+  if (clean === "finance" || clean === "keuangan" || clean === "finance & hr manager" || clean === "finance_hr") {
+    return "finance";
+  }
+  if (clean === "hr" || clean === "hrd" || clean === "human resources") {
+    return "hr";
+  }
+  if (clean === "program_manager" || clean === "program manager" || clean === "pm") {
+    return "program_manager";
+  }
+  if (clean === "meal" || clean === "meal coordinator" || clean === "monitoring") {
+    return "meal";
+  }
+  if (clean === "staff" || clean === "staf") {
+    return "staff";
+  }
+  return clean || "staff";
+}
+function deriveUsernameFallback(email, name, id) {
+  const fromEmail = (email || "").split("@")[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
+  if (fromEmail) return fromEmail;
+  const fromName = (name || "").split(",")[0].trim().toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
+  return fromName || `user.${id}`;
+}
+function hydrateMysqlUserRow(r) {
+  const raw = safeJsonParse(r?.raw_json, {});
+  const colPerms = safeJsonParse(
+    r?.permissions_json ?? r?.permissions,
+    null
+  );
+  const resolvedRole = normalizeMysqlUserRole(r?.role || raw.role || "staff");
+  const basePerms = DEFAULT_PERMS_BY_ROLE[resolvedRole] || DEFAULT_PERMS_BY_ROLE.staff;
+  const rawPerms = raw.permissions && typeof raw.permissions === "object" ? raw.permissions : colPerms && typeof colPerms === "object" ? colPerms : {};
+  const mergedPerms = {
+    canManagePrograms: colPerms?.canManagePrograms ?? rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+    canCreateTor: colPerms?.canCreateTor ?? rawPerms.canCreateTor ?? basePerms.canCreateTor,
+    canApproveTor: resolvedRole === "admin" ? false : colPerms?.canApproveTor ?? rawPerms.canApproveTor ?? basePerms.canApproveTor,
+    canManageUsers: resolvedRole === "admin" ? true : colPerms?.canManageUsers ?? rawPerms.canManageUsers ?? basePerms.canManageUsers,
+    canViewAllTors: colPerms?.canViewAllTors ?? rawPerms.canViewAllTors ?? basePerms.canViewAllTors
+  };
+  const sqlColPasswordHash = typeof r?.password_hash === "string" && r.password_hash.trim() || typeof r?.password === "string" && r.password.trim() || typeof r?.passwordHash === "string" && r.passwordHash.trim() || void 0;
+  const rawJsonPasswordHash = typeof raw.passwordHash === "string" && raw.passwordHash.trim() || typeof raw.password_hash === "string" && raw.password_hash.trim() || typeof raw.password === "string" && raw.password.trim() || void 0;
+  const resolvedPasswordHash = sqlColPasswordHash || rawJsonPasswordHash;
+  const sqlHashDiffersFromRaw = Boolean(sqlColPasswordHash && rawJsonPasswordHash && sqlColPasswordHash !== rawJsonPasswordHash);
+  const resolvedMustChangePassword = r?.must_change_password !== void 0 && r?.must_change_password !== null ? Boolean(Number(r.must_change_password)) : sqlHashDiffersFromRaw ? false : raw.mustChangePassword !== void 0 ? Boolean(raw.mustChangePassword) : false;
+  const resolvedIsActive = r?.is_active !== void 0 && r?.is_active !== null ? Boolean(Number(r.is_active)) : raw.isActive !== false;
+  const resolvedAccountStatus = typeof r?.account_status === "string" && r.account_status.trim() || raw.accountStatus || (resolvedIsActive ? "Aktif" : "Nonaktif");
+  const id = String(r?.id || raw.id || "");
+  const name = typeof r?.name === "string" && r.name.trim() || raw.name || "";
+  const email = typeof r?.email === "string" && r.email.trim() || raw.email || "";
+  const username = typeof r?.username === "string" && r.username.trim() || typeof raw.username === "string" && raw.username.trim() || deriveUsernameFallback(email, name, id);
+  return {
+    ...raw,
+    id,
+    username,
+    name,
+    email,
+    passwordHash: resolvedPasswordHash,
+    mustChangePassword: resolvedMustChangePassword,
+    passwordUpdatedAt: r?.password_updated_at || raw.passwordUpdatedAt || r?.created_at || raw.createdAt || void 0,
+    role: resolvedRole,
+    roleTitle: typeof r?.role_title === "string" && r.role_title.trim() || raw.roleTitle || resolvedRole.toUpperCase(),
+    department: typeof r?.department === "string" && r.department.trim() || raw.department || "",
+    isActive: resolvedAccountStatus === "Aktif" && resolvedIsActive,
+    accountStatus: resolvedAccountStatus,
+    permissions: mergedPerms,
+    lastLoginAt: r?.last_login_at || raw.lastLoginAt || void 0,
+    createdAt: r?.created_at || raw.createdAt || "2026-01-10T08:00:00Z"
+  };
+}
+async function fetchUsersFromMysql(pool) {
+  const [userRows] = await pool.query("SELECT * FROM users");
+  if (!Array.isArray(userRows)) {
+    return [];
+  }
+  const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
+  hydrated.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  return hydrated;
+}
 async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   await ensureMysqlSchema(pool);
-  const [userRows] = await pool.query("SELECT * FROM users ORDER BY created_at ASC");
-  const hasUsers = Array.isArray(userRows) && userRows.length > 0;
+  const users = await fetchUsersFromMysql(pool);
+  const hasUsers = users.length > 0;
   if (!hasUsers) {
     const [countRows] = await pool.query(
       `SELECT (
@@ -140,18 +330,18 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       return null;
     }
   }
-  const [programRows] = await pool.query("SELECT * FROM programs ORDER BY created_at DESC");
+  const [programRows] = await pool.query("SELECT * FROM programs");
   const [outcomeRows] = await pool.query("SELECT * FROM outcomes");
   const [outputRows] = await pool.query("SELECT * FROM outputs");
   const [activityRows] = await pool.query("SELECT * FROM activities");
   const [subActivityRows] = await pool.query("SELECT * FROM sub_activities");
-  const [torRows] = await pool.query("SELECT * FROM tors ORDER BY created_at DESC");
-  const [approvalRows] = await pool.query("SELECT * FROM approval_records ORDER BY timestamp ASC");
-  const [caRows] = await pool.query("SELECT * FROM cash_advances ORDER BY created_at DESC");
-  const [minutesRows] = await pool.query("SELECT * FROM meeting_minutes ORDER BY created_at DESC");
-  const [participantRows] = await pool.query("SELECT * FROM participants ORDER BY created_at DESC");
-  const [attendanceRows] = await pool.query("SELECT * FROM attendance_records ORDER BY record_date DESC");
-  const [auditRows] = await pool.query("SELECT * FROM audit_logs ORDER BY timestamp DESC");
+  const [torRows] = await pool.query("SELECT * FROM tors");
+  const [approvalRows] = await pool.query("SELECT * FROM approval_records");
+  const [caRows] = await pool.query("SELECT * FROM cash_advances");
+  const [minutesRows] = await pool.query("SELECT * FROM meeting_minutes");
+  const [participantRows] = await pool.query("SELECT * FROM participants");
+  const [attendanceRows] = await pool.query("SELECT * FROM attendance_records");
+  const [auditRows] = await pool.query("SELECT * FROM audit_logs");
   const [kvRows] = await pool.query("SELECT store_key, store_value FROM system_kv_store");
   const kvMap = {};
   if (Array.isArray(kvRows)) {
@@ -159,49 +349,173 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       kvMap[row.store_key] = safeJsonParse(row.store_value, null);
     }
   }
-  const parseRowList = (rows) => Array.isArray(rows) ? rows.map((r) => safeJsonParse(r.raw_json, r)) : [];
-  const defaultPermsByRole = {
-    admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
-    director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
-    finance: { canManagePrograms: false, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    program_manager: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
-    meal: { canManagePrograms: true, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
-    staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false }
+  const parseAndHydrateRows = (rows, hydrator) => {
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r) => {
+      const raw = safeJsonParse(r?.raw_json, {});
+      return hydrator(r, raw);
+    }).filter((item) => Boolean(item && item.id));
   };
-  const hydrateMysqlUserRow = (r) => {
-    const raw = safeJsonParse(r?.raw_json, {});
-    const colPerms = safeJsonParse(r?.permissions_json, null);
-    const resolvedRole = String(r?.role || raw.role || "staff");
-    const basePerms = defaultPermsByRole[resolvedRole] || defaultPermsByRole.staff;
-    const rawPerms = raw.permissions && typeof raw.permissions === "object" ? raw.permissions : colPerms && typeof colPerms === "object" ? colPerms : {};
-    const mergedPerms = {
-      canManagePrograms: rawPerms.canManagePrograms ?? colPerms?.canManagePrograms ?? basePerms.canManagePrograms,
-      canCreateTor: rawPerms.canCreateTor ?? colPerms?.canCreateTor ?? basePerms.canCreateTor,
-      canApproveTor: resolvedRole === "admin" ? false : rawPerms.canApproveTor ?? colPerms?.canApproveTor ?? basePerms.canApproveTor,
-      canManageUsers: resolvedRole === "admin" ? true : rawPerms.canManageUsers ?? colPerms?.canManageUsers ?? basePerms.canManageUsers,
-      canViewAllTors: rawPerms.canViewAllTors ?? colPerms?.canViewAllTors ?? basePerms.canViewAllTors
-    };
-    const resolvedPasswordHash = typeof r?.password_hash === "string" && r.password_hash.trim() || typeof raw.passwordHash === "string" && raw.passwordHash.trim() || typeof raw.password_hash === "string" && raw.password_hash.trim() || void 0;
-    const resolvedIsActive = r?.is_active !== void 0 && r?.is_active !== null ? Boolean(Number(r.is_active)) : raw.isActive !== false;
-    const resolvedAccountStatus = typeof r?.account_status === "string" && r.account_status.trim() || raw.accountStatus || (resolvedIsActive ? "Aktif" : "Nonaktif");
-    return {
-      ...raw,
-      id: String(r?.id || raw.id || ""),
-      username: typeof r?.username === "string" && r.username.trim() || raw.username || void 0,
-      name: typeof r?.name === "string" && r.name.trim() || raw.name || "",
-      email: typeof r?.email === "string" && r.email.trim() || raw.email || "",
-      passwordHash: resolvedPasswordHash,
-      role: resolvedRole,
-      roleTitle: typeof r?.role_title === "string" && r.role_title.trim() || raw.roleTitle || resolvedRole.toUpperCase(),
-      department: typeof r?.department === "string" && r.department.trim() || raw.department || "",
-      isActive: resolvedAccountStatus === "Aktif",
-      accountStatus: resolvedAccountStatus,
-      permissions: mergedPerms,
-      lastLoginAt: r?.last_login_at || raw.lastLoginAt || void 0,
-      createdAt: r?.created_at || raw.createdAt || "2026-01-10T08:00:00Z"
-    };
-  };
+  const programs = parseAndHydrateRows(programRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || "",
+    description: r?.description ?? raw.description ?? "",
+    donor: r?.donor ?? raw.donor ?? "",
+    startDate: r?.start_date || raw.startDate || "",
+    endDate: r?.end_date || raw.endDate || "",
+    totalBudget: r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? raw.budget ?? 0),
+    budget: raw.budget !== void 0 ? Number(raw.budget) : r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? 0),
+    currency: r?.currency || raw.currency || "IDR",
+    status: r?.status || raw.status || "Active",
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const outcomes = parseAndHydrateRows(outcomeRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    programId: r?.program_id || raw.programId || "",
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || raw.title || "",
+    title: raw.title || r?.name || raw.name || "",
+    description: r?.description ?? raw.description ?? "",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+  }));
+  const outputs = parseAndHydrateRows(outputRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    programId: r?.program_id || raw.programId || "",
+    outcomeId: r?.outcome_id || raw.outcomeId || "",
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || raw.title || "",
+    title: raw.title || r?.name || raw.name || "",
+    description: r?.description ?? raw.description ?? "",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+  }));
+  const activities = parseAndHydrateRows(activityRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    programId: r?.program_id || raw.programId || "",
+    outcomeId: r?.outcome_id || raw.outcomeId || "",
+    outputId: r?.output_id || raw.outputId || "",
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || raw.title || "",
+    title: raw.title || r?.name || raw.name || "",
+    description: r?.description ?? raw.description ?? "",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+  }));
+  const subActivities = parseAndHydrateRows(subActivityRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    activityId: r?.activity_id || raw.activityId || "",
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || "",
+    description: r?.description ?? raw.description ?? "",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+  }));
+  const tors = parseAndHydrateRows(torRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    torNumber: r?.tor_number ?? raw.torNumber,
+    title: r?.title || raw.title || "",
+    programId: r?.program_id || raw.programId || "",
+    outcomeId: r?.outcome_id || raw.outcomeId || "",
+    outputId: r?.output_id || raw.outputId || "",
+    activityId: r?.activity_id || raw.activityId || "",
+    createdById: raw.createdById || r?.created_by_user_id || "",
+    createdByName: r?.created_by_name || raw.createdByName || "",
+    status: r?.status || raw.status || "Draft",
+    currentWorkflowStage: r?.current_stage !== void 0 && r?.current_stage !== null ? Number(r.current_stage) : Number(raw.currentWorkflowStage ?? 1),
+    budgetRequested: r?.budget_requested !== void 0 && r?.budget_requested !== null ? Number(r.budget_requested) : Number(raw.budgetRequested ?? 0),
+    budgetActualSpent: r?.budget_actual_spent !== void 0 && r?.budget_actual_spent !== null ? Number(r.budget_actual_spent) : Number(raw.budgetActualSpent ?? 0),
+    startDate: r?.start_date || raw.startDate || "",
+    endDate: r?.end_date || raw.endDate || "",
+    location: r?.location || raw.location || "",
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const approvalRecords = parseAndHydrateRows(approvalRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    torId: r?.tor_id || raw.torId || "",
+    stage: r?.stage ?? raw.stage ?? 1,
+    approverId: raw.approverId || r?.approver_user_id || "",
+    approverName: r?.approver_name || raw.approverName || "",
+    role: r?.role || raw.role || "",
+    action: r?.action || raw.action || "",
+    notes: r?.notes ?? raw.notes ?? raw.comment ?? "",
+    comment: raw.comment ?? r?.notes ?? raw.notes ?? "",
+    timestamp: r?.timestamp || raw.timestamp || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  const cashAdvances = parseAndHydrateRows(caRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    caNumber: r?.ca_number || raw.caNumber || raw.documentNumber || "",
+    documentNumber: raw.documentNumber || r?.ca_number || raw.caNumber || "",
+    torId: r?.tor_id || raw.torId || "",
+    programId: r?.program_id || raw.programId || "",
+    activityId: r?.activity_id || raw.activityId || "",
+    requesterId: raw.requesterId || r?.requester_user_id || "",
+    requesterName: r?.requester_name || raw.requesterName || "",
+    totalAmount: r?.total_amount !== void 0 && r?.total_amount !== null ? Number(r.total_amount) : Number(raw.totalAmount ?? 0),
+    realizedAmount: r?.realized_amount !== void 0 && r?.realized_amount !== null ? Number(r.realized_amount) : raw.realizedAmount !== void 0 ? Number(raw.realizedAmount) : void 0,
+    status: r?.status || raw.status || "Draft",
+    reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const meetingMinutes = parseAndHydrateRows(minutesRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    torId: r?.tor_id || raw.torId || "",
+    activityId: r?.activity_id || raw.activityId || "",
+    title: r?.title || raw.title || "",
+    meetingDate: r?.meeting_date || raw.meetingDate || raw.date || "",
+    date: raw.date || r?.meeting_date || raw.meetingDate || "",
+    location: r?.location || raw.location || "",
+    createdById: raw.createdById || r?.created_by_user_id || "",
+    status: r?.status || raw.status || "Draft",
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const participantDatabase = parseAndHydrateRows(participantRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    entityType: raw.entityType || r?.participant_type || "INDIVIDUAL",
+    fullName: raw.fullName || r?.name || raw.name || "",
+    name: r?.name || raw.name || raw.fullName || "",
+    gender: r?.gender || raw.gender || void 0,
+    institutionName: raw.institutionName || r?.organization_or_group || void 0,
+    phoneNumber: raw.phoneNumber || r?.phone || void 0,
+    cityOrRegency: raw.cityOrRegency || r?.village_or_city || void 0,
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const hydratedAttendanceRecords = parseAndHydrateRows(attendanceRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    date: r?.record_date || raw.date || "",
+    userId: r?.user_id || raw.userId || "",
+    userName: r?.user_name || raw.userName || "",
+    recordType: r?.record_type || raw.recordType || "ATTENDANCE",
+    clockInTime: r?.clock_in_time ?? raw.clockInTime,
+    clockOutTime: r?.clock_out_time ?? raw.clockOutTime,
+    totalWorkHours: r?.total_work_hours !== void 0 && r?.total_work_hours !== null ? Number(r.total_work_hours) : Number(raw.totalWorkHours ?? 0),
+    isOutsideWorkLocation: r?.is_outside_work_location !== void 0 && r?.is_outside_work_location !== null ? Boolean(Number(r.is_outside_work_location)) : Boolean(raw.isOutsideWorkLocation),
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const auditLogs = parseAndHydrateRows(auditRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    torId: r?.tor_id || raw.torId || void 0,
+    actorId: raw.actorId || r?.user_id || "system",
+    actorName: raw.actorName || r?.user_name || "System",
+    actorRole: raw.actorRole || r?.user_role || "",
+    action: r?.action || raw.action || "",
+    entityType: raw.entityType || (r?.tor_id ? "TOR" : "SYSTEM"),
+    entityId: raw.entityId || r?.tor_id || "system",
+    details: r?.details || raw.details || "",
+    timestamp: r?.timestamp || raw.timestamp || (/* @__PURE__ */ new Date()).toISOString()
+  })).sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
   const attendanceSystem = kvMap["attendanceSystem"] || {
     locationConfig: {
       officeName: "Kantor Pusat Yayasan WIJNA",
@@ -222,24 +536,24 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     workRecapVerifications: {},
     auditTrail: []
   };
-  if (Array.isArray(attendanceRows) && (attendanceRows.length > 0 || Boolean(kvMap["attendanceSystem"]))) {
-    attendanceSystem.records = parseRowList(attendanceRows);
+  if (hydratedAttendanceRecords.length > 0 || !Array.isArray(attendanceSystem.records)) {
+    attendanceSystem.records = hydratedAttendanceRecords;
   }
   return {
-    users: Array.isArray(userRows) ? userRows.map(hydrateMysqlUserRow) : [],
-    currentUserId: kvMap["currentUserId"] || "user-director",
-    programs: parseRowList(programRows),
-    outcomes: parseRowList(outcomeRows),
-    outputs: parseRowList(outputRows),
-    activities: parseRowList(activityRows),
-    subActivities: parseRowList(subActivityRows),
-    tors: parseRowList(torRows),
-    approvalRecords: parseRowList(approvalRows),
-    auditLogs: parseRowList(auditRows),
-    cashAdvances: parseRowList(caRows),
+    users,
+    currentUserId: kvMap["currentUserId"] || users[0]?.id || "user-director",
+    programs,
+    outcomes,
+    outputs,
+    activities,
+    subActivities,
+    tors,
+    approvalRecords,
+    auditLogs,
+    cashAdvances,
     cashAdvanceSummaries: kvMap["cashAdvanceSummaries"] || {},
     cashAdvanceAuditLogs: kvMap["cashAdvanceAuditLogs"] || {},
-    meetingMinutes: parseRowList(minutesRows),
+    meetingMinutes,
     activityDocumentations: kvMap["activityDocumentations"] || {},
     activityDocumentationList: kvMap["activityDocumentationList"] || [],
     outputRaciRecords: kvMap["outputRaciRecords"] || {},
@@ -249,7 +563,7 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     approvalWorkflowConfigs: kvMap["approvalWorkflowConfigs"] || {},
     approvalNotifications: kvMap["approvalNotifications"] || [],
     programBudgets: kvMap["programBudgets"] || {},
-    participantDatabase: parseRowList(participantRows),
+    participantDatabase,
     attendanceSystem,
     organizationSettings: kvMap["organizationSettings"] || void 0,
     cleanResetPrj3581V1: kvMap["cleanResetPrj3581V1"] !== void 0 ? Boolean(kvMap["cleanResetPrj3581V1"]) : void 0,
@@ -281,7 +595,7 @@ async function upsertMysqlUserRow(pool, u) {
       username = VALUES(username),
       name = VALUES(name),
       email = VALUES(email),
-      password_hash = VALUES(password_hash),
+      password_hash = COALESCE(NULLIF(VALUES(password_hash), ''), users.password_hash),
       role = VALUES(role),
       role_title = VALUES(role_title),
       department = VALUES(department),
@@ -312,18 +626,23 @@ async function deleteMysqlUserRow(pool, userId) {
   if (!userId) return;
   await pool.query("DELETE FROM users WHERE id = ?", [String(userId).slice(0, 128)]);
 }
-async function syncTableById(conn, tableName, rows, insertSql, mapRowParams) {
+async function syncTableById(conn, tableName, rows, insertSql, mapRowParams, options) {
   const safeRows = Array.isArray(rows) ? rows.filter((r) => r && r.id) : [];
   const currentIds = safeRows.map((r) => String(r.id));
+  const allowDelete = options?.allowDeleteMissing !== false;
   if (currentIds.length === 0) {
-    await conn.query(`DELETE FROM ${tableName}`);
+    if (allowDelete && tableName !== "users") {
+      await conn.query(`DELETE FROM ${tableName}`);
+    }
     return;
   }
-  const placeholders = currentIds.map(() => "?").join(", ");
-  await conn.query(
-    `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
-    currentIds
-  );
+  if (allowDelete && tableName !== "users") {
+    const placeholders = currentIds.map(() => "?").join(", ");
+    await conn.query(
+      `DELETE FROM ${tableName} WHERE id NOT IN (${placeholders})`,
+      currentIds
+    );
+  }
   for (const item of safeRows) {
     await conn.query(insertSql, mapRowParams(item));
   }
@@ -344,14 +663,14 @@ async function saveDatabaseToMysql(pool, data) {
         username = VALUES(username),
         name = VALUES(name),
         email = VALUES(email),
-        password_hash = VALUES(password_hash),
+        password_hash = COALESCE(NULLIF(users.password_hash, ''), VALUES(password_hash)),
         role = VALUES(role),
         role_title = VALUES(role_title),
         department = VALUES(department),
         is_active = VALUES(is_active),
         account_status = VALUES(account_status),
         permissions_json = VALUES(permissions_json),
-        last_login_at = VALUES(last_login_at),
+        last_login_at = COALESCE(VALUES(last_login_at), users.last_login_at),
         raw_json = VALUES(raw_json)`,
       (u) => [
         String(u.id).slice(0, 128),
@@ -368,7 +687,8 @@ async function saveDatabaseToMysql(pool, data) {
         truncStr(u.lastLoginAt, 64),
         truncStr(u.createdAt || (/* @__PURE__ */ new Date()).toISOString(), 64),
         JSON.stringify(u)
-      ]
+      ],
+      { allowDeleteMissing: false }
     );
     await syncTableById(
       conn,
@@ -1971,15 +2291,43 @@ function createDefaultSeed() {
     cleanResetPrj3581V2: true
   };
 }
-function normalizeSchema(parsed) {
+function createEmptyDatabaseState() {
+  return {
+    users: [],
+    currentUserId: "",
+    programs: [],
+    outcomes: [],
+    outputs: [],
+    activities: [],
+    subActivities: [],
+    tors: [],
+    approvalRecords: [],
+    auditLogs: [],
+    cashAdvances: [],
+    cashAdvanceSummaries: {},
+    cashAdvanceAuditLogs: {},
+    meetingMinutes: [],
+    activityDocumentations: {},
+    activityDocumentationList: [],
+    outputRaciRecords: {},
+    activityMonitoringRecords: {},
+    monitoringReports: {},
+    approvalHubItems: {},
+    approvalWorkflowConfigs: {},
+    approvalNotifications: [],
+    programBudgets: {},
+    participantDatabase: [],
+    cleanResetPrj3581V1: true,
+    cleanResetPrj3581V2: true
+  };
+}
+function normalizeSchema(parsed, options) {
+  const isFromMysql = Boolean(options?.isFromMysql);
   if (parsed.cleanResetPrj3581V1 === void 0) {
     parsed.cleanResetPrj3581V1 = true;
   }
   if (parsed.cleanResetPrj3581V2 === void 0) {
     parsed.cleanResetPrj3581V2 = true;
-  }
-  if (!parsed.currentUserId) {
-    parsed.currentUserId = "user-director";
   }
   if (!Array.isArray(parsed.programs)) {
     parsed.programs = [];
@@ -1994,7 +2342,7 @@ function normalizeSchema(parsed) {
     staff: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: false }
   };
   if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-    parsed.users = cloneInitialUsers();
+    parsed.users = isFromMysql ? [] : cloneInitialUsers();
   } else {
     parsed.users = parsed.users.map((u) => {
       const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
@@ -2010,20 +2358,25 @@ function normalizeSchema(parsed) {
         }
       };
     });
-    const hasAdmin = parsed.users.some(
-      (u) => u.role === "admin" || u.permissions?.canManageUsers
-    );
-    if (!hasAdmin) {
-      const defaultAdmin = INITIAL_USERS.find((u) => u.role === "admin");
-      if (defaultAdmin) {
-        parsed.users.push({
-          ...defaultAdmin,
-          permissions: { ...defaultAdmin.permissions },
-          isActive: true,
-          accountStatus: "Aktif"
-        });
+    if (!isFromMysql) {
+      const hasAdmin = parsed.users.some(
+        (u) => u.role === "admin" || u.permissions?.canManageUsers
+      );
+      if (!hasAdmin) {
+        const defaultAdmin = INITIAL_USERS.find((u) => u.role === "admin");
+        if (defaultAdmin) {
+          parsed.users.push({
+            ...defaultAdmin,
+            permissions: { ...defaultAdmin.permissions },
+            isActive: true,
+            accountStatus: "Aktif"
+          });
+        }
       }
     }
+  }
+  if (!parsed.currentUserId) {
+    parsed.currentUserId = parsed.users[0]?.id || "user-director";
   }
   if (!Array.isArray(parsed.outcomes)) {
     parsed.outcomes = [];
@@ -2126,19 +2479,34 @@ var Database = class {
     this.mysqlWriteChain = Promise.resolve();
     this.initPromise = null;
     this.mysqlStatus = "unconfigured";
+    this.lastMysqlErrorSummary = "";
+    this.lastUsersRefreshAt = 0;
     this.isInitializing = false;
     this.lastFailedMysqlAttemptAt = 0;
     this.failedMysqlCycles = 0;
     this.ensureDirectory();
-    this.data = isMysqlConfigured() ? normalizeSchema(createDefaultSeed()) : this.loadInitialLocalDevData();
+    if (this.isStrictMysqlRequired()) {
+      this.data = createEmptyDatabaseState();
+    } else {
+      this.data = this.loadInitialLocalDevData();
+    }
     this.initPromise = this.initializeMysqlStorage();
+  }
+  /**
+   * Bernilai true apabila aplikasi wajib menggunakan MySQL tanpa fallback ke JSON/mock data:
+   * - Kredensial MySQL (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE) dikonfigurasi, ATAU
+   * - Berjalan di environment produksi Hostinger (bukan container preview Cloud Run), ATAU
+   * - MYSQL_STRICT_REQUIRED='true'.
+   */
+  isStrictMysqlRequired() {
+    return isMysqlConfigured() || isProductionHostingerEnvironment() || process.env.MYSQL_STRICT_REQUIRED === "true";
   }
   /**
    * Menunggu hingga proses inisialisasi database selesai sepenuhnya.
    * Jika percobaan sebelumnya gagal (status 'failed'), memanggil ready() akan mencoba menginisialisasi ulang secara aman.
    */
   async ready() {
-    if (!this.initPromise || isMysqlConfigured() && this.mysqlStatus === "failed" && !this.isInitializing) {
+    if (!this.initPromise || this.isStrictMysqlRequired() && this.mysqlStatus === "failed" && !this.isInitializing) {
       this.initPromise = this.initializeMysqlStorage();
     }
     await this.initPromise;
@@ -2146,17 +2514,35 @@ var Database = class {
   isMysqlReady() {
     return this.mysqlStatus === "ready";
   }
+  getLastErrorSummary() {
+    return this.lastMysqlErrorSummary;
+  }
+  getDiagnostics() {
+    const envCheck = validateMysqlEnvConfiguration();
+    return {
+      provider: this.isStrictMysqlRequired() ? "mysql" : "preview-local",
+      status: this.mysqlStatus,
+      operational: this.isOperational(),
+      mysqlConfigured: envCheck.configured,
+      missingEnvVars: envCheck.missingVars,
+      lastError: this.lastMysqlErrorSummary || void 0,
+      counts: {
+        users: (this.data.users || []).length,
+        programs: (this.data.programs || []).length,
+        tors: (this.data.tors || []).length
+      }
+    };
+  }
   /**
    * Jika MySQL dikonfigurasi namun sempat gagal saat startup (misal MySQL server baru aktif),
-   * coba hubungkan ulang secara berkala dengan exponential backoff agar aplikasi otomatis kembali ke MySQL
-   * tanpa membebani latensi API.
+   * coba hubungkan ulang secara berkala dengan exponential backoff.
    */
   async retryMysqlIfNeeded() {
-    if (!isMysqlConfigured() || this.isMysqlReady() || this.isInitializing) {
+    if (!this.isStrictMysqlRequired() || this.isMysqlReady() || this.isInitializing) {
       return false;
     }
     const now = Date.now();
-    const backoffMs = Math.min(3e5, 3e4 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
+    const backoffMs = Math.min(6e4, 5e3 * Math.pow(2, Math.max(0, this.failedMysqlCycles - 1)));
     if (now - this.lastFailedMysqlAttemptAt < backoffMs) {
       return false;
     }
@@ -2166,24 +2552,46 @@ var Database = class {
   }
   /**
    * Bernilai true apabila database siap melayani aplikasi:
-   * - MySQL tidak dikonfigurasi (mode lokal), ATAU
-   * - MySQL berhasil dimuat ('ready'), ATAU
-   * - Mode fallback lokal aktif ketika MySQL tidak terjangkau di environment preview (kecuali MYSQL_STRICT_REQUIRED=true).
+   * - Pada mode produksi / MySQL: HANYA bernilai true jika koneksi & pembacaan MySQL berhasil ('ready').
+   *   Tidak ada fallback otomatis ke JSON atau in-memory seed apabila MySQL gagal terhubung.
+   * - Pada mode preview Cloud Run (tanpa MySQL): bernilai true menggunakan penyimpanan preview.
    */
   isOperational() {
-    if (!isMysqlConfigured() || this.mysqlStatus === "ready") {
-      return true;
+    if (this.isStrictMysqlRequired()) {
+      return this.mysqlStatus === "ready";
     }
-    if (process.env.MYSQL_STRICT_REQUIRED === "true") {
-      return false;
-    }
-    return this.mysqlStatus === "failed";
+    return true;
   }
   /**
    * Menunggu seluruh antrean penulisan asynchronous ke MySQL selesai.
    */
   async flushWrites() {
     await this.mysqlWriteChain;
+  }
+  /**
+   * Membaca ulang daftar pengguna & password_hash terbaru langsung dari tabel `users` MySQL
+   * agar login dan pengelolaan akun selalu menggunakan Single Source of Truth di MySQL.
+   */
+  async refreshUsersFromMysql(force = false) {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready") {
+      return this.data.users || [];
+    }
+    const now = Date.now();
+    if (!force && now - this.lastUsersRefreshAt < 2e3 && this.data.users.length > 0) {
+      return this.data.users;
+    }
+    try {
+      const pool = await getMysqlPool();
+      if (!pool) return this.data.users || [];
+      const freshUsers = await fetchUsersFromMysql(pool);
+      if (Array.isArray(freshUsers) && freshUsers.length > 0) {
+        this.data.users = freshUsers;
+        this.lastUsersRefreshAt = now;
+      }
+    } catch (err) {
+      console.warn(`[DB] Warning refreshing users from MySQL: ${sanitizeDbError(err)}`);
+    }
+    return this.data.users || [];
   }
   /**
    * Menjamin perubahan akun / password pengguna langsung tersimpan atomik ke tabel users MySQL
@@ -2195,6 +2603,7 @@ var Database = class {
         const pool = await getMysqlPool();
         if (pool) {
           await upsertMysqlUserRow(pool, user);
+          this.lastUsersRefreshAt = Date.now();
         }
       } catch (err) {
         console.warn(`[DB] Direct user sync warning: ${sanitizeDbError(err)}`);
@@ -2208,6 +2617,7 @@ var Database = class {
         const pool = await getMysqlPool();
         if (pool) {
           await deleteMysqlUserRow(pool, userId);
+          this.lastUsersRefreshAt = Date.now();
         }
       } catch (err) {
         console.warn(`[DB] Direct user delete warning: ${sanitizeDbError(err)}`);
@@ -2221,6 +2631,9 @@ var Database = class {
     }
   }
   persistLocalJsonOnly(snapshot) {
+    if (this.isStrictMysqlRequired()) {
+      return;
+    }
     try {
       const jsonText = JSON.stringify(snapshot, null, 2);
       fs2.writeFileSync(DB_FILE, jsonText, "utf-8");
@@ -2235,29 +2648,38 @@ var Database = class {
     }
   }
   /**
-   * Hanya digunakan untuk mode fallback development lokal ketika MySQL TIDAK dikonfigurasi
-   * atau ketika host MySQL produksi tidak dapat dijangkau dari container preview.
-   * Catatan penting: db.backup.json tidak pernah dibaca secara otomatis, dan data ini TIDAK PERNAH ditulis ke MySQL.
+   * Hanya digunakan untuk mode preview Cloud Run ketika tidak ada MySQL eksternal yang dikonfigurasi.
+   * Tidak pernah dipanggil di lingkungan produksi Hostinger atau ketika MySQL dikonfigurasi.
    */
   loadInitialLocalDevData() {
     try {
       if (fs2.existsSync(DB_FILE)) {
         const fileContent = fs2.readFileSync(DB_FILE, "utf-8");
         const rawParsed = JSON.parse(fileContent);
-        const normalized = normalizeSchema(rawParsed);
+        const normalized = normalizeSchema(rawParsed, { isFromMysql: false });
         this.persistLocalJsonOnly(normalized);
         return normalized;
       }
     } catch (err) {
-      console.warn("[DB] Failed to read local development data/db.json, using default seed:", sanitizeDbError(err));
+      console.warn("[DB] Failed to read preview data/db.json, using default seed:", sanitizeDbError(err));
     }
-    const fresh = normalizeSchema(createDefaultSeed());
+    const fresh = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistLocalJsonOnly(fresh);
     return fresh;
   }
   async initializeMysqlStorage(maxAttempts = 3) {
+    const envCheck = validateMysqlEnvConfiguration();
     if (!isMysqlConfigured()) {
-      this.mysqlStatus = "unconfigured";
+      if (this.isStrictMysqlRequired()) {
+        this.mysqlStatus = "failed";
+        this.data = createEmptyDatabaseState();
+        this.lastMysqlErrorSummary = `Missing required MySQL environment variables (${envCheck.missingVars.join(", ")})`;
+        console.error(
+          `[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}. Set DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD.`
+        );
+      } else {
+        this.mysqlStatus = "unconfigured";
+      }
       return;
     }
     this.isInitializing = true;
@@ -2265,12 +2687,8 @@ var Database = class {
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          const pool = await getMysqlPool();
-          if (!pool) {
-            throw new Error("MySQL connection pool is unavailable.");
-          }
-          await pool.query("SELECT 1");
-          console.log("[DB] MySQL connected successfully.");
+          const pool = await verifyAndGetMysqlPool();
+          console.log(`[DB] MySQL connected successfully (${envCheck.safeSummary}).`);
           const existingFromMysql = await loadDatabaseFromMysql(pool);
           if (existingFromMysql) {
             const missingFlags = {};
@@ -2280,60 +2698,53 @@ var Database = class {
             if (existingFromMysql.cleanResetPrj3581V2 === void 0) {
               missingFlags.cleanResetPrj3581V2 = true;
             }
-            this.data = normalizeSchema(existingFromMysql);
+            this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
             this.mysqlStatus = "ready";
+            this.lastMysqlErrorSummary = "";
             this.failedMysqlCycles = 0;
+            this.lastUsersRefreshAt = Date.now();
             if (Object.keys(missingFlags).length > 0) {
               await upsertMysqlKvEntries(pool, missingFlags);
             }
-            console.log("[DB] Existing application data loaded from MySQL.");
+            console.log(
+              `[DB] Existing application data loaded from MySQL (users=${this.data.users.length}, programs=${this.data.programs.length}, tors=${this.data.tors.length}).`
+            );
             return;
           }
           console.log("[DB] Database is empty. Initial seed is being created.");
-          const initialSeed = normalizeSchema(createDefaultSeed());
+          const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
           this.mysqlStatus = "ready";
+          this.lastMysqlErrorSummary = "";
           this.failedMysqlCycles = 0;
+          this.lastUsersRefreshAt = Date.now();
           console.log("[DB] Initial seed saved successfully to MySQL.");
           return;
         } catch (err) {
           lastError = err;
           await resetMysqlPool();
           if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 800));
+            await new Promise((resolve) => setTimeout(resolve, 1e3));
           }
         }
       }
       this.lastFailedMysqlAttemptAt = Date.now();
       this.failedMysqlCycles += 1;
-      const wasAlreadyFailed = this.mysqlStatus === "failed";
       this.mysqlStatus = "failed";
-      if (!wasAlreadyFailed && process.env.MYSQL_STRICT_REQUIRED !== "true") {
-        this.data = this.loadInitialLocalDevData();
-      }
-      if (isCloudRunEnvironment() && process.env.MYSQL_STRICT_REQUIRED !== "true") {
-        if (!wasAlreadyFailed) {
-          console.log(
-            `[DB] MySQL unreachable from Cloud Run preview; using local preview storage (${sanitizeDbError(lastError)}).`
-          );
-        }
-      } else {
-        console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(lastError)}`);
-      }
+      this.lastMysqlErrorSummary = sanitizeDbError(lastError);
+      this.data = createEmptyDatabaseState();
+      console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
     }
   }
   persistToMysql(snapshot) {
-    if (!isMysqlConfigured()) {
+    if (!this.isStrictMysqlRequired()) {
       this.persistLocalJsonOnly(snapshot);
       return;
     }
     if (this.mysqlStatus !== "ready") {
-      if (process.env.MYSQL_STRICT_REQUIRED !== "true") {
-        this.persistLocalJsonOnly(snapshot);
-      }
       return;
     }
     const clonedSnapshot = JSON.parse(JSON.stringify(snapshot));
@@ -2342,7 +2753,7 @@ var Database = class {
       if (!pool) return;
       await saveDatabaseToMysql(pool, clonedSnapshot);
     }).catch((err) => {
-      console.warn(`[DB] MySQL connection or initialization failed: ${sanitizeDbError(err)}`);
+      console.error(`[DB] MySQL write error: ${sanitizeDbError(err)}`);
     });
   }
   getData() {
@@ -2354,9 +2765,12 @@ var Database = class {
     return this.data;
   }
   resetToSeed() {
-    this.data = normalizeSchema(createDefaultSeed());
+    if (this.isStrictMysqlRequired()) {
+      throw new Error("Reset to seed is strictly prohibited when connected to MySQL production database.");
+    }
+    this.data = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
     this.persistExplicitBackup(this.data);
-    this.persistToMysql(this.data);
+    this.persistLocalJsonOnly(this.data);
     return this.data;
   }
 };
@@ -4852,6 +5266,7 @@ function getNextTorSequenceForYear(data, targetYear) {
 async function startServer() {
   await db.ready();
   const app = express();
+  app.set("trust proxy", 1);
   const PORT = Number(process.env.PORT) || 3e3;
   app.disable("x-powered-by");
   app.use((req, res, next) => {
@@ -4953,19 +5368,98 @@ async function startServer() {
     const derived = crypto.scryptSync(plainPassword, salt, 64).toString("hex");
     return `scrypt$${salt}$${derived}`;
   }
-  function verifyPassword(plainPassword, storedHash) {
-    if (!storedHash || !storedHash.startsWith("scrypt$")) return false;
-    const parts = storedHash.split("$");
-    if (parts.length !== 3) return false;
-    const [, salt, originalHex] = parts;
+  function safeHexEqual(hexA, hexB) {
     try {
-      const derived = crypto.scryptSync(plainPassword, salt, 64);
-      const originalBuf = Buffer.from(originalHex, "hex");
-      if (derived.length !== originalBuf.length) return false;
-      return crypto.timingSafeEqual(derived, originalBuf);
+      const bufA = Buffer.from(hexA, "hex");
+      const bufB = Buffer.from(hexB, "hex");
+      if (bufA.length === 0 || bufA.length !== bufB.length) return false;
+      return crypto.timingSafeEqual(bufA, bufB);
     } catch {
       return false;
     }
+  }
+  function verifyPasswordWithMigration(plainPassword, storedHash) {
+    if (!storedHash || typeof storedHash !== "string") {
+      return { valid: false, needsRehash: false };
+    }
+    const trimmedHash = storedHash.trim();
+    if (!trimmedHash) {
+      return { valid: false, needsRehash: false };
+    }
+    if (trimmedHash.startsWith("scrypt$") || trimmedHash.startsWith("scrypt:")) {
+      const sep = trimmedHash.startsWith("scrypt$") ? "$" : ":";
+      const parts = trimmedHash.split(sep);
+      if (parts.length !== 3) return { valid: false, needsRehash: false };
+      const [, salt, originalHex] = parts;
+      try {
+        const derivedHex = crypto.scryptSync(plainPassword, salt, 64).toString("hex");
+        const valid = safeHexEqual(derivedHex, originalHex);
+        return { valid, needsRehash: valid && sep === ":" };
+      } catch {
+        return { valid: false, needsRehash: false };
+      }
+    }
+    if (trimmedHash.startsWith("pbkdf2$")) {
+      const parts = trimmedHash.split("$");
+      if (parts.length === 4) {
+        const [, iterStr, salt, originalHex] = parts;
+        const iterations = parseInt(iterStr, 10) || 1e4;
+        try {
+          const keyLen = Math.floor(originalHex.length / 2) || 64;
+          const derivedHex = crypto.pbkdf2Sync(plainPassword, salt, iterations, keyLen, "sha512").toString("hex");
+          const valid = safeHexEqual(derivedHex, originalHex);
+          return { valid, needsRehash: valid };
+        } catch {
+          return { valid: false, needsRehash: false };
+        }
+      }
+    }
+    if (trimmedHash.startsWith("sha256$")) {
+      const parts = trimmedHash.split("$");
+      if (parts.length === 3) {
+        const [, salt, originalHex] = parts;
+        const digestHex = crypto.createHash("sha256").update(`${salt}${plainPassword}`).digest("hex");
+        const digestHexAlt = crypto.createHash("sha256").update(`${plainPassword}${salt}`).digest("hex");
+        const valid = safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
+        return { valid, needsRehash: valid };
+      }
+    }
+    if (trimmedHash.startsWith("sha512$")) {
+      const parts = trimmedHash.split("$");
+      if (parts.length === 3) {
+        const [, salt, originalHex] = parts;
+        const digestHex = crypto.createHash("sha512").update(`${salt}${plainPassword}`).digest("hex");
+        const digestHexAlt = crypto.createHash("sha512").update(`${plainPassword}${salt}`).digest("hex");
+        const valid = safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
+        return { valid, needsRehash: valid };
+      }
+    }
+    if (/^[a-fA-F0-9]{64}$/.test(trimmedHash)) {
+      const sha256Hex = crypto.createHash("sha256").update(plainPassword).digest("hex");
+      const valid = safeHexEqual(sha256Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+    if (/^[a-fA-F0-9]{128}$/.test(trimmedHash)) {
+      const sha512Hex = crypto.createHash("sha512").update(plainPassword).digest("hex");
+      const valid = safeHexEqual(sha512Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+    if (/^[a-fA-F0-9]{32}$/.test(trimmedHash)) {
+      const md5Hex = crypto.createHash("md5").update(plainPassword).digest("hex");
+      const valid = safeHexEqual(md5Hex, trimmedHash.toLowerCase());
+      return { valid, needsRehash: valid };
+    }
+    if (!trimmedHash.startsWith("$2") && !trimmedHash.startsWith("$argon2") && !trimmedHash.includes("$")) {
+      const plainBuf = Buffer.from(plainPassword, "utf-8");
+      const storedBuf = Buffer.from(trimmedHash, "utf-8");
+      if (plainBuf.length === storedBuf.length && crypto.timingSafeEqual(plainBuf, storedBuf)) {
+        return { valid: true, needsRehash: true };
+      }
+    }
+    return { valid: false, needsRehash: false };
+  }
+  function verifyPassword(plainPassword, storedHash) {
+    return verifyPasswordWithMigration(plainPassword, storedHash).valid;
   }
   const DUMMY_SCRYPT_HASH = hashPassword(crypto.randomBytes(24).toString("hex"));
   function deriveDefaultUsername(email, name) {
@@ -4986,8 +5480,10 @@ async function startServer() {
     return result;
   }
   function sanitizeUser(user) {
-    const isUsingDefaultPassword = isDefaultTestingPasswordHash(user.passwordHash);
+    const effectiveHash = user.passwordHash || user.password_hash;
+    const isUsingDefaultPassword = isDefaultTestingPasswordHash(effectiveHash);
     const { passwordHash: _removed, ...safeUser } = user;
+    delete safeUser.password_hash;
     const resolvedStatus = safeUser.accountStatus || (safeUser.isActive === false ? "Nonaktif" : "Aktif");
     return {
       ...safeUser,
@@ -5000,6 +5496,35 @@ async function startServer() {
   }
   function ensureUserSecurityFieldsInitialized() {
     const current = db.getData();
+    const isMysqlMode = db.isMysqlReady() || db.isStrictMysqlRequired();
+    if (isMysqlMode) {
+      const usedUsernames = /* @__PURE__ */ new Set();
+      for (const u of current.users || []) {
+        let baseUsername = (u.username || deriveDefaultUsername(u.email, u.name)).toLowerCase();
+        if (!baseUsername) baseUsername = `user.${u.id}`;
+        let candidate = baseUsername;
+        let counter = 2;
+        while (usedUsernames.has(candidate)) {
+          candidate = `${baseUsername}${counter}`;
+          counter += 1;
+        }
+        usedUsernames.add(candidate);
+        u.username = candidate;
+        if (!u.accountStatus) {
+          u.accountStatus = u.isActive === false ? "Nonaktif" : "Aktif";
+        }
+        u.isActive = u.accountStatus === "Aktif";
+        u.permissions = normalizeRolePermissions(u.role, u.permissions);
+        const existingLegacyHash = u.password_hash;
+        if (!u.passwordHash && typeof existingLegacyHash === "string" && existingLegacyHash.trim()) {
+          u.passwordHash = existingLegacyHash.trim();
+        }
+        if (u.mustChangePassword === void 0) {
+          u.mustChangePassword = false;
+        }
+      }
+      return;
+    }
     const needsInit = (current.users || []).some(
       (u) => !u.passwordHash && !u.password_hash || !u.username || !u.accountStatus || !u.permissions || u.mustChangePassword === void 0
     );
@@ -5039,7 +5564,9 @@ async function startServer() {
   }
   if (db.isOperational()) {
     ensureUserSecurityFieldsInitialized();
-    await db.flushWrites();
+    if (!db.isMysqlReady() && !db.isStrictMysqlRequired()) {
+      await db.flushWrites();
+    }
   }
   function computeTokenHmac(payloadB64, user) {
     const userStateBinding = `${user.id}:${user.role}:${user.accountStatus || "Aktif"}:${user.isActive !== false}:${user.passwordHash || ""}`;
@@ -5159,6 +5686,9 @@ async function startServer() {
     if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
       return true;
     }
+    if (req.headers["x-requested-with"] === "XMLHttpRequest" || typeof req.headers.authorization === "string" && req.headers.authorization.startsWith("Bearer ")) {
+      return true;
+    }
     const originHeader = String(req.headers.origin || "").trim();
     if (!originHeader || originHeader === "null") {
       return true;
@@ -5166,12 +5696,13 @@ async function startServer() {
     try {
       const parsedOrigin = new URL(originHeader);
       const originHost = parsedOrigin.host.toLowerCase();
-      const originHostname = parsedOrigin.hostname.toLowerCase();
+      const originHostname = parsedOrigin.hostname.toLowerCase().replace(/^www\./, "");
       const reqHost = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim().toLowerCase();
-      if (reqHost && originHost === reqHost) {
+      const reqHostname = reqHost.split(":")[0].replace(/^www\./, "");
+      if (reqHost && (originHost === reqHost || originHostname === reqHostname)) {
         return true;
       }
-      if (originHostname === "localhost" || originHostname === "127.0.0.1" || originHostname.endsWith(".run.app") || originHostname.endsWith(".google.com") || originHostname.endsWith(".usercontent.goog")) {
+      if (originHostname === "localhost" || originHostname === "127.0.0.1" || originHostname.endsWith(".run.app") || originHostname.endsWith(".google.com") || originHostname.endsWith(".usercontent.goog") || originHostname.endsWith(".hostingersite.com") || originHostname.endsWith(".hostinger.com")) {
         return true;
       }
       return false;
@@ -5180,12 +5711,24 @@ async function startServer() {
     }
   }
   const PUBLIC_API_PATHS = /* @__PURE__ */ new Set([
+    "/health",
     "/auth/login",
     "/auth/register",
     "/register",
     "/auth/signup"
   ]);
+  app.get("/api/health", async (_req, res) => {
+    const diag = db.getDiagnostics();
+    res.status(diag.operational ? 200 : 503).json({
+      status: diag.operational ? "ok" : "unavailable",
+      database: diag,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
   app.use("/api", async (req, res, next) => {
+    if (req.path === "/health") {
+      return next();
+    }
     if (!db.isOperational()) {
       await db.ready();
       if (!db.isOperational()) {
@@ -5194,12 +5737,10 @@ async function startServer() {
         });
       }
       ensureUserSecurityFieldsInitialized();
-      await db.flushWrites();
     } else {
       void db.retryMysqlIfNeeded().then((reconnected) => {
         if (reconnected) {
           ensureUserSecurityFieldsInitialized();
-          void db.flushWrites();
         }
       }).catch(() => {
       });
@@ -5497,7 +6038,7 @@ async function startServer() {
   app.post("/api/auth/register", handleBlockedPublicRegistration);
   app.post("/api/register", handleBlockedPublicRegistration);
   app.post("/api/auth/signup", handleBlockedPublicRegistration);
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     const rawIdentifier = String(req.body?.identifier || req.body?.username || req.body?.email || "").trim().toLowerCase();
     const rawPassword = String(req.body?.password || "");
     if (!rawIdentifier || !rawPassword) {
@@ -5537,6 +6078,7 @@ async function startServer() {
         });
       }
     };
+    await db.refreshUsersFromMysql(true);
     const data = db.getData();
     const targetUser = data.users.find((u) => {
       const uEmail = (u.email || "").trim().toLowerCase();
@@ -5584,8 +6126,9 @@ async function startServer() {
         error: resolvedStatus === "Ditangguhkan" ? `Akun "${targetUser.name}" sedang ditangguhkan sementara (Suspended). Silakan hubungi System Administrator.` : `Akun "${targetUser.name}" telah dinonaktifkan. Silakan hubungi System Administrator.`
       });
     }
-    const isPasswordValid = verifyPassword(rawPassword, targetUser.passwordHash);
-    if (!isPasswordValid) {
+    const effectiveStoredHash = targetUser.passwordHash || targetUser.password_hash;
+    const verification = verifyPasswordWithMigration(rawPassword, effectiveStoredHash);
+    if (!verification.valid) {
       recordFailedAttempt();
       db.update((d) => {
         d.auditLogs.unshift({
@@ -5606,11 +6149,16 @@ async function startServer() {
     }
     loginRateLimits.delete(rateKey);
     let loggedInUser = targetUser;
+    const upgradedHash = verification.needsRehash ? hashPassword(rawPassword) : void 0;
     db.update((d) => {
       d.currentUserId = targetUser.id;
       const idx = d.users.findIndex((u) => u.id === targetUser.id);
       if (idx !== -1) {
         d.users[idx].lastLoginAt = nowIso;
+        if (upgradedHash) {
+          d.users[idx].passwordHash = upgradedHash;
+          d.users[idx].passwordUpdatedAt = d.users[idx].passwordUpdatedAt || nowIso;
+        }
         loggedInUser = d.users[idx];
       }
       d.auditLogs.unshift({
@@ -5625,6 +6173,7 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.syncUserImmediately(loggedInUser);
     const sessionToken = createSessionToken(loggedInUser);
     res.json({
       message: `Selamat datang kembali, ${loggedInUser.name}`,
@@ -5649,12 +6198,14 @@ async function startServer() {
         error: "Password baru minimal harus terdiri dari 6 karakter."
       });
     }
+    await db.refreshUsersFromMysql(true);
     const data = db.getData();
     const targetUser = data.users.find((u) => u.id === currentUser.id);
     if (!targetUser) {
       return res.status(404).json({ error: "Akun pengguna tidak ditemukan." });
     }
-    if (!verifyPassword(currentPassword, targetUser.passwordHash)) {
+    const storedHash = targetUser.passwordHash || targetUser.password_hash;
+    if (!verifyPassword(currentPassword, storedHash)) {
       return res.status(401).json({
         error: "Password saat ini yang Anda masukkan tidak sesuai."
       });
@@ -5720,20 +6271,22 @@ async function startServer() {
     }
     res.json({ message: "Sesi berhasil diakhiri." });
   });
-  app.get("/api/auth/current-user", (req, res) => {
+  app.get("/api/auth/current-user", async (req, res) => {
+    await db.refreshUsersFromMysql(false);
     const user = getCurrentUser(req);
     if (user.isActive === false) {
       return res.status(403).json({ error: "Akun pengguna sedang dinonaktifkan." });
     }
     res.json(sanitizeUser(user));
   });
-  app.post("/api/auth/switch-user", (req, res) => {
+  app.post("/api/auth/switch-user", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
         error: "Fitur peralihan sesi tanpa password telah dinonaktifkan demi keamanan produksi. Silakan login menggunakan kredensial resmi."
       });
     }
+    await db.refreshUsersFromMysql(false);
     const { userId } = req.body;
     const data = db.getData();
     const user = data.users.find((u) => u.id === userId);
@@ -5755,6 +6308,7 @@ async function startServer() {
         updatedTarget = d.users[idx];
       }
     });
+    await db.syncUserImmediately(updatedTarget);
     const sessionToken = createSessionToken(updatedTarget);
     res.json({
       message: `Berhasil beralih ke ${user.name} (${user.roleTitle})`,
@@ -5762,7 +6316,8 @@ async function startServer() {
       token: sessionToken
     });
   });
-  app.get("/api/users", (_req, res) => {
+  app.get("/api/users", async (_req, res) => {
+    await db.refreshUsersFromMysql(false);
     const data = db.getData();
     res.json((data.users || []).map(sanitizeUser));
   });
