@@ -55,6 +55,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
     ...(activeAuthToken ? { Authorization: `Bearer ${activeAuthToken}` } : {}),
     ...((options.headers as Record<string, string>) || {}),
   };
@@ -101,6 +102,11 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
   console.info(
     `[API] Request completed: ${method} ${safePath} -> ${response.status} (${durationMs}ms)`
   );
+
+  const refreshedToken = response.headers.get('x-refreshed-token');
+  if (refreshedToken && refreshedToken.trim()) {
+    setAuthToken(refreshedToken.trim());
+  }
 
   const contentType = (response.headers.get('content-type') || '').toLowerCase();
   const isJson = contentType.includes('application/json');
@@ -192,11 +198,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(user),
     }),
-  changePassword: (currentPassword: string, newPassword: string) =>
-    request<{ message: string; user: User }>('/api/auth/change-password', {
+  changePassword: async (currentPassword: string, newPassword: string) => {
+    const res = await request<{ message: string; user: User; token?: string }>('/api/auth/change-password', {
       method: 'POST',
       body: JSON.stringify({ currentPassword, newPassword }),
-    }),
+    });
+    if (res.token) {
+      setAuthToken(res.token);
+    }
+    return res;
+  },
   resetUserPassword: (id: string, newPassword: string) =>
     request<{ message: string; user: User }>(`/api/users/${id}/reset-password`, {
       method: 'POST',

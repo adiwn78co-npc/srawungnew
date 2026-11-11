@@ -4855,14 +4855,23 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3e3;
   app.disable("x-powered-by");
   app.use((req, res, next) => {
+    const rawUrl = decodeURIComponent((req.originalUrl || req.url || "").split("?")[0] || "");
+    const normalizedPath = rawUrl.replace(/\\/g, "/");
+    if (normalizedPath.includes("..") || /^\/(?:\.env|\.git|data\/|database\/|scripts\/|server\.ts$|server\.js$|package\.json$|package-lock\.json$|bun\.lock$|tsconfig\.json$)/i.test(
+      normalizedPath
+    )) {
+      return res.status(404).end();
+    }
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-XSS-Protection", "0");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
     res.setHeader("Permissions-Policy", "geolocation=*, camera=(), microphone=(), payment=()");
     res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https:; font-src 'self' https://fonts.gstatic.com data: https:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; frame-ancestors 'self' https://*.google.com https://*.aistudio.google.com https://*.usercontent.goog https://*.run.app;"
+      "default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https:; font-src 'self' https://fonts.gstatic.com data: https:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'self' https://*.google.com https://*.aistudio.google.com https://*.usercontent.goog https://*.run.app;"
     );
     if (req.path.startsWith("/api")) {
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, private");
@@ -4874,7 +4883,7 @@ async function startServer() {
   app.use(express.json({ limit: "2mb" }));
   const DANGEROUS_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
   function sanitizeStringValue(val, keyName = "") {
-    let cleaned = val.replace(/\0/g, "").replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+    let cleaned = val.replace(/\0/g, "").replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "").replace(/<\/?(?:iframe|object|embed|applet|meta)\b[^>]*>/gi, "").replace(/(<[^>]+?)\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "$1");
     const trimmedLower = cleaned.trim().toLowerCase();
     if (trimmedLower.startsWith("javascript:") || trimmedLower.startsWith("vbscript:") || trimmedLower.startsWith("data:text/html")) {
       return "";
@@ -4908,10 +4917,35 @@ async function startServer() {
     return input;
   }
   const DEFAULT_TESTING_PASSWORD = process.env.DEFAULT_TESTING_PASSWORD || "Wijna@2026";
-  const SESSION_HMAC_SECRET = process.env.SESSION_SECRET || crypto.createHash("sha256").update(`wijna-enterprise-hmac-key:${__dirname}`).digest("hex");
+  function resolvePersistentSessionSecret() {
+    const envSecret = String(process.env.SESSION_SECRET || "").trim();
+    if (envSecret.length >= 16 && envSecret !== "replace_with_random_64_char_hex_secret") {
+      return envSecret;
+    }
+    const secretFilePath = path3.join(__dirname, "data", ".session_secret");
+    try {
+      if (fs3.existsSync(secretFilePath)) {
+        const stored = fs3.readFileSync(secretFilePath, "utf-8").trim();
+        if (stored.length >= 32) {
+          return stored;
+        }
+      }
+      const generated = crypto.randomBytes(32).toString("hex");
+      const dataDir = path3.dirname(secretFilePath);
+      if (!fs3.existsSync(dataDir)) {
+        fs3.mkdirSync(dataDir, { recursive: true });
+      }
+      fs3.writeFileSync(secretFilePath, generated, { encoding: "utf-8", mode: 384 });
+      return generated;
+    } catch {
+      return crypto.randomBytes(32).toString("hex");
+    }
+  }
+  const SESSION_HMAC_SECRET = resolvePersistentSessionSecret();
   const SESSION_TTL_MS = 12 * 60 * 60 * 1e3;
+  const SESSION_REFRESH_WINDOW_MS = 4 * 60 * 60 * 1e3;
   const activeSessions = /* @__PURE__ */ new Map();
-  const revokedTokens = /* @__PURE__ */ new Set();
+  const revokedTokens = /* @__PURE__ */ new Map();
   const loginRateLimits = /* @__PURE__ */ new Map();
   const apiRateLimits = /* @__PURE__ */ new Map();
   function hashPassword(plainPassword) {
@@ -4933,6 +4967,7 @@ async function startServer() {
       return false;
     }
   }
+  const DUMMY_SCRYPT_HASH = hashPassword(crypto.randomBytes(24).toString("hex"));
   function deriveDefaultUsername(email, name) {
     const fromEmail = (email || "").split("@")[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
     if (fromEmail) return fromEmail;
@@ -5010,8 +5045,48 @@ async function startServer() {
     const userStateBinding = `${user.id}:${user.role}:${user.accountStatus || "Aktif"}:${user.isActive !== false}:${user.passwordHash || ""}`;
     return crypto.createHmac("sha256", `${SESSION_HMAC_SECRET}:${userStateBinding}`).update(payloadB64).digest();
   }
+  function pruneSessionMaps(nowMs = Date.now()) {
+    if (revokedTokens.size > 2e3) {
+      for (const [tok, expAt] of revokedTokens.entries()) {
+        if (nowMs > expAt) revokedTokens.delete(tok);
+      }
+    }
+    if (activeSessions.size > 2e3) {
+      for (const [tok, sess] of activeSessions.entries()) {
+        if (nowMs - new Date(sess.createdAt).getTime() > SESSION_TTL_MS) {
+          activeSessions.delete(tok);
+        }
+      }
+    }
+  }
+  function revokeToken(token) {
+    if (!token) return;
+    activeSessions.delete(token);
+    revokedTokens.set(token, Date.now() + SESSION_TTL_MS);
+    pruneSessionMaps();
+  }
+  function revokeAllSessionsForUser(userId) {
+    const expAt = Date.now() + SESSION_TTL_MS;
+    for (const [tok, sess] of activeSessions.entries()) {
+      if (sess.userId === userId) {
+        activeSessions.delete(tok);
+        revokedTokens.set(tok, expAt);
+      }
+    }
+    pruneSessionMaps();
+  }
+  function isTokenRevoked(token) {
+    const expAt = revokedTokens.get(token);
+    if (expAt === void 0) return false;
+    if (Date.now() > expAt) {
+      revokedTokens.delete(token);
+      return false;
+    }
+    return true;
+  }
   function createSessionToken(user) {
     const nowMs = Date.now();
+    pruneSessionMaps(nowMs);
     const payload = {
       uid: user.id,
       jti: crypto.randomBytes(16).toString("hex"),
@@ -5030,7 +5105,7 @@ async function startServer() {
       return null;
     }
     const token = authHeader.slice(7).trim();
-    if (!token || revokedTokens.has(token)) {
+    if (!token || isTokenRevoked(token)) {
       return null;
     }
     const data = db.getData();
@@ -5043,7 +5118,8 @@ async function startServer() {
         if (!decoded || typeof decoded.uid !== "string" || typeof decoded.exp !== "number") {
           return null;
         }
-        if (Date.now() > decoded.exp) {
+        const nowMs = Date.now();
+        if (nowMs > decoded.exp) {
           activeSessions.delete(token);
           return null;
         }
@@ -5055,6 +5131,9 @@ async function startServer() {
         const providedSig = Buffer.from(sigHex, "hex");
         if (expectedSig.length !== providedSig.length || !crypto.timingSafeEqual(expectedSig, providedSig)) {
           return null;
+        }
+        if (decoded.exp - nowMs < SESSION_REFRESH_WINDOW_MS) {
+          req.shouldRefreshSessionToken = true;
         }
         return user;
       } catch {
@@ -5074,6 +5153,31 @@ async function startServer() {
       }
     }
     return null;
+  }
+  function isTrustedMutationOrigin(req) {
+    const method = (req.method || "GET").toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+      return true;
+    }
+    const originHeader = String(req.headers.origin || "").trim();
+    if (!originHeader || originHeader === "null") {
+      return true;
+    }
+    try {
+      const parsedOrigin = new URL(originHeader);
+      const originHost = parsedOrigin.host.toLowerCase();
+      const originHostname = parsedOrigin.hostname.toLowerCase();
+      const reqHost = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim().toLowerCase();
+      if (reqHost && originHost === reqHost) {
+        return true;
+      }
+      if (originHostname === "localhost" || originHostname === "127.0.0.1" || originHostname.endsWith(".run.app") || originHostname.endsWith(".google.com") || originHostname.endsWith(".usercontent.goog")) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
   const PUBLIC_API_PATHS = /* @__PURE__ */ new Set([
     "/auth/login",
@@ -5121,6 +5225,11 @@ async function startServer() {
         });
       }
     }
+    if (!isTrustedMutationOrigin(req)) {
+      return res.status(403).json({
+        error: "Permintaan lintas domain (Cross-Origin) tidak diizinkan demi keamanan sesi Anda."
+      });
+    }
     if (req.body && typeof req.body === "object") {
       req.body = sanitizePayloadDeep(req.body);
     }
@@ -5132,6 +5241,9 @@ async function startServer() {
       return res.status(401).json({
         error: "Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali menggunakan kredensial resmi Anda."
       });
+    }
+    if (req.shouldRefreshSessionToken && req.path !== "/auth/logout" && req.path !== "/auth/change-password") {
+      res.setHeader("X-Refreshed-Token", createSessionToken(verifiedUser));
     }
     req.authenticatedUser = verifiedUser;
     next();
@@ -5393,9 +5505,17 @@ async function startServer() {
         error: "Username/Email dan Password wajib diisi."
       });
     }
-    const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local");
-    const rateKey = `${clientIp}:${rawIdentifier}`;
+    const rawForwardedIp = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    const clientIp = (rawForwardedIp || String(req.socket.remoteAddress || "local")).slice(0, 64);
+    const rateKey = `${clientIp}:${rawIdentifier.slice(0, 120)}`;
     const nowMs = Date.now();
+    if (loginRateLimits.size > 2e3) {
+      for (const [k, v] of loginRateLimits.entries()) {
+        if (nowMs - v.firstAttemptAt > 15 * 60 * 1e3 && (!v.lockedUntil || nowMs >= v.lockedUntil)) {
+          loginRateLimits.delete(k);
+        }
+      }
+    }
     const rateEntry = loginRateLimits.get(rateKey);
     if (rateEntry?.lockedUntil && nowMs < rateEntry.lockedUntil) {
       const waitSec = Math.ceil((rateEntry.lockedUntil - nowMs) / 1e3);
@@ -5425,6 +5545,7 @@ async function startServer() {
     });
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     if (!targetUser) {
+      verifyPassword(rawPassword, DUMMY_SCRYPT_HASH);
       recordFailedAttempt();
       db.update((d) => {
         d.auditLogs.unshift({
@@ -5445,6 +5566,7 @@ async function startServer() {
     }
     const resolvedStatus = targetUser.accountStatus || (targetUser.isActive === false ? "Nonaktif" : "Aktif");
     if (resolvedStatus !== "Aktif" || targetUser.isActive === false) {
+      verifyPassword(rawPassword, DUMMY_SCRYPT_HASH);
       db.update((d) => {
         d.auditLogs.unshift({
           id: `log-login-blocked-${Date.now()}`,
@@ -5566,12 +5688,7 @@ async function startServer() {
       });
     });
     await db.syncUserImmediately(updatedUser);
-    for (const [tok, sess] of activeSessions.entries()) {
-      if (sess.userId === currentUser.id) {
-        activeSessions.delete(tok);
-        revokedTokens.add(tok);
-      }
-    }
+    revokeAllSessionsForUser(currentUser.id);
     const freshToken = createSessionToken(updatedUser);
     res.json({
       message: "Password akun Anda berhasil diperbarui dan dienkripsi.",
@@ -5584,8 +5701,7 @@ async function startServer() {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const token = authHeader.slice(7).trim();
-      activeSessions.delete(token);
-      revokedTokens.add(token);
+      revokeToken(token);
     }
     if (currentUser) {
       db.update((d) => {
@@ -5853,6 +5969,18 @@ async function startServer() {
     const nextEmail = email !== void 0 ? String(email).trim().toLowerCase() : targetUser.email.toLowerCase();
     const nextUsername = username !== void 0 ? String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") : targetUser.username || deriveDefaultUsername(targetUser.email, targetUser.name);
     const nextRole = role ?? targetUser.role;
+    const allowedUpdateRoles = [
+      "admin",
+      "director",
+      "hr",
+      "finance",
+      "program_manager",
+      "meal",
+      "staff"
+    ];
+    if (!allowedUpdateRoles.includes(nextRole)) {
+      return res.status(400).json({ error: "Role pengguna tidak dikenali oleh sistem." });
+    }
     let nextAccountStatus = targetUser.accountStatus || (targetUser.isActive === false ? "Nonaktif" : "Aktif");
     if (accountStatus && ["Aktif", "Ditangguhkan", "Nonaktif"].includes(accountStatus)) {
       nextAccountStatus = accountStatus;
@@ -5934,11 +6062,7 @@ async function startServer() {
         updatedUser = d.users[idx];
         cascadeSyncUserIdentityAcrossSystem(d, updatedUser, previousName);
         if (!nextIsActive) {
-          for (const [token, sess] of activeSessions.entries()) {
-            if (sess.userId === id) {
-              activeSessions.delete(token);
-            }
-          }
+          revokeAllSessionsForUser(id);
           if (d.currentUserId === id) {
             const fallback = d.users.find((u) => u.isActive && u.role === "director") || d.users.find((u) => u.isActive);
             if (fallback) {
@@ -5977,6 +6101,9 @@ async function startServer() {
       return res.status(404).json({ error: "Pengguna tidak ditemukan" });
     }
     await db.syncUserImmediately(updatedUser);
+    if (id === currentUser.id && nextIsActive) {
+      res.setHeader("X-Refreshed-Token", createSessionToken(updatedUser));
+    }
     res.json(sanitizeUser(updatedUser));
   });
   app.post("/api/users/:id/reset-password", async (req, res) => {
@@ -6025,6 +6152,10 @@ async function startServer() {
       });
     });
     await db.syncUserImmediately(updatedUser);
+    revokeAllSessionsForUser(id);
+    if (id === currentUser.id) {
+      res.setHeader("X-Refreshed-Token", createSessionToken(updatedUser));
+    }
     res.json({
       message: `Password untuk akun "${targetUser.name}" berhasil direset dan dienkripsi.`,
       user: sanitizeUser(updatedUser)
@@ -6077,6 +6208,7 @@ async function startServer() {
       });
     });
     await db.removeUserImmediately(id);
+    revokeAllSessionsForUser(id);
     res.json({
       message: `Akun pengguna ${targetUser.name} berhasil dihapus.`,
       id
@@ -10807,11 +10939,43 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const { date } = req.body || {};
     const targetDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+      return res.status(400).json({ error: "Format tanggal presensi tidak valid." });
+    }
+    const targetTime = (/* @__PURE__ */ new Date(`${targetDate}T00:00:00Z`)).getTime();
+    const nowUtcStart = (/* @__PURE__ */ new Date(`${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}T00:00:00Z`)).getTime();
+    if (isNaN(targetTime) || Math.abs(targetTime - nowUtcStart) > 36 * 60 * 60 * 1e3) {
+      return res.status(403).json({
+        error: "Reset presensi mandiri hanya diizinkan untuk presensi hari berjalan demi menjaga keutuhan riwayat kehadiran."
+      });
+    }
+    const periodPrefix = targetDate.slice(0, 7);
+    const currentSys = db.getData().attendanceSystem;
+    const isPeriodVerified = Object.values(currentSys?.workRecapVerifications || {}).some(
+      (v) => v?.userId === currentUser.id && v?.periodId?.includes(periodPrefix) && (v.financeVerified || v.directorVerified)
+    );
+    if (isPeriodVerified) {
+      return res.status(403).json({
+        error: "Periode rekapitulasi ini telah diverifikasi resmi dan tidak dapat direset."
+      });
+    }
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
+      const hadRecord = sys.records.some(
+        (r) => r.userId === currentUser.id && r.date === targetDate
+      );
       sys.records = sys.records.filter(
         (r) => !(r.userId === currentUser.id && r.date === targetDate)
       );
+      if (hadRecord) {
+        appendAttendanceAudit(
+          draft,
+          currentUser,
+          "CLOCK_IN_OUT",
+          "Reset Presensi Hari Berjalan",
+          `${currentUser.name} (${currentUser.roleTitle}) melakukan reset presensi hari berjalan (${targetDate}) untuk mengulang deteksi lokasi & Clock-In.`
+        );
+      }
     });
     res.json({ bundle: db.getData().attendanceSystem });
   });
@@ -12399,12 +12563,31 @@ async function startServer() {
         error: "Akses ditolak: Hanya System Administrator atau Direktur yang berwenang mereset database."
       });
     }
+    if (process.env.ALLOW_DESTRUCTIVE_DB_RESET !== "true" || req.body?.confirmPhrase !== "RESET_DATABASE_CONFIRM") {
+      db.update((d) => {
+        d.auditLogs.unshift({
+          id: `log-sec-reset-blocked-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: "Percobaan Reset Database Diblokir (Proteksi Data Operasional)",
+          entityType: "USER",
+          entityId: "system-db-protection",
+          details: `Permintaan reset database ditolak otomatis oleh sistem proteksi produksi untuk melindungi data operasional.`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      });
+      return res.status(403).json({
+        error: "Fitur reset database dinonaktifkan secara permanen pada mode operasional demi melindungi keutuhan data."
+      });
+    }
     db.resetToSeed();
     ensureUserSecurityFieldsInitialized();
     res.json({ message: "Database telah direset ke konfigurasi awal" });
   });
   app.use("/api", (err, _req, res, _next) => {
-    console.error("[API Security Error]:", err?.message || "Unexpected error");
+    const safeErrMsg = String(err?.message || "Unexpected error").replace(/Bearer\s+[^\s]+/gi, "Bearer ***").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
+    console.error("[API Security Error]:", safeErrMsg);
     if (res.headersSent) return;
     res.status(err?.status || 500).json({
       error: "Terjadi kesalahan pemrosesan pada server. Silakan periksa kembali data yang dikirimkan."
@@ -12418,6 +12601,7 @@ async function startServer() {
     app.use(
       "/assets",
       express.static(path3.join(distDir, "assets"), {
+        dotfiles: "deny",
         immutable: true,
         maxAge: "365d",
         fallthrough: false
@@ -12425,6 +12609,7 @@ async function startServer() {
     );
     app.use(
       express.static(distDir, {
+        dotfiles: "deny",
         index: false,
         setHeaders: (res, filePath) => {
           if (filePath.endsWith(".html")) {
