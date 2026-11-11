@@ -372,26 +372,40 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     status: r?.status || raw.status || "Active",
     createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
   })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const stripInternalCodePrefix = (val) => {
+    const s = String(val ?? "");
+    return s.includes("::") ? s.split("::").slice(1).join("::") : s;
+  };
   const outcomes = parseAndHydrateRows(outcomeRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
     programId: r?.program_id || raw.programId || "",
-    code: r?.code || raw.code || "",
+    outcomeNumber: raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || void 0,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || "",
     name: r?.name || raw.name || raw.title || "",
     title: raw.title || r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+    indicators: Array.isArray(raw.indicators) ? raw.indicators : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+    status: r?.status || raw.status || "Belum Dimulai",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || void 0,
+    updatedAt: r?.updated_at || raw.updatedAt || void 0
   }));
   const outputs = parseAndHydrateRows(outputRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
     programId: r?.program_id || raw.programId || "",
     outcomeId: r?.outcome_id || raw.outcomeId || "",
-    code: r?.code || raw.code || "",
+    outputNumber: raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || void 0,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || "",
     name: r?.name || raw.name || raw.title || "",
     title: raw.title || r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+    indicators: Array.isArray(raw.indicators) ? raw.indicators : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+    status: r?.status || raw.status || "Belum Dimulai",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || void 0,
+    updatedAt: r?.updated_at || raw.updatedAt || void 0
   }));
   const activities = parseAndHydrateRows(activityRows, (r, raw) => ({
     ...raw,
@@ -399,20 +413,33 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     programId: r?.program_id || raw.programId || "",
     outcomeId: r?.outcome_id || raw.outcomeId || "",
     outputId: r?.output_id || raw.outputId || "",
-    code: r?.code || raw.code || "",
+    activityNumber: raw.activityNumber || r?.activity_number || void 0,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.activityNumber || "",
     name: r?.name || raw.name || raw.title || "",
     title: raw.title || r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+    startDate: r?.start_date || raw.startDate || "",
+    endDate: r?.end_date || raw.endDate || "",
+    status: r?.status || raw.status || "Belum Dimulai",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || void 0,
+    updatedAt: r?.updated_at || raw.updatedAt || void 0
   }));
   const subActivities = parseAndHydrateRows(subActivityRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
+    programId: r?.program_id || raw.programId || "",
+    outcomeId: r?.outcome_id || raw.outcomeId || "",
+    outputId: r?.output_id || raw.outputId || "",
     activityId: r?.activity_id || raw.activityId || "",
-    code: r?.code || raw.code || "",
+    code: stripInternalCodePrefix(r?.code) || raw.code || "",
     name: r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0)
+    picName: r?.pic_name || raw.picName || "",
+    status: r?.status || raw.status || "Belum Dimulai",
+    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || void 0,
+    updatedAt: r?.updated_at || raw.updatedAt || void 0
   }));
   const tors = parseAndHydrateRows(torRows, (r, raw) => ({
     ...raw,
@@ -612,6 +639,9 @@ function toMysqlDateOnlyString(val) {
 }
 function formatValueForMysqlColumn(val, colMeta) {
   const typeLower = (colMeta.type || "").toLowerCase();
+  const colNameLower = (colMeta.name || "").toLowerCase();
+  const isForeignIdLike = colNameLower !== "id" && colNameLower !== "store_key" && (colNameLower.endsWith("_id") || colNameLower.endsWith("_by"));
+  const isUniqueIndexed = String(colMeta.key || "").toUpperCase() === "UNI";
   const canLeaveNull = colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes("auto_increment");
   const fallbackForStrictNotNull = () => {
     if (typeLower.includes("int") || typeLower.includes("decimal") || typeLower.includes("numeric") || typeLower.includes("float") || typeLower.includes("double") || typeLower.includes("bit")) {
@@ -628,6 +658,9 @@ function formatValueForMysqlColumn(val, colMeta) {
     }
     return "";
   };
+  if (val === "" && (isForeignIdLike || isUniqueIndexed) && canLeaveNull) {
+    return null;
+  }
   if (val === void 0 || val === null) {
     return canLeaveNull ? null : fallbackForStrictNotNull();
   }
@@ -791,11 +824,25 @@ async function executeAdaptiveUpsert(connOrPool, tableName, candidateRow, option
       continue;
     }
     if (Object.prototype.hasOwnProperty.call(candidateRow, colName)) {
+      let rawCandidateVal = candidateRow[colName];
+      if (colName === "code" && String(colMeta.key || "").toUpperCase() === "UNI" && (tableName === "outcomes" || tableName === "outputs" || tableName === "activities" || tableName === "sub_activities")) {
+        const baseCode = typeof rawCandidateVal === "string" && rawCandidateVal.trim() !== "" ? rawCandidateVal.trim() : String(candidateRow[pkCol] || "");
+        const progTag = candidateRow.program_id ? String(candidateRow.program_id).slice(-8) : "";
+        rawCandidateVal = progTag && !baseCode.includes("::") ? `${progTag}::${baseCode}` : baseCode;
+      }
+      let formatted = formatValueForMysqlColumn(rawCandidateVal, colMeta);
+      if ((formatted === null || formatted === "") && !colMeta.nullable && !colMeta.hasDefault && String(colMeta.key || "").toUpperCase() === "UNI") {
+        formatted = String(candidateRow[pkCol] || "").slice(0, 64);
+      }
       selectedCols.push(colName);
-      params.push(formatValueForMysqlColumn(candidateRow[colName], colMeta));
+      params.push(formatted);
     } else if (!colMeta.nullable && !colMeta.hasDefault && !colMeta.extra.includes("auto_increment")) {
+      let fallbackVal = formatValueForMysqlColumn(null, colMeta);
+      if ((fallbackVal === null || fallbackVal === "") && String(colMeta.key || "").toUpperCase() === "UNI") {
+        fallbackVal = String(candidateRow[pkCol] || "").slice(0, 64);
+      }
       selectedCols.push(colName);
-      params.push(formatValueForMysqlColumn(null, colMeta));
+      params.push(fallbackVal);
     }
   }
   if (selectedCols.length === 0) {
@@ -869,50 +916,101 @@ function buildProgramCandidateRow(p, nowIso) {
     raw_json: JSON.stringify(p)
   };
 }
-function buildOutcomeCandidateRow(oc) {
+function buildOutcomeCandidateRow(oc, nowIso) {
+  const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
+  const effectiveName = truncStr(oc.name || oc.title, 500) || "";
+  const indicatorsJson = JSON.stringify(Array.isArray(oc.indicators) ? oc.indicators : []);
+  const resolvedCode = truncStr(oc.code || oc.outcomeNumber || oc.id, 64);
   return {
     id: String(oc.id).slice(0, 128),
-    program_id: truncStr(oc.programId, 128) || "",
-    code: truncStr(oc.code, 64),
-    name: truncStr(oc.name || oc.title, 500) || "",
+    program_id: truncStr(oc.programId, 128),
+    code: resolvedCode,
+    outcome_number: truncStr(oc.outcomeNumber || oc.code || oc.id, 64),
+    name: effectiveName,
+    title: truncStr(oc.title || oc.name, 500) || effectiveName,
     description: oc.description || null,
+    pic_id: truncStr(oc.picId, 128),
+    pic_name: truncStr(oc.picName, 255),
+    status: truncStr(oc.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
+    indicators_json: indicatorsJson,
+    indicators: indicatorsJson,
+    created_at: oc.createdAt || ts,
+    updated_at: oc.updatedAt || ts,
     raw_json: JSON.stringify(oc)
   };
 }
-function buildOutputCandidateRow(op) {
+function buildOutputCandidateRow(op, nowIso) {
+  const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
+  const effectiveName = truncStr(op.name || op.title, 500) || "";
+  const indicatorsJson = JSON.stringify(Array.isArray(op.indicators) ? op.indicators : []);
+  const resolvedCode = truncStr(op.code || op.outputNumber || op.id, 64);
   return {
     id: String(op.id).slice(0, 128),
     program_id: truncStr(op.programId, 128),
-    outcome_id: truncStr(op.outcomeId, 128) || "",
-    code: truncStr(op.code, 64),
-    name: truncStr(op.name || op.title, 500) || "",
+    outcome_id: truncStr(op.outcomeId, 128),
+    code: resolvedCode,
+    output_number: truncStr(op.outputNumber || op.code || op.id, 64),
+    name: effectiveName,
+    title: truncStr(op.title || op.name, 500) || effectiveName,
     description: op.description || null,
+    pic_id: truncStr(op.picId, 128),
+    pic_name: truncStr(op.picName, 255),
+    status: truncStr(op.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
+    indicators_json: indicatorsJson,
+    indicators: indicatorsJson,
+    created_at: op.createdAt || ts,
+    updated_at: op.updatedAt || ts,
     raw_json: JSON.stringify(op)
   };
 }
-function buildActivityCandidateRow(ac) {
+function buildActivityCandidateRow(ac, nowIso) {
+  const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
+  const effectiveName = truncStr(ac.name || ac.title, 500) || "";
+  const resolvedCode = truncStr(ac.code || ac.activityNumber || ac.id, 64);
   return {
     id: String(ac.id).slice(0, 128),
     program_id: truncStr(ac.programId, 128),
     outcome_id: truncStr(ac.outcomeId, 128),
-    output_id: truncStr(ac.outputId, 128) || "",
-    code: truncStr(ac.code, 64),
-    name: truncStr(ac.name || ac.title, 500) || "",
+    output_id: truncStr(ac.outputId, 128),
+    code: resolvedCode,
+    activity_number: truncStr(ac.activityNumber || ac.code || ac.id, 64),
+    name: effectiveName,
+    title: truncStr(ac.title || ac.name, 500) || effectiveName,
     description: ac.description || null,
+    pic_id: truncStr(ac.picId, 128),
+    pic_name: truncStr(ac.picName, 255),
+    start_date: truncStr(ac.startDate, 32),
+    end_date: truncStr(ac.endDate, 32),
+    status: truncStr(ac.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(ac.budgetAllocated ?? ac.budget, 0),
+    created_at: ac.createdAt || ts,
+    updated_at: ac.updatedAt || ts,
     raw_json: JSON.stringify(ac)
   };
 }
-function buildSubActivityCandidateRow(sa) {
+function buildSubActivityCandidateRow(sa, nowIso) {
+  const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
+  const effectiveName = truncStr(sa.name, 500) || "";
+  const resolvedCode = truncStr(sa.code || sa.id, 64);
   return {
     id: String(sa.id).slice(0, 128),
-    activity_id: truncStr(sa.activityId, 128) || "",
-    code: truncStr(sa.code, 64),
-    name: truncStr(sa.name, 500) || "",
+    program_id: truncStr(sa.programId, 128),
+    outcome_id: truncStr(sa.outcomeId, 128),
+    output_id: truncStr(sa.outputId, 128),
+    activity_id: truncStr(sa.activityId, 128),
+    code: resolvedCode,
+    name: effectiveName,
+    title: effectiveName,
     description: sa.description || null,
+    pic_name: truncStr(sa.picName, 255),
+    start_date: truncStr(sa.startDate, 32),
+    end_date: truncStr(sa.endDate, 32),
+    status: truncStr(sa.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(sa.budgetAllocated ?? sa.budget, 0),
+    created_at: sa.createdAt || ts,
+    updated_at: sa.updatedAt || ts,
     raw_json: JSON.stringify(sa)
   };
 }
@@ -1110,25 +1208,25 @@ var ENTITY_TABLE_SPECS = [
   {
     tableName: "outcomes",
     getRows: (d) => d.outcomes || [],
-    buildCandidate: (oc) => buildOutcomeCandidateRow(oc),
+    buildCandidate: (oc, nowIso) => buildOutcomeCandidateRow(oc, nowIso),
     allowTargetedDelete: true
   },
   {
     tableName: "outputs",
     getRows: (d) => d.outputs || [],
-    buildCandidate: (op) => buildOutputCandidateRow(op),
+    buildCandidate: (op, nowIso) => buildOutputCandidateRow(op, nowIso),
     allowTargetedDelete: true
   },
   {
     tableName: "activities",
     getRows: (d) => d.activities || [],
-    buildCandidate: (ac) => buildActivityCandidateRow(ac),
+    buildCandidate: (ac, nowIso) => buildActivityCandidateRow(ac, nowIso),
     allowTargetedDelete: true
   },
   {
     tableName: "sub_activities",
     getRows: (d) => d.subActivities || [],
-    buildCandidate: (sa) => buildSubActivityCandidateRow(sa),
+    buildCandidate: (sa, nowIso) => buildSubActivityCandidateRow(sa, nowIso),
     allowTargetedDelete: true
   },
   {
@@ -1237,9 +1335,14 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
   let totalAffectedRows = 0;
   let upsertedRows = 0;
   let deletedRows = 0;
+  let activeTable = "";
+  let activeOperation = "";
   try {
     await conn.beginTransaction();
-    for (const op of plannedOps) {
+    for (const op of [...plannedOps].reverse()) {
+      if (op.toDeleteIds.length === 0) continue;
+      activeTable = op.spec.tableName;
+      activeOperation = "DELETE";
       for (const delId of op.toDeleteIds) {
         const [delRes] = await conn.query(
           `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
@@ -1248,6 +1351,11 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
         deletedRows += 1;
         totalAffectedRows += Number(delRes?.affectedRows || 0);
       }
+    }
+    for (const op of plannedOps) {
+      if (op.toUpsert.length === 0) continue;
+      activeTable = op.spec.tableName;
+      activeOperation = "UPSERT";
       for (const item of op.toUpsert) {
         const affected = await executeAdaptiveUpsert(
           conn,
@@ -1259,22 +1367,27 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
         totalAffectedRows += affected;
       }
     }
-    for (const [kvKey, kvJson] of changedKvEntries) {
-      const affected = await executeAdaptiveUpsert(
-        conn,
-        "system_kv_store",
-        {
-          store_key: kvKey.slice(0, 128),
-          store_value: kvJson,
-          updated_at: nowIso
-        },
-        {
-          primaryKeyColumn: "store_key",
-          immutableOnUpdateColumns: []
-        }
-      );
-      totalAffectedRows += affected;
+    if (changedKvEntries.length > 0) {
+      activeTable = "system_kv_store";
+      activeOperation = "UPSERT_KV";
+      for (const [kvKey, kvJson] of changedKvEntries) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          "system_kv_store",
+          {
+            store_key: kvKey.slice(0, 128),
+            store_value: kvJson,
+            updated_at: nowIso
+          },
+          {
+            primaryKeyColumn: "store_key",
+            immutableOnUpdateColumns: []
+          }
+        );
+        totalAffectedRows += affected;
+      }
     }
+    activeOperation = "COMMIT";
     await conn.commit();
     console.log(
       `[WRITE] DATABASE QUERY SUCCESS (${contextLabel}) -> upserted=${upsertedRows}, deleted=${deletedRows}, kvUpdated=${changedKvEntries.length}, affectedRows=${totalAffectedRows}`
@@ -1291,9 +1404,131 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
       await conn.rollback();
     } catch {
     }
+    if (err && typeof err === "object") {
+      err.failedTable = activeTable || void 0;
+      err.failedOperation = activeOperation || void 0;
+    }
     const safeCode = err?.code ? ` [${err.code}]` : "";
     const safeMsg = String(err?.message || err || "Unknown SQL error").replace(/mysql2?:\/\/[^\s@]+@/gi, "mysql://***@").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
-    console.error(`[WRITE] DATABASE QUERY FAILED (${contextLabel})${safeCode}: ${safeMsg}`);
+    console.error(
+      `[WRITE] DATABASE QUERY FAILED (${contextLabel}) table=${activeTable || "unknown"} op=${activeOperation || "unknown"}${safeCode}: ${safeMsg}`
+    );
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+async function importProgramHierarchyToMysql(pool, params) {
+  const {
+    programId,
+    outcomesToUpsert,
+    outputsToUpsert,
+    activitiesToUpsert,
+    subActivitiesToUpsert,
+    auditLog
+  } = params;
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const conn = await pool.getConnection();
+  let currentStage = "DATABASE TRANSACTION STARTED";
+  let currentTable = "programs";
+  let totalAffectedRows = 0;
+  try {
+    console.log(`[IMPORT] DATABASE TRANSACTION STARTED (programId=${programId})`);
+    await conn.beginTransaction();
+    currentStage = "PROGRAM VERIFICATION";
+    currentTable = "programs";
+    const [progRows] = await conn.query(
+      "SELECT `id`, `name` FROM `programs` WHERE `id` = ? LIMIT 1",
+      [String(programId).slice(0, 128)]
+    );
+    if (!Array.isArray(progRows) || progRows.length === 0) {
+      throw Object.assign(
+        new Error(`Parent program '${programId}' was not found in MySQL table 'programs'.`),
+        {
+          code: "PROGRAM_NOT_FOUND_IN_MYSQL",
+          failedTable: "programs",
+          failedStage: currentStage
+        }
+      );
+    }
+    console.log(`[IMPORT] PROGRAM VERIFIED (programId=${programId})`);
+    currentStage = "OUTCOME INSERT";
+    currentTable = "outcomes";
+    console.log(`[IMPORT] OUTCOME INSERT STARTED (count=${outcomesToUpsert.length})`);
+    for (const oc of outcomesToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        "outcomes",
+        buildOutcomeCandidateRow({ ...oc, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+    currentStage = "OUTPUT INSERT";
+    currentTable = "outputs";
+    console.log(`[IMPORT] OUTPUT INSERT STARTED (count=${outputsToUpsert.length})`);
+    for (const op of outputsToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        "outputs",
+        buildOutputCandidateRow({ ...op, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+    currentStage = "ACTIVITY INSERT";
+    currentTable = "activities";
+    console.log(`[IMPORT] ACTIVITY INSERT STARTED (count=${activitiesToUpsert.length})`);
+    for (const ac of activitiesToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        "activities",
+        buildActivityCandidateRow({ ...ac, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+    if (subActivitiesToUpsert.length > 0) {
+      currentStage = "SUB_ACTIVITY INSERT";
+      currentTable = "sub_activities";
+      console.log(`[IMPORT] SUB_ACTIVITY INSERT STARTED (count=${subActivitiesToUpsert.length})`);
+      for (const sa of subActivitiesToUpsert) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          "sub_activities",
+          buildSubActivityCandidateRow({ ...sa, programId }, nowIso)
+        );
+        totalAffectedRows += affected;
+      }
+    }
+    if (auditLog && auditLog.id) {
+      currentStage = "AUDIT LOG INSERT";
+      currentTable = "audit_logs";
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        "audit_logs",
+        buildAuditLogCandidateRow(auditLog, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+    currentStage = "COMMIT";
+    await conn.commit();
+    console.log(
+      `[IMPORT] COMMIT SUCCESS (programId=${programId}, outcomes=${outcomesToUpsert.length}, outputs=${outputsToUpsert.length}, activities=${activitiesToUpsert.length}, subActivities=${subActivitiesToUpsert.length}, affectedRows=${totalAffectedRows})`
+    );
+    return { totalAffectedRows };
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch {
+    }
+    if (err && typeof err === "object") {
+      err.failedTable = err.failedTable || currentTable;
+      err.failedStage = err.failedStage || currentStage;
+      err.failedOperation = "IMPORT_TRANSACTION";
+    }
+    const safeCode = err?.code ? ` [${err.code}]` : "";
+    const safeMsg = String(err?.message || err || "Unknown SQL error").replace(/mysql2?:\/\/[^\s@]+@/gi, "mysql://***@").replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, "$1***");
+    console.error(
+      `[IMPORT] TRANSACTION ROLLBACK (stage=${currentStage}, table=${currentTable})${safeCode}: ${safeMsg}`
+    );
     throw err;
   } finally {
     conn.release();
@@ -2657,6 +2892,49 @@ function normalizeSchema(parsed, options) {
   if (!Array.isArray(parsed.subActivities)) {
     parsed.subActivities = [];
   }
+  const outcomeByIdMap = /* @__PURE__ */ new Map();
+  for (const oc of parsed.outcomes) {
+    if (oc && oc.id) {
+      outcomeByIdMap.set(oc.id, oc);
+    }
+  }
+  const outputByIdMap = /* @__PURE__ */ new Map();
+  parsed.outputs = parsed.outputs.map((op) => {
+    const parentOc = op?.outcomeId ? outcomeByIdMap.get(op.outcomeId) : void 0;
+    const enriched = !op?.programId && parentOc?.programId ? { ...op, programId: parentOc.programId } : op;
+    if (enriched && enriched.id) {
+      outputByIdMap.set(enriched.id, enriched);
+    }
+    return enriched;
+  });
+  const activityByIdMap = /* @__PURE__ */ new Map();
+  parsed.activities = parsed.activities.map((ac) => {
+    const parentOp = ac?.outputId ? outputByIdMap.get(ac.outputId) : void 0;
+    const resolvedOutcomeId = ac?.outcomeId || parentOp?.outcomeId || "";
+    const parentOc = resolvedOutcomeId ? outcomeByIdMap.get(resolvedOutcomeId) : void 0;
+    const resolvedProgramId = ac?.programId || parentOp?.programId || parentOc?.programId || "";
+    const enriched = !ac?.outcomeId && resolvedOutcomeId || !ac?.programId && resolvedProgramId ? {
+      ...ac,
+      ...resolvedOutcomeId ? { outcomeId: resolvedOutcomeId } : {},
+      ...resolvedProgramId ? { programId: resolvedProgramId } : {}
+    } : ac;
+    if (enriched && enriched.id) {
+      activityByIdMap.set(enriched.id, enriched);
+    }
+    return enriched;
+  });
+  parsed.subActivities = parsed.subActivities.map((sa) => {
+    const parentAct = sa?.activityId ? activityByIdMap.get(sa.activityId) : void 0;
+    if (!parentAct) return sa;
+    const needsBackfill = !sa?.outputId && parentAct.outputId || !sa?.outcomeId && parentAct.outcomeId || !sa?.programId && parentAct.programId;
+    if (!needsBackfill) return sa;
+    return {
+      ...sa,
+      ...parentAct.outputId && !sa.outputId ? { outputId: parentAct.outputId } : {},
+      ...parentAct.outcomeId && !sa.outcomeId ? { outcomeId: parentAct.outcomeId } : {},
+      ...parentAct.programId && !sa.programId ? { programId: parentAct.programId } : {}
+    };
+  });
   if (!Array.isArray(parsed.tors)) {
     parsed.tors = [];
   }
@@ -2743,26 +3021,45 @@ function sanitizeDbError(err) {
 }
 function buildMysqlWriteFailureError(err, contextLabel) {
   const sqlCode = String(err?.code || "");
+  const failedTable = err?.failedTable ? String(err.failedTable) : void 0;
+  const failedStage = err?.failedStage ? String(err.failedStage) : void 0;
   const safeDetail = sanitizeDbError(err);
+  const tableInfo = failedTable ? ` pada tabel '${failedTable}'` : "";
+  const codeInfo = sqlCode ? ` (${sqlCode})` : "";
   let httpStatus = 500;
-  let userMessage = "Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan agar tampilan tetap akurat.";
+  let userMessage = `[DATABASE WRITE ERROR] Gagal menyimpan perubahan${tableInfo} ke database MySQL produksi${codeInfo}. Perubahan dibatalkan agar tampilan tetap akurat.`;
   if (sqlCode === "ER_TABLEACCESS_DENIED_ERROR" || sqlCode === "ER_DBACCESS_DENIED_ERROR" || sqlCode === "ER_SPECIFIC_ACCESS_DENIED_ERROR" || /command denied to user/i.test(safeDetail)) {
     httpStatus = 500;
-    userMessage = "Database MySQL menolak penyimpanan karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.";
+    userMessage = `[DATABASE WRITE ERROR] Database MySQL menolak penyimpanan${tableInfo} karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.`;
   } else if (sqlCode === "ECONNREFUSED" || sqlCode === "PROTOCOL_CONNECTION_LOST" || sqlCode === "ETIMEDOUT" || sqlCode === "EHOSTUNREACH") {
     httpStatus = 503;
-    userMessage = "Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.";
+    userMessage = "[DATABASE WRITE ERROR] Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.";
+  } else if (sqlCode === "ER_NO_REFERENCED_ROW_2" || sqlCode === "ER_NO_REFERENCED_ROW" || sqlCode === "PROGRAM_NOT_FOUND_IN_MYSQL") {
+    httpStatus = 400;
+    userMessage = `[DATABASE WRITE ERROR] Relasi data induk tidak ditemukan${tableInfo}${codeInfo}. Pastikan Program, Outcome, atau Output induk sudah tersimpan di database MySQL.`;
+  } else if (sqlCode === "ER_ROW_IS_REFERENCED_2" || sqlCode === "ER_ROW_IS_REFERENCED") {
+    httpStatus = 409;
+    userMessage = `[DATABASE WRITE ERROR] Data${tableInfo} tidak dapat dihapus atau diubah karena masih direferensikan oleh data turunan di database MySQL${codeInfo}.`;
+  } else if (sqlCode === "ER_BAD_NULL_ERROR" || sqlCode === "ER_NO_DEFAULT_FOR_FIELD") {
+    httpStatus = 400;
+    userMessage = `[DATABASE WRITE ERROR] Kolom wajib${tableInfo} belum lengkap untuk struktur tabel MySQL${codeInfo}. Perubahan dibatalkan agar data tetap konsisten.`;
+  } else if (sqlCode === "ER_NO_SUCH_TABLE" || sqlCode === "ER_BAD_FIELD_ERROR") {
+    httpStatus = 500;
+    userMessage = `[DATABASE WRITE ERROR] Struktur tabel atau kolom${tableInfo} di database MySQL belum sesuai${codeInfo}.`;
   } else if (sqlCode === "ER_DUP_ENTRY") {
     httpStatus = 409;
-    userMessage = "Data dengan kode atau identitas tersebut sudah terdaftar di database MySQL.";
+    userMessage = `[DATABASE WRITE ERROR] Data dengan kode atau identitas tersebut sudah terdaftar${tableInfo} di database MySQL.`;
   } else if (sqlCode === "ER_DATA_TOO_LONG" || sqlCode === "ER_TRUNCATED_WRONG_VALUE") {
     httpStatus = 400;
-    userMessage = "Format atau panjang data tidak sesuai dengan kolom tabel MySQL. Periksa kembali isian formulir Anda.";
+    userMessage = `[DATABASE WRITE ERROR] Format atau panjang data tidak sesuai dengan kolom${tableInfo} di MySQL${codeInfo}. Periksa kembali isian Anda.`;
   }
   return Object.assign(new Error(`[MySQL Write Failed: ${contextLabel}] ${safeDetail}`), {
     httpStatus,
     userMessage,
-    code: sqlCode || void 0
+    code: sqlCode || void 0,
+    errorCategory: "DATABASE_WRITE_ERROR",
+    failedTable,
+    failedStage
   });
 }
 var Database = class {
@@ -2942,6 +3239,101 @@ var Database = class {
         this.dirtySinceCommit = false;
         this.lastFullMysqlSyncAt = Date.now();
         this.lastUsersRefreshAt = Date.now();
+      } catch (err) {
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      } finally {
+        this.isCommittingWrite = false;
+      }
+    });
+  }
+  /**
+   * Mengeksekusi seluruh batch Import Excel Hirarki Program dalam satu transaksi atomik:
+   * - Pada mode MySQL produksi: memverifikasi Program induk di MySQL, menjalankan START TRANSACTION -> outcomes -> outputs -> activities -> sub_activities -> COMMIT,
+   *   lalu membaca ulang (SELECT) state terbaru dari MySQL agar data di memori & respons API 100% akurat sesuai isi tabel MySQL.
+   * - Jika gagal di tahap mana pun: ROLLBACK penuh tanpa meninggalkan data parsial.
+   */
+  async executeHierarchyImportTransaction(batchParams) {
+    const contextLabel = `POST /api/programs/${batchParams.programId}/import-hierarchy`;
+    if (!this.isStrictMysqlRequired()) {
+      const backupJson = JSON.stringify(this.data);
+      try {
+        console.log(`[IMPORT] DATABASE TRANSACTION STARTED (programId=${batchParams.programId}, mode=preview-local)`);
+        const progExists = (this.data.programs || []).some((p) => p.id === batchParams.programId);
+        if (!progExists) {
+          throw Object.assign(
+            new Error(`Parent program '${batchParams.programId}' not found.`),
+            {
+              code: "PROGRAM_NOT_FOUND_IN_MYSQL",
+              failedTable: "programs",
+              failedStage: "PROGRAM VERIFICATION"
+            }
+          );
+        }
+        console.log(`[IMPORT] PROGRAM VERIFIED (programId=${batchParams.programId})`);
+        const upsertById = (list, incoming) => {
+          const map = /* @__PURE__ */ new Map();
+          for (const item of list) map.set(item.id, item);
+          for (const item of incoming) map.set(item.id, item);
+          return Array.from(map.values());
+        };
+        console.log(`[IMPORT] OUTCOME INSERT STARTED (count=${batchParams.outcomesToUpsert.length})`);
+        this.data.outcomes = upsertById(this.data.outcomes || [], batchParams.outcomesToUpsert);
+        console.log(`[IMPORT] OUTPUT INSERT STARTED (count=${batchParams.outputsToUpsert.length})`);
+        this.data.outputs = upsertById(this.data.outputs || [], batchParams.outputsToUpsert);
+        console.log(`[IMPORT] ACTIVITY INSERT STARTED (count=${batchParams.activitiesToUpsert.length})`);
+        this.data.activities = upsertById(this.data.activities || [], batchParams.activitiesToUpsert);
+        if (batchParams.subActivitiesToUpsert.length > 0) {
+          this.data.subActivities = upsertById(
+            this.data.subActivities || [],
+            batchParams.subActivitiesToUpsert
+          );
+        }
+        if (batchParams.auditLog) {
+          this.data.auditLogs = [...this.data.auditLogs || [], batchParams.auditLog];
+        }
+        this.persistLocalJsonOnly(this.data);
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.dirtySinceCommit = false;
+        console.log(`[IMPORT] COMMIT SUCCESS (programId=${batchParams.programId}, mode=preview-local)`);
+        return this.data;
+      } catch (err) {
+        this.data = JSON.parse(backupJson);
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      }
+    }
+    if (this.mysqlStatus !== "ready") {
+      throw Object.assign(new Error("MySQL database is not ready for hierarchy import."), {
+        httpStatus: 503,
+        errorCategory: "DATABASE_WRITE_ERROR",
+        userMessage: "[DATABASE WRITE ERROR] Database MySQL sedang tidak siap menerima import hirarki. Silakan muat ulang halaman dan coba kembali."
+      });
+    }
+    return this.enqueueWriteTask(async () => {
+      this.isCommittingWrite = true;
+      try {
+        const pool = await getMysqlPool();
+        if (!pool) {
+          throw new Error("MySQL connection pool is unavailable during hierarchy import.");
+        }
+        await importProgramHierarchyToMysql(pool, batchParams);
+        const freshFromMysql = await loadDatabaseFromMysql(pool);
+        if (freshFromMysql) {
+          this.data = normalizeSchema(freshFromMysql, { isFromMysql: true });
+          this.lastCommittedJson = JSON.stringify(this.data);
+          this.dirtySinceCommit = false;
+          this.lastFullMysqlSyncAt = Date.now();
+          this.lastUsersRefreshAt = Date.now();
+        }
+        return this.data;
       } catch (err) {
         this.lastMysqlErrorSummary = sanitizeDbError(err);
         if (this.lastCommittedJson) {
@@ -5718,9 +6110,1218 @@ function ensureAttendanceSystemInitialized(draft) {
   return draft.attendanceSystem;
 }
 
+// src/lib/hierarchyExcelParser.ts
+import * as XLSX from "xlsx";
+var sanitizeCell = (val) => {
+  const str = String(val ?? "").trim();
+  return str.replace(/^[=+\-@\t\r]+/, "").trim();
+};
+var normalizeDateStr = (val, fallback) => {
+  if (!val) return fallback;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+  const d = new Date(val);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toISOString().slice(0, 10);
+  }
+  return fallback;
+};
+var getCanonicalOcKey = (num, desc, fallbackName) => {
+  const cleanNum = (num || (fallbackName.match(/^(Outcome\s*[\d.]+)/i)?.[1] ?? "")).replace(/\s+/g, " ").trim().toLowerCase();
+  if (cleanNum) return cleanNum;
+  return (fallbackName || desc).trim().toLowerCase();
+};
+var getCanonicalOpKey = (num, desc, fallbackName) => {
+  const cleanNum = (num || (fallbackName.match(/^(Output\s*[\d.]+)/i)?.[1] ?? "")).replace(/\s+/g, " ").trim().toLowerCase();
+  if (cleanNum) return cleanNum;
+  return (fallbackName || desc).trim().toLowerCase();
+};
+var getCanonicalActKey = (num, actName) => {
+  const cleanNum = (num || (actName.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? "")).replace(/\s+/g, " ").trim().toLowerCase();
+  const cleanTitle = actName.replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, "").trim().toLowerCase();
+  if (cleanNum && cleanTitle) return `${cleanNum}__${cleanTitle}`;
+  return cleanNum || cleanTitle || actName.trim().toLowerCase();
+};
+var HEADER_KEYWORD_REGEX = /^(nomor\s*outcome|no\.?\s*outcome|outcome\s*number|outcome\s*no|kode\s*outcome|outcome|nama\s*outcome|outcome\s*name|nomor\s*output|no\.?\s*output|output\s*number|output\s*no|kode\s*output|output|nama\s*output|output\s*name|activity|nama\s*activity|nama\s*kegiatan|activity\s*name|nomor\s*activity)$/i;
+function extractNormalizedRowsFromSheet(sheet) {
+  const matrix = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: "",
+    blankrows: true
+  });
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    return { headerRowNumber: 1, headerMatched: false, detectedHeaders: [], rows: [] };
+  }
+  let bestHeaderIdx = 0;
+  let bestScore = 0;
+  const maxScan = Math.min(matrix.length, 12);
+  for (let rIdx = 0; rIdx < maxScan; rIdx++) {
+    const rowCells = Array.isArray(matrix[rIdx]) ? matrix[rIdx] : [];
+    let score = 0;
+    for (const rawCell of rowCells) {
+      const clean = String(rawCell ?? "").replace(/\s+/g, " ").trim();
+      if (!clean) continue;
+      if (HEADER_KEYWORD_REGEX.test(clean)) {
+        score += 3;
+      } else if (/^(description|deskripsi|progress\s*indicator|activity\s*description)$/i.test(clean)) {
+        score += 1;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestHeaderIdx = rIdx;
+    }
+  }
+  const headerMatched = bestScore >= 3;
+  const rawHeaderCells = Array.isArray(matrix[bestHeaderIdx]) ? matrix[bestHeaderIdx] : [];
+  const parentGroupRow = bestHeaderIdx > 0 && Array.isArray(matrix[bestHeaderIdx - 1]) ? matrix[bestHeaderIdx - 1] : [];
+  let passedOutputAnchor = false;
+  let passedActivityAnchor = false;
+  let activeGroupBanner = "";
+  const normalizedHeaders = rawHeaderCells.map((cellVal, colIdx) => {
+    const groupCell = String(parentGroupRow[colIdx] ?? "").replace(/\s+/g, " ").trim();
+    if (groupCell) {
+      activeGroupBanner = groupCell.toLowerCase();
+    }
+    const baseHeader = String(cellVal ?? "").replace(/\s+/g, " ").trim();
+    if (!baseHeader) return `__EMPTY_${colIdx}`;
+    if (/^(nomor\s*output|no\.?\s*output|output\s*number|output\s*no|kode\s*output|output|nama\s*output|output\s*name)$/i.test(baseHeader)) {
+      passedOutputAnchor = true;
+    }
+    if (/^(activity|nama\s*activity|nama\s*kegiatan|activity\s*name|nomor\s*activity)$/i.test(baseHeader)) {
+      passedActivityAnchor = true;
+    }
+    const inOutputSection = !passedActivityAnchor && (passedOutputAnchor || /\boutput\b/i.test(activeGroupBanner));
+    if (inOutputSection && !/\boutput\b/i.test(baseHeader)) {
+      if (/^(description|deskripsi)$/i.test(baseHeader)) return "Description Output";
+      if (/^(progress\s*indicator|indikator)$/i.test(baseHeader)) return "Progress indicator Output";
+      if (/^(data\s*source|sumber\s*data)$/i.test(baseHeader)) return "Data source Output";
+      if (/^(cumulative\s*or\s*non-?cumulative|sifat\s*indikator)$/i.test(baseHeader)) {
+        return "Cumulative or non-cumulative Output";
+      }
+      if (/^(planned\s*data\s*breakdown|data\s*breakdown|disagregasi\s*data)$/i.test(baseHeader)) {
+        return "Planned data breakdown Output";
+      }
+      if (/^(reporting\s*frequency|frekuensi\s*pelaporan)$/i.test(baseHeader)) {
+        return "Reporting frequency Output";
+      }
+      if (/^baseline$/i.test(baseHeader)) return "Baseline Output";
+      if (/^(end\s*of\s*project\s*goal|target)$/i.test(baseHeader)) {
+        return "End of project goal Output";
+      }
+      if (/^(satuan|unit)$/i.test(baseHeader)) return "Unit Output";
+    }
+    return baseHeader;
+  });
+  const usedHeaderNames = /* @__PURE__ */ new Map();
+  const uniqueHeaders = normalizedHeaders.map((h) => {
+    const count = usedHeaderNames.get(h) || 0;
+    usedHeaderNames.set(h, count + 1);
+    return count === 0 ? h : `${h}_${count}`;
+  });
+  const rows = [];
+  for (let rIdx = bestHeaderIdx + 1; rIdx < matrix.length && rows.length < 500; rIdx++) {
+    const rowArr = Array.isArray(matrix[rIdx]) ? matrix[rIdx] : [];
+    const record = {};
+    let hasNonEmptyCell = false;
+    for (let cIdx = 0; cIdx < uniqueHeaders.length; cIdx++) {
+      const val = sanitizeCell(rowArr[cIdx]);
+      if (val) hasNonEmptyCell = true;
+      record[uniqueHeaders[cIdx]] = val;
+    }
+    if (hasNonEmptyCell) {
+      rows.push({
+        excelRowNumber: rIdx + 1,
+        record
+      });
+    }
+  }
+  return {
+    headerRowNumber: bestHeaderIdx + 1,
+    headerMatched,
+    detectedHeaders: uniqueHeaders.filter((h) => !h.startsWith("__EMPTY")),
+    rows
+  };
+}
+function parseProgramHierarchyWorkbookBuffer(params) {
+  const {
+    buffer,
+    program,
+    existingOutcomes,
+    existingOutputs,
+    existingActivities,
+    existingSubActivities
+  } = params;
+  const uint8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (uint8.byteLength === 0) {
+    throw new Error("File Excel kosong (0 byte).");
+  }
+  let workbook;
+  try {
+    workbook = XLSX.read(uint8, { type: "array" });
+  } catch (err) {
+    throw new Error(`Format workbook Excel rusak atau tidak dapat dibaca: ${err?.message || "Unreadable workbook"}`);
+  }
+  if (!workbook || !Array.isArray(workbook.SheetNames) || workbook.SheetNames.length === 0) {
+    return {
+      sheetName: "",
+      sheetCount: 0,
+      rawRowCount: 0,
+      headerMatched: false,
+      detectedHeaders: [],
+      rows: []
+    };
+  }
+  const prioritizedSheetNames = [
+    ...workbook.SheetNames.filter(
+      (n) => /hirarki|hierarki|matriks|logframe|matrix|program|sheet1/i.test(n) && !/rumus|panduan|guide|instruksi/i.test(n)
+    ),
+    ...workbook.SheetNames.filter(
+      (n) => !(/hirarki|hierarki|matriks|logframe|matrix|program|sheet1/i.test(n) && !/rumus|panduan|guide|instruksi/i.test(n))
+    )
+  ];
+  let chosenSheetName = prioritizedSheetNames[0];
+  let extracted = extractNormalizedRowsFromSheet(workbook.Sheets[chosenSheetName]);
+  if (!extracted.headerMatched) {
+    for (const candidateName of prioritizedSheetNames.slice(1)) {
+      const candidateExtracted = extractNormalizedRowsFromSheet(workbook.Sheets[candidateName]);
+      if (candidateExtracted.headerMatched) {
+        chosenSheetName = candidateName;
+        extracted = candidateExtracted;
+        break;
+      }
+    }
+  }
+  if (!extracted.headerMatched || extracted.rows.length === 0) {
+    return {
+      sheetName: chosenSheetName,
+      sheetCount: workbook.SheetNames.length,
+      rawRowCount: extracted.rows.length,
+      headerMatched: extracted.headerMatched,
+      detectedHeaders: extracted.detectedHeaders,
+      rows: []
+    };
+  }
+  const progOutcomes = existingOutcomes.filter((o) => o.programId === program.id);
+  const defaultStart = program.startDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const defaultEnd = program.endDate || defaultStart;
+  const findCol = (row, pattern) => {
+    const key = Object.keys(row).find((k) => pattern.test(k.trim()));
+    return key ? sanitizeCell(row[key]) : "";
+  };
+  const outcomeOrder = progOutcomes.map(
+    (o) => getCanonicalOcKey(o.outcomeNumber || "", o.description || "", o.name)
+  );
+  const outputOrderByOutcome = /* @__PURE__ */ new Map();
+  const actCountByOutput = /* @__PURE__ */ new Map();
+  progOutcomes.forEach((oc) => {
+    const ocKey = getCanonicalOcKey(oc.outcomeNumber || "", oc.description || oc.name, oc.name);
+    const ops = existingOutputs.filter((op) => op.outcomeId === oc.id);
+    outputOrderByOutcome.set(
+      ocKey,
+      ops.map((op) => getCanonicalOpKey(op.outputNumber || "", op.description || "", op.name))
+    );
+    ops.forEach((op) => {
+      const opNorm = getCanonicalOpKey(op.outputNumber || "", op.description || "", op.name);
+      const opFullKey = `${ocKey}__${opNorm}`;
+      const acts = existingActivities.filter((a) => a.outputId === op.id);
+      actCountByOutput.set(opFullKey, acts.length);
+    });
+  });
+  const existingOutcomeSet = /* @__PURE__ */ new Set();
+  const existingOutcomeIndicatorSet = /* @__PURE__ */ new Set();
+  const existingOutputSet = /* @__PURE__ */ new Set();
+  const existingOutputIndicatorSet = /* @__PURE__ */ new Set();
+  const existingActivitySet = /* @__PURE__ */ new Set();
+  const existingSubSet = /* @__PURE__ */ new Set();
+  progOutcomes.forEach((oc) => {
+    const ocKey = getCanonicalOcKey(oc.outcomeNumber || "", oc.description || "", oc.name);
+    existingOutcomeSet.add(ocKey);
+    existingOutcomeSet.add(oc.name.trim().toLowerCase());
+    if (oc.outcomeNumber) {
+      existingOutcomeSet.add(oc.outcomeNumber.trim().toLowerCase());
+    }
+    (oc.indicators || []).forEach((ind) => {
+      existingOutcomeIndicatorSet.add(`${ocKey}__${ind.name.trim().toLowerCase()}`);
+    });
+    existingOutputs.filter((op) => op.outcomeId === oc.id).forEach((op) => {
+      const opNorm = getCanonicalOpKey(op.outputNumber || "", op.description || "", op.name);
+      const opKey = `${ocKey}__${opNorm}`;
+      existingOutputSet.add(opKey);
+      existingOutputSet.add(`${ocKey}__${op.name.trim().toLowerCase()}`);
+      (op.indicators || []).forEach((ind) => {
+        existingOutputIndicatorSet.add(`${opKey}__${ind.name.trim().toLowerCase()}`);
+      });
+      existingActivities.filter((a) => a.outputId === op.id).forEach((act) => {
+        const actNorm = getCanonicalActKey(act.activityNumber || "", act.name);
+        const actKey = `${opKey}__${actNorm}`;
+        existingActivitySet.add(actKey);
+        existingActivitySet.add(`${opKey}__${act.name.trim().toLowerCase()}`);
+        existingSubActivities.filter((s) => s.activityId === act.id).forEach((sub) => {
+          existingSubSet.add(`${actKey}__${sub.name.trim().toLowerCase()}`);
+        });
+      });
+    });
+  });
+  const seenOutcomesInFile = /* @__PURE__ */ new Set();
+  const seenOutcomeIndicatorsInFile = /* @__PURE__ */ new Set();
+  const seenOutputsInFile = /* @__PURE__ */ new Set();
+  const seenOutputIndicatorsInFile = /* @__PURE__ */ new Set();
+  const seenActivitiesInFile = /* @__PURE__ */ new Set();
+  const seenSubsInFile = /* @__PURE__ */ new Set();
+  let lastOutcomeNumber = "";
+  let lastOutcomeName = "";
+  let lastOutcomeDesc = "";
+  let lastOutputNumber = "";
+  let lastOutputName = "";
+  let lastOutputDesc = "";
+  let lastActivityNumber = "";
+  let lastActivityName = "";
+  let lastActivityCode = "";
+  let lastActivityDesc = "";
+  let lastActivityAnticipatedInputs = "";
+  let lastActivityPlannedParticipants = "";
+  let lastActivityStart = defaultStart;
+  let lastActivityEnd = defaultEnd;
+  const previewRows = [];
+  extracted.rows.forEach(({ excelRowNumber, record: row }) => {
+    const rawOcNum = findCol(
+      row,
+      /^(nomor\s*outcome|no\.?\s*outcome|outcome\s*number|outcome\s*no|kode\s*outcome)$/i
+    );
+    const rawOcLegacyName = findCol(row, /^(outcome|nama\s*outcome|outcome\s*name)$/i);
+    const rawOcDesc = findCol(
+      row,
+      /^(description|deskripsi\s*outcome|outcome\s*description|deskripsi)$/i
+    );
+    const rawOcInd = findCol(
+      row,
+      /^(progress\s*indicator|indikator\s*outcome|outcome\s*indicator)$/i
+    );
+    const rawOcDataSource = findCol(
+      row,
+      /^(data\s*source|sumber\s*data|sumber\s*data\s*outcome)$/i
+    );
+    const rawOcCumulative = findCol(
+      row,
+      /^(cumulative\s*or\s*non-?cumulative|cumulative\s*outcome|sifat\s*indikator)$/i
+    );
+    const rawOcPlannedBreakdown = findCol(
+      row,
+      /^(planned\s*data\s*breakdown|data\s*breakdown|disagregasi\s*data)$/i
+    );
+    const rawOcReportingFreq = findCol(
+      row,
+      /^(reporting\s*frequency|frekuensi\s*pelaporan|frekuensi\s*outcome)$/i
+    );
+    const rawOcBase = findCol(
+      row,
+      /^(baseline|baseline\s*outcome|outcome\s*baseline)$/i
+    );
+    const rawOcTarget = findCol(
+      row,
+      /^(end\s*of\s*project\s*goal|target\s*outcome|outcome\s*target)$/i
+    );
+    const rawOcUnit = findCol(row, /^(satuan\s*outcome|unit\s*outcome|outcome\s*unit)$/i);
+    const rawOpNum = findCol(
+      row,
+      /^(nomor\s*output|no\.?\s*output|output\s*number|output\s*no|kode\s*output)$/i
+    );
+    const rawOpLegacyName = findCol(row, /^(output|nama\s*output|output\s*name)$/i);
+    const rawOpDesc = findCol(
+      row,
+      /^(description\s*output|deskripsi\s*output|output\s*description|description_1|deskripsi_1)$/i
+    );
+    const rawOpInd = findCol(
+      row,
+      /^(progress\s*indicator\s*output|indikator\s*output|output\s*indicator|progress\s*indicator_1)$/i
+    );
+    const rawOpDataSource = findCol(
+      row,
+      /^(data\s*source\s*output|sumber\s*data\s*output|data\s*source_1)$/i
+    );
+    const rawOpCumulative = findCol(
+      row,
+      /^(cumulative\s*or\s*non-?cumulative\s*output|cumulative\s*output|cumulative\s*or\s*non-?cumulative_1)$/i
+    );
+    const rawOpPlannedBreakdown = findCol(
+      row,
+      /^(planned\s*data\s*breakdown\s*output|data\s*breakdown\s*output|planned\s*data\s*breakdown_1)$/i
+    );
+    const rawOpReportingFreq = findCol(
+      row,
+      /^(reporting\s*frequency\s*output|frekuensi\s*output|reporting\s*frequency_1)$/i
+    );
+    const rawOpBase = findCol(row, /^(baseline\s*output|output\s*baseline|baseline_1)$/i);
+    const rawOpTarget = findCol(
+      row,
+      /^(end\s*of\s*project\s*goal\s*output|target\s*output|output\s*target|end\s*of\s*project\s*goal_1)$/i
+    );
+    const rawOpUnit = findCol(row, /^(satuan\s*output|unit\s*output|output\s*unit)$/i);
+    const rawActNum = findCol(
+      row,
+      /^(nomor\s*activity|no\.?\s*activity|activity\s*number|activity\s*no)$/i
+    );
+    const rawActCode = findCol(
+      row,
+      /^(kode\s*activity.*|kode\s*kegiatan|activity\s*code|budget\s*code|kode\s*anggaran|kode)$/i
+    );
+    const rawActName = findCol(
+      row,
+      /^(activity|nama\s*activity|nama\s*kegiatan|activity\s*name)$/i
+    );
+    const rawActDesc = findCol(
+      row,
+      /^(activity\s*description|deskripsi\s*activity|deskripsi\s*kegiatan)$/i
+    );
+    const rawActInputs = findCol(
+      row,
+      /^(anticipated\s*inputs?|input\s*kegiatan|kebutuhan\s*input)$/i
+    );
+    const rawActParticipants = findCol(
+      row,
+      /^(if\s*possible.*participants.*|planned\s*participants.*|participants\s*breakdown.*|target\s*peserta.*)$/i
+    );
+    const rawActStart = findCol(row, /^(tanggal\s*mulai.*|start\s*date|mulai)$/i);
+    const rawActEnd = findCol(row, /^(tanggal\s*selesai.*|end\s*date|selesai)$/i);
+    const rawSubName = findCol(row, /^(nama\s*sub.*|sub\s*activity|sub-activity|sub\s*kegiatan)$/i);
+    const rawSubPic = findCol(row, /^(pic\s*sub.*|pic\s*activity|pic)$/i);
+    if (!rawOcNum && !rawOcLegacyName && !rawOcDesc && !rawOcInd && !rawOpNum && !rawOpLegacyName && !rawOpDesc && !rawOpInd && !rawActName && !rawSubName) {
+      return;
+    }
+    let currentOcNum = rawOcNum;
+    let currentOcDesc = rawOcDesc;
+    if (!currentOcNum && rawOcLegacyName) {
+      const m = rawOcLegacyName.match(/^(Outcome\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      if (m) {
+        currentOcNum = m[1].replace(/\s+/g, " ").trim();
+        if (!currentOcDesc) currentOcDesc = m[2].trim();
+      }
+    }
+    const hasExplicitOutcomeInRow = Boolean(currentOcNum || currentOcDesc || rawOcLegacyName);
+    const hasExplicitOutputInRow = Boolean(rawOpNum || rawOpDesc || rawOpLegacyName);
+    if (hasExplicitOutcomeInRow) {
+      const nextNum = currentOcNum || lastOutcomeNumber;
+      const nextDesc = currentOcDesc || rawOcLegacyName || lastOutcomeDesc;
+      const nextCombined = nextNum && nextDesc && !nextDesc.toLowerCase().startsWith(nextNum.toLowerCase()) ? `${nextNum}: ${nextDesc}` : nextDesc || nextNum;
+      if (!hasExplicitOutputInRow || lastOutcomeName && nextCombined.toLowerCase() !== lastOutcomeName.toLowerCase() && (currentOcNum.toLowerCase() !== lastOutcomeNumber.toLowerCase() || !currentOcNum)) {
+        lastOutputNumber = "";
+        lastOutputName = "";
+        lastOutputDesc = "";
+        lastActivityNumber = "";
+        lastActivityName = "";
+        lastActivityCode = "";
+      }
+      if (currentOcNum) lastOutcomeNumber = currentOcNum;
+      if (currentOcDesc) lastOutcomeDesc = currentOcDesc;
+      else if (rawOcLegacyName && !lastOutcomeDesc) lastOutcomeDesc = rawOcLegacyName;
+      lastOutcomeName = nextCombined;
+    }
+    const outcomeNumber = lastOutcomeNumber || (lastOutcomeName ? "Outcome 1" : "");
+    const outcomeDescription = lastOutcomeDesc || lastOutcomeName;
+    const outcomeName = lastOutcomeName || (outcomeNumber && outcomeDescription ? `${outcomeNumber}: ${outcomeDescription}` : outcomeDescription);
+    let currentOpNum2 = rawOpNum;
+    let currentOpDesc2 = rawOpDesc;
+    if (!currentOpNum2 && rawOpLegacyName) {
+      const m = rawOpLegacyName.match(/^(Output\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      if (m) {
+        currentOpNum2 = m[1].replace(/\s+/g, " ").trim();
+        if (!currentOpDesc2) currentOpDesc2 = m[2].trim();
+      }
+    }
+    if (currentOpNum2 || currentOpDesc2 || rawOpLegacyName) {
+      const nextOpNum = currentOpNum2 || lastOutputNumber;
+      const nextOpDesc = currentOpDesc2 || rawOpLegacyName || lastOutputDesc;
+      const nextOpCombined = nextOpNum && nextOpDesc && !nextOpDesc.toLowerCase().startsWith(nextOpNum.toLowerCase()) ? `${nextOpNum}: ${nextOpDesc}` : nextOpDesc || nextOpNum;
+      if (!rawActName || lastOutputName && nextOpCombined.toLowerCase() !== lastOutputName.toLowerCase() && (currentOpNum2.toLowerCase() !== lastOutputNumber.toLowerCase() || !currentOpNum2)) {
+        lastActivityNumber = "";
+        lastActivityName = "";
+        lastActivityCode = "";
+      }
+      if (currentOpNum2) lastOutputNumber = currentOpNum2;
+      if (currentOpDesc2) lastOutputDesc = currentOpDesc2;
+      else if (rawOpLegacyName && !lastOutputDesc) lastOutputDesc = rawOpLegacyName;
+      lastOutputName = nextOpCombined;
+    }
+    const hasOutputInRow = Boolean(
+      currentOpNum2 || currentOpDesc2 || rawOpLegacyName || rawOpInd || rawActName || rawSubName
+    );
+    const outputNumber = hasOutputInRow ? lastOutputNumber : "";
+    const outputDescription = hasOutputInRow ? lastOutputDesc || lastOutputName : "";
+    const outputName = hasOutputInRow ? lastOutputName : "";
+    if (rawActName) {
+      const actMatch = rawActName.match(/^(Activity\s*[\d.]+)\s*[:\-–]?\s*(.+)$/i);
+      const bareNumMatch = !actMatch ? rawActName.match(/^(\d+(?:\.\d+)+)\s*[:\-–.)]?\s+(.+)$/) : null;
+      const extractedActNum = rawActNum || (actMatch ? actMatch[1].replace(/\s+/g, " ").trim() : bareNumMatch ? `Activity ${bareNumMatch[1]}` : "");
+      const cleanActTitle = actMatch ? actMatch[2].trim() : bareNumMatch ? bareNumMatch[2].trim() : rawActName.trim();
+      const formattedActName = actMatch ? `${extractedActNum}: ${cleanActTitle}` : rawActName.trim();
+      lastActivityNumber = extractedActNum;
+      lastActivityName = formattedActName;
+      lastActivityCode = rawActCode || (bareNumMatch ? bareNumMatch[1] : "");
+      lastActivityDesc = rawActDesc;
+      lastActivityAnticipatedInputs = rawActInputs;
+      lastActivityPlannedParticipants = rawActParticipants;
+      lastActivityStart = normalizeDateStr(rawActStart, defaultStart);
+      lastActivityEnd = normalizeDateStr(rawActEnd, defaultEnd);
+    }
+    const activityNumber = rawActName ? lastActivityNumber : rawSubName ? lastActivityNumber : "";
+    const activityName = rawActName ? lastActivityName : rawSubName ? lastActivityName : "";
+    const activityDescription = rawActDesc || (rawActName ? "" : lastActivityDesc);
+    const activityAnticipatedInputs = rawActInputs || (rawActName ? "" : lastActivityAnticipatedInputs);
+    const activityPlannedParticipants = rawActParticipants || (rawActName ? "" : lastActivityPlannedParticipants);
+    const activityStartDate = rawActName ? normalizeDateStr(rawActStart, defaultStart) : lastActivityStart;
+    const activityEndDate = rawActName ? normalizeDateStr(rawActEnd, defaultEnd) : lastActivityEnd;
+    if (!outcomeName) {
+      previewRows.push({
+        rowNumber: excelRowNumber,
+        outcomeNumber: "",
+        outcomeName: "-",
+        outcomeDescription: "",
+        outcomeIndicator: rawOcInd,
+        outcomeDataSource: rawOcDataSource,
+        outcomeCumulative: rawOcCumulative,
+        outcomePlannedBreakdown: rawOcPlannedBreakdown,
+        outcomeReportingFrequency: rawOcReportingFreq,
+        outcomeBaseline: rawOcBase,
+        outcomeTarget: rawOcTarget,
+        outcomeUnit: rawOcUnit,
+        outputNumber: outputNumber || "",
+        outputName: outputName || "-",
+        outputDescription: outputDescription || "",
+        outputIndicator: rawOpInd,
+        outputDataSource: rawOpDataSource,
+        outputCumulative: rawOpCumulative,
+        outputPlannedBreakdown: rawOpPlannedBreakdown,
+        outputReportingFrequency: rawOpReportingFreq,
+        outputBaseline: rawOpBase,
+        outputTarget: rawOpTarget,
+        outputUnit: rawOpUnit,
+        activityNumber: activityNumber || "",
+        activityCode: rawActCode || "-",
+        activityName: activityName || "-",
+        activityDescription: "",
+        activityAnticipatedInputs: activityAnticipatedInputs || "",
+        activityPlannedParticipants: activityPlannedParticipants || "",
+        activityStartDate,
+        activityEndDate,
+        subActivityName: rawSubName,
+        subActivityPic: rawSubPic,
+        status: "invalid",
+        statusMessage: "Kolom Outcome wajib diisi",
+        isNewOutcome: false,
+        isNewOutcomeIndicator: false,
+        isNewOutput: false,
+        isNewOutputIndicator: false,
+        isNewActivity: false,
+        isNewSubActivity: false
+      });
+      return;
+    }
+    if (activityName && !outputName) {
+      previewRows.push({
+        rowNumber: excelRowNumber,
+        outcomeNumber,
+        outcomeName,
+        outcomeDescription,
+        outcomeIndicator: rawOcInd,
+        outcomeDataSource: rawOcDataSource,
+        outcomeCumulative: rawOcCumulative,
+        outcomePlannedBreakdown: rawOcPlannedBreakdown,
+        outcomeReportingFrequency: rawOcReportingFreq,
+        outcomeBaseline: rawOcBase,
+        outcomeTarget: rawOcTarget,
+        outcomeUnit: rawOcUnit,
+        outputNumber: "",
+        outputName: "-",
+        outputDescription: "",
+        outputIndicator: "",
+        outputDataSource: "",
+        outputCumulative: "",
+        outputPlannedBreakdown: "",
+        outputReportingFrequency: "",
+        outputBaseline: "",
+        outputTarget: "",
+        outputUnit: "",
+        activityNumber: activityNumber || "",
+        activityCode: rawActCode || "-",
+        activityName,
+        activityDescription,
+        activityAnticipatedInputs,
+        activityPlannedParticipants,
+        activityStartDate,
+        activityEndDate,
+        subActivityName: rawSubName,
+        subActivityPic: rawSubPic,
+        status: "invalid",
+        statusMessage: "Activity memerlukan kolom Output induk",
+        isNewOutcome: false,
+        isNewOutcomeIndicator: false,
+        isNewOutput: false,
+        isNewOutputIndicator: false,
+        isNewActivity: false,
+        isNewSubActivity: false
+      });
+      return;
+    }
+    if (rawSubName && !activityName) {
+      previewRows.push({
+        rowNumber: excelRowNumber,
+        outcomeNumber,
+        outcomeName,
+        outcomeDescription,
+        outcomeIndicator: rawOcInd,
+        outcomeDataSource: rawOcDataSource,
+        outcomeCumulative: rawOcCumulative,
+        outcomePlannedBreakdown: rawOcPlannedBreakdown,
+        outcomeReportingFrequency: rawOcReportingFreq,
+        outcomeBaseline: rawOcBase,
+        outcomeTarget: rawOcTarget,
+        outcomeUnit: rawOcUnit,
+        outputNumber: outputNumber || "",
+        outputName: outputName || "-",
+        outputDescription: outputDescription || "",
+        outputIndicator: rawOpInd,
+        outputDataSource: rawOpDataSource,
+        outputCumulative: rawOpCumulative,
+        outputPlannedBreakdown: rawOpPlannedBreakdown,
+        outputReportingFrequency: rawOpReportingFreq,
+        outputBaseline: rawOpBase,
+        outputTarget: rawOpTarget,
+        outputUnit: rawOpUnit,
+        activityNumber: "",
+        activityCode: "-",
+        activityName: "-",
+        activityDescription: "",
+        activityAnticipatedInputs: "",
+        activityPlannedParticipants: "",
+        activityStartDate,
+        activityEndDate,
+        subActivityName: rawSubName,
+        subActivityPic: rawSubPic,
+        status: "invalid",
+        statusMessage: "Sub-Activity memerlukan kolom Activity induk",
+        isNewOutcome: false,
+        isNewOutcomeIndicator: false,
+        isNewOutput: false,
+        isNewOutputIndicator: false,
+        isNewActivity: false,
+        isNewSubActivity: false
+      });
+      return;
+    }
+    const ocKey = getCanonicalOcKey(outcomeNumber, outcomeDescription, outcomeName);
+    if (!outcomeOrder.includes(ocKey)) {
+      outcomeOrder.push(ocKey);
+    }
+    const ocNum = outcomeOrder.indexOf(ocKey) + 1;
+    let opNum = 1;
+    const opNorm = outputName ? getCanonicalOpKey(outputNumber, outputDescription, outputName) : "";
+    const opKey = opNorm ? `${ocKey}__${opNorm}` : "";
+    if (opNorm) {
+      const opList = outputOrderByOutcome.get(ocKey) || [];
+      if (!opList.includes(opNorm)) {
+        opList.push(opNorm);
+        outputOrderByOutcome.set(ocKey, opList);
+      }
+      opNum = opList.indexOf(opNorm) + 1;
+    }
+    const ocIndKey = rawOcInd ? `${ocKey}__${rawOcInd.toLowerCase()}` : "";
+    const opIndKey = rawOpInd && opKey ? `${opKey}__${rawOpInd.toLowerCase()}` : "";
+    const actNorm = activityName ? getCanonicalActKey(activityNumber, activityName) : "";
+    const actKey = actNorm && opKey ? `${opKey}__${actNorm}` : "";
+    const subKey = rawSubName && actKey ? `${actKey}__${rawSubName.toLowerCase()}` : "";
+    const isNewOutcome = !existingOutcomeSet.has(ocKey) && !existingOutcomeSet.has(outcomeName.toLowerCase()) && !seenOutcomesInFile.has(ocKey);
+    const isNewOutcomeIndicator = Boolean(
+      rawOcInd && !existingOutcomeIndicatorSet.has(ocIndKey) && !seenOutcomeIndicatorsInFile.has(ocIndKey)
+    );
+    const isNewOutput = Boolean(
+      outputName && !existingOutputSet.has(opKey) && !seenOutputsInFile.has(opKey)
+    );
+    const isNewOutputIndicator = Boolean(
+      rawOpInd && opKey && !existingOutputIndicatorSet.has(opIndKey) && !seenOutputIndicatorsInFile.has(opIndKey)
+    );
+    const isNewActivity = Boolean(
+      activityName && !existingActivitySet.has(actKey) && !existingActivitySet.has(`${opKey}__${activityName.trim().toLowerCase()}`) && !seenActivitiesInFile.has(actKey)
+    );
+    const isNewSubActivity = Boolean(
+      rawSubName && activityName && !existingSubSet.has(subKey) && !seenSubsInFile.has(subKey)
+    );
+    let resolvedActCode = rawActCode || (rawActName ? lastActivityCode : lastActivityCode);
+    if (activityName && !resolvedActCode) {
+      const prevCount = actCountByOutput.get(opKey) || 0;
+      const nextActNum = isNewActivity ? prevCount + 1 : Math.max(1, prevCount);
+      if (isNewActivity) {
+        actCountByOutput.set(opKey, nextActNum);
+      }
+      resolvedActCode = `${ocNum}.${opNum}.${nextActNum}`;
+      lastActivityCode = resolvedActCode;
+    } else if (isNewActivity && opKey) {
+      actCountByOutput.set(opKey, (actCountByOutput.get(opKey) || 0) + 1);
+    }
+    seenOutcomesInFile.add(ocKey);
+    if (ocIndKey) seenOutcomeIndicatorsInFile.add(ocIndKey);
+    if (opKey) seenOutputsInFile.add(opKey);
+    if (opIndKey) seenOutputIndicatorsInFile.add(opIndKey);
+    if (actKey) seenActivitiesInFile.add(actKey);
+    if (subKey) seenSubsInFile.add(subKey);
+    const nothingNewInRow = !isNewOutcome && !isNewOutcomeIndicator && !isNewOutput && !isNewOutputIndicator && !isNewActivity && !isNewSubActivity;
+    const addedParts = [];
+    if (isNewOutcome) addedParts.push(outcomeNumber || `Outcome ${ocNum}`);
+    if (isNewOutcomeIndicator) addedParts.push("Indikator Outcome");
+    if (isNewOutput) addedParts.push(outputNumber || `Output ${ocNum}.${opNum}`);
+    if (isNewOutputIndicator) addedParts.push("Indikator Output");
+    if (isNewActivity) addedParts.push(activityNumber || `Activity ${ocNum}.${opNum}`);
+    if (isNewSubActivity) addedParts.push("Sub-Activity");
+    previewRows.push({
+      rowNumber: excelRowNumber,
+      outcomeNumber: outcomeNumber || `Outcome ${ocNum}`,
+      outcomeName,
+      outcomeDescription,
+      outcomeIndicator: rawOcInd,
+      outcomeDataSource: rawOcDataSource,
+      outcomeCumulative: rawOcCumulative || "Non cumulative",
+      outcomePlannedBreakdown: rawOcPlannedBreakdown,
+      outcomeReportingFrequency: rawOcReportingFreq || "Annual",
+      outcomeBaseline: rawOcBase,
+      outcomeTarget: rawOcTarget,
+      outcomeUnit: rawOcUnit,
+      outputNumber: outputNumber || (outputName ? `Output ${ocNum}.${opNum}` : ""),
+      outputName,
+      outputDescription,
+      outputIndicator: rawOpInd,
+      outputDataSource: rawOpDataSource,
+      outputCumulative: rawOpCumulative || "Non cumulative",
+      outputPlannedBreakdown: rawOpPlannedBreakdown,
+      outputReportingFrequency: rawOpReportingFreq || "Annual",
+      outputBaseline: rawOpBase,
+      outputTarget: rawOpTarget,
+      outputUnit: rawOpUnit,
+      activityNumber: activityNumber || (activityName ? `Activity ${resolvedActCode || `${ocNum}.${opNum}`}` : ""),
+      activityCode: resolvedActCode,
+      activityName,
+      activityDescription,
+      activityAnticipatedInputs,
+      activityPlannedParticipants,
+      activityStartDate,
+      activityEndDate,
+      subActivityName: rawSubName,
+      subActivityPic: rawSubPic,
+      status: nothingNewInRow ? "duplicate" : "valid",
+      statusMessage: nothingNewInRow ? "Sudah terdaftar di Hirarki Program (Dilewati)" : `Siap Diimpor: ${addedParts.join(" \u2192 ")}`,
+      isNewOutcome,
+      isNewOutcomeIndicator,
+      isNewOutput,
+      isNewOutputIndicator,
+      isNewActivity,
+      isNewSubActivity
+    });
+  });
+  return {
+    sheetName: chosenSheetName,
+    sheetCount: workbook.SheetNames.length,
+    rawRowCount: extracted.rows.length,
+    headerMatched: extracted.headerMatched,
+    detectedHeaders: extracted.detectedHeaders,
+    rows: previewRows
+  };
+}
+function buildHierarchyImportPlan(params) {
+  const {
+    validRows,
+    program,
+    existingOutcomes,
+    existingOutputs,
+    existingActivities,
+    existingSubActivities
+  } = params;
+  const nowIso = params.nowIso || (/* @__PURE__ */ new Date()).toISOString();
+  let seqCounter = 0;
+  const makeId = (prefix) => {
+    seqCounter += 1;
+    return `${prefix}-${Date.now()}-${seqCounter}-${Math.random().toString(36).slice(2, 6)}`;
+  };
+  const outcomeById = /* @__PURE__ */ new Map();
+  const outcomeIdByKey = /* @__PURE__ */ new Map();
+  const touchedOutcomeIds = /* @__PURE__ */ new Set();
+  const outputById = /* @__PURE__ */ new Map();
+  const outputIdByKey = /* @__PURE__ */ new Map();
+  const touchedOutputIds = /* @__PURE__ */ new Set();
+  const activityById = /* @__PURE__ */ new Map();
+  const activityIdByKey = /* @__PURE__ */ new Map();
+  const touchedActivityIds = /* @__PURE__ */ new Set();
+  const subActivityById = /* @__PURE__ */ new Map();
+  const subActivityIdByKey = /* @__PURE__ */ new Map();
+  const touchedSubActivityIds = /* @__PURE__ */ new Set();
+  const expandedOutcomeIds = /* @__PURE__ */ new Set();
+  const expandedOutputIds = /* @__PURE__ */ new Set();
+  const progOutcomes = existingOutcomes.filter((o) => o.programId === program.id);
+  progOutcomes.forEach((oc) => {
+    const clonedOc = {
+      ...oc,
+      programId: program.id,
+      indicators: Array.isArray(oc.indicators) ? [...oc.indicators] : []
+    };
+    outcomeById.set(clonedOc.id, clonedOc);
+    const ocKey = getCanonicalOcKey(
+      clonedOc.outcomeNumber || "",
+      clonedOc.description || "",
+      clonedOc.name
+    );
+    outcomeIdByKey.set(ocKey, clonedOc.id);
+    outcomeIdByKey.set(clonedOc.name.trim().toLowerCase(), clonedOc.id);
+    if (clonedOc.outcomeNumber) {
+      outcomeIdByKey.set(clonedOc.outcomeNumber.trim().toLowerCase(), clonedOc.id);
+    }
+    existingOutputs.filter((op) => op.outcomeId === clonedOc.id).forEach((op) => {
+      const clonedOp = {
+        ...op,
+        programId: program.id,
+        outcomeId: clonedOc.id,
+        indicators: Array.isArray(op.indicators) ? [...op.indicators] : []
+      };
+      outputById.set(clonedOp.id, clonedOp);
+      const opNorm = getCanonicalOpKey(
+        clonedOp.outputNumber || "",
+        clonedOp.description || "",
+        clonedOp.name
+      );
+      const opKey = `${ocKey}__${opNorm}`;
+      outputIdByKey.set(opKey, clonedOp.id);
+      outputIdByKey.set(`${ocKey}__${clonedOp.name.trim().toLowerCase()}`, clonedOp.id);
+      if (clonedOp.outputNumber) {
+        outputIdByKey.set(`${ocKey}__${clonedOp.outputNumber.trim().toLowerCase()}`, clonedOp.id);
+      }
+      existingActivities.filter((a) => a.outputId === clonedOp.id).forEach((act) => {
+        const clonedAct = {
+          ...act,
+          programId: program.id,
+          outcomeId: clonedOc.id,
+          outputId: clonedOp.id
+        };
+        activityById.set(clonedAct.id, clonedAct);
+        const actNorm = getCanonicalActKey(clonedAct.activityNumber || "", clonedAct.name);
+        const actKey = `${opKey}__${actNorm}`;
+        activityIdByKey.set(actKey, clonedAct.id);
+        activityIdByKey.set(`${opKey}__${clonedAct.name.trim().toLowerCase()}`, clonedAct.id);
+        existingSubActivities.filter((s) => s.activityId === clonedAct.id).forEach((sub) => {
+          const clonedSub = {
+            ...sub,
+            activityId: clonedAct.id
+          };
+          subActivityById.set(clonedSub.id, clonedSub);
+          subActivityIdByKey.set(
+            `${actKey}__${clonedSub.name.trim().toLowerCase()}`,
+            clonedSub.id
+          );
+        });
+      });
+    });
+  });
+  let createdOutcomesCount = 0;
+  let updatedOutcomesCount = 0;
+  let addedOutcomeIndicatorsCount = 0;
+  let createdOutputsCount = 0;
+  let updatedOutputsCount = 0;
+  let addedOutputIndicatorsCount = 0;
+  let createdActivitiesCount = 0;
+  let updatedActivitiesCount = 0;
+  let createdSubActivitiesCount = 0;
+  let outcomeAutoIdx = progOutcomes.length;
+  for (const row of validRows) {
+    const ocKey = getCanonicalOcKey(row.outcomeNumber, row.outcomeDescription, row.outcomeName);
+    let outcomeId = outcomeIdByKey.get(ocKey) || outcomeIdByKey.get(row.outcomeName.trim().toLowerCase()) || (row.outcomeNumber ? outcomeIdByKey.get(row.outcomeNumber.trim().toLowerCase()) : void 0);
+    const buildOcInd = () => {
+      if (!row.outcomeIndicator || !row.outcomeIndicator.trim()) return null;
+      return {
+        id: makeId("ind-oc"),
+        name: row.outcomeIndicator.trim(),
+        description: "",
+        dataSource: row.outcomeDataSource || "Laporan MEAL",
+        cumulativeType: row.outcomeCumulative || "Non cumulative",
+        plannedDataBreakdown: row.outcomePlannedBreakdown || "",
+        reportingFrequency: row.outcomeReportingFrequency || "Annual",
+        baseline: row.outcomeBaseline || "TBA",
+        target: row.outcomeTarget || "",
+        endOfProjectGoal: row.outcomeTarget || "",
+        unit: row.outcomeUnit || "",
+        verificationMethod: row.outcomeDataSource || "Laporan MEAL"
+      };
+    };
+    if (!outcomeId) {
+      outcomeAutoIdx += 1;
+      outcomeId = makeId("outc");
+      const ocNumber = row.outcomeNumber || `Outcome ${outcomeAutoIdx}`;
+      const indicators = [];
+      const firstInd = buildOcInd();
+      if (firstInd) {
+        indicators.push(firstInd);
+        addedOutcomeIndicatorsCount += 1;
+      }
+      const newOc = {
+        id: outcomeId,
+        programId: program.id,
+        outcomeNumber: ocNumber,
+        code: ocNumber,
+        name: row.outcomeName.trim(),
+        projectName: program.name,
+        description: row.outcomeDescription || row.outcomeName.trim(),
+        indicators,
+        status: "Belum Dimulai",
+        createdAt: nowIso,
+        updatedAt: nowIso
+      };
+      outcomeById.set(outcomeId, newOc);
+      outcomeIdByKey.set(ocKey, outcomeId);
+      outcomeIdByKey.set(row.outcomeName.trim().toLowerCase(), outcomeId);
+      if (row.outcomeNumber) {
+        outcomeIdByKey.set(row.outcomeNumber.trim().toLowerCase(), outcomeId);
+      }
+      touchedOutcomeIds.add(outcomeId);
+      expandedOutcomeIds.add(outcomeId);
+      createdOutcomesCount += 1;
+    } else {
+      expandedOutcomeIds.add(outcomeId);
+      const existingOc = outcomeById.get(outcomeId);
+      const nextInd = buildOcInd();
+      if (nextInd) {
+        const alreadyHas = existingOc.indicators.some(
+          (i) => i.name.trim().toLowerCase() === nextInd.name.toLowerCase()
+        );
+        if (!alreadyHas) {
+          existingOc.indicators = [...existingOc.indicators, nextInd];
+          existingOc.updatedAt = nowIso;
+          if (!touchedOutcomeIds.has(outcomeId)) {
+            updatedOutcomesCount += 1;
+          }
+          touchedOutcomeIds.add(outcomeId);
+          addedOutcomeIndicatorsCount += 1;
+        }
+      }
+    }
+    if (row.outputName && outcomeId) {
+      const opNorm = getCanonicalOpKey(row.outputNumber, row.outputDescription, row.outputName);
+      const opKey = `${ocKey}__${opNorm}`;
+      let outputId = outputIdByKey.get(opKey) || outputIdByKey.get(`${ocKey}__${row.outputName.trim().toLowerCase()}`) || (row.outputNumber ? outputIdByKey.get(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`) : void 0);
+      const buildOpInd = () => {
+        if (!row.outputIndicator || !row.outputIndicator.trim()) return null;
+        return {
+          id: makeId("ind-op"),
+          name: row.outputIndicator.trim(),
+          description: "",
+          dataSource: row.outputDataSource || "Activity report",
+          cumulativeType: row.outputCumulative || "Non cumulative",
+          plannedDataBreakdown: row.outputPlannedBreakdown || "",
+          reportingFrequency: row.outputReportingFrequency || "Annual",
+          baseline: row.outputBaseline || "TBA",
+          target: row.outputTarget || "",
+          endOfProjectGoal: row.outputTarget || "",
+          unit: row.outputUnit || "",
+          verificationMethod: row.outputDataSource || "Activity report"
+        };
+      };
+      if (!outputId) {
+        outputId = makeId("outp");
+        const siblingCount = Array.from(outputById.values()).filter(
+          (o) => o.outcomeId === outcomeId
+        ).length;
+        const parentOc = outcomeById.get(outcomeId);
+        const ocDigits = parentOc?.outcomeNumber?.match(/\d+/)?.[0] || String(outcomeAutoIdx || 1);
+        const opNumber = row.outputNumber || `Output ${ocDigits}.${siblingCount + 1}`;
+        const indicators = [];
+        const firstOpInd = buildOpInd();
+        if (firstOpInd) {
+          indicators.push(firstOpInd);
+          addedOutputIndicatorsCount += 1;
+        }
+        const newOp = {
+          id: outputId,
+          programId: program.id,
+          outcomeId,
+          outputNumber: opNumber,
+          code: opNumber,
+          name: row.outputName.trim(),
+          description: row.outputDescription || row.outputName.trim(),
+          indicators,
+          status: "Belum Dimulai",
+          createdAt: nowIso,
+          updatedAt: nowIso
+        };
+        outputById.set(outputId, newOp);
+        outputIdByKey.set(opKey, outputId);
+        outputIdByKey.set(`${ocKey}__${row.outputName.trim().toLowerCase()}`, outputId);
+        if (row.outputNumber) {
+          outputIdByKey.set(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`, outputId);
+        }
+        touchedOutputIds.add(outputId);
+        expandedOutputIds.add(outputId);
+        createdOutputsCount += 1;
+      } else {
+        expandedOutputIds.add(outputId);
+        const existingOp = outputById.get(outputId);
+        const nextOpInd = buildOpInd();
+        if (nextOpInd) {
+          const alreadyHas = existingOp.indicators.some(
+            (i) => i.name.trim().toLowerCase() === nextOpInd.name.toLowerCase()
+          );
+          if (!alreadyHas) {
+            existingOp.indicators = [...existingOp.indicators, nextOpInd];
+            existingOp.updatedAt = nowIso;
+            if (!touchedOutputIds.has(outputId)) {
+              updatedOutputsCount += 1;
+            }
+            touchedOutputIds.add(outputId);
+            addedOutputIndicatorsCount += 1;
+          }
+        }
+      }
+      if (row.activityName && outputId) {
+        const actNorm = getCanonicalActKey(row.activityNumber, row.activityName);
+        const actKey = `${opKey}__${actNorm}`;
+        let activityId = activityIdByKey.get(actKey) || activityIdByKey.get(`${opKey}__${row.activityName.trim().toLowerCase()}`);
+        if (!activityId) {
+          activityId = makeId("act");
+          const siblingActCount = Array.from(activityById.values()).filter(
+            (a) => a.outputId === outputId
+          ).length;
+          const parentOp = outputById.get(outputId);
+          const opDigits = parentOp?.outputNumber?.match(/[\d.]+/)?.[0] || "1.1";
+          const resolvedCode = row.activityCode && row.activityCode !== "-" ? row.activityCode : `${opDigits}.${siblingActCount + 1}`;
+          const resolvedActNum = row.activityNumber || `Activity ${resolvedCode}`;
+          const newAct = {
+            id: activityId,
+            programId: program.id,
+            outcomeId,
+            outputId,
+            activityNumber: resolvedActNum,
+            code: resolvedCode,
+            name: row.activityName.trim(),
+            description: row.activityDescription || "",
+            anticipatedInputs: row.activityAnticipatedInputs || "",
+            plannedParticipantsBreakdown: row.activityPlannedParticipants || "",
+            startDate: row.activityStartDate || program.startDate || nowIso.slice(0, 10),
+            endDate: row.activityEndDate || program.endDate || nowIso.slice(0, 10),
+            status: "Belum Dimulai",
+            createdAt: nowIso,
+            updatedAt: nowIso
+          };
+          activityById.set(activityId, newAct);
+          activityIdByKey.set(actKey, activityId);
+          activityIdByKey.set(`${opKey}__${row.activityName.trim().toLowerCase()}`, activityId);
+          touchedActivityIds.add(activityId);
+          createdActivitiesCount += 1;
+        } else if (row.activityDescription || row.activityAnticipatedInputs || row.activityPlannedParticipants) {
+          const existingAct = activityById.get(activityId);
+          let changed = false;
+          if (row.activityDescription && row.activityDescription !== existingAct.description) {
+            existingAct.description = row.activityDescription;
+            changed = true;
+          }
+          if (row.activityAnticipatedInputs && row.activityAnticipatedInputs !== existingAct.anticipatedInputs) {
+            existingAct.anticipatedInputs = row.activityAnticipatedInputs;
+            changed = true;
+          }
+          if (row.activityPlannedParticipants && row.activityPlannedParticipants !== existingAct.plannedParticipantsBreakdown) {
+            existingAct.plannedParticipantsBreakdown = row.activityPlannedParticipants;
+            changed = true;
+          }
+          if (changed) {
+            existingAct.updatedAt = nowIso;
+            if (!touchedActivityIds.has(activityId)) {
+              updatedActivitiesCount += 1;
+            }
+            touchedActivityIds.add(activityId);
+          }
+        }
+        if (row.subActivityName && activityId) {
+          const subKey = `${actKey}__${row.subActivityName.trim().toLowerCase()}`;
+          const existingSubId = subActivityIdByKey.get(subKey);
+          if (!existingSubId) {
+            const subId = makeId("sub");
+            const siblingSubCount = Array.from(subActivityById.values()).filter(
+              (s) => s.activityId === activityId
+            ).length;
+            const parentAct = activityById.get(activityId);
+            const leadingSubCode = row.subActivityName.trim().match(/^(\d+(?:\.\d+)+)\b/)?.[1];
+            const resolvedSubCode = leadingSubCode || `${parentAct?.code || "1.1.1"}.${siblingSubCount + 1}`;
+            const newSub = {
+              id: subId,
+              programId: program.id,
+              outcomeId,
+              outputId,
+              activityId,
+              code: resolvedSubCode,
+              name: row.subActivityName.trim(),
+              description: "",
+              picName: row.subActivityPic || "",
+              status: "Belum Dimulai",
+              createdAt: nowIso,
+              updatedAt: nowIso
+            };
+            subActivityById.set(subId, newSub);
+            subActivityIdByKey.set(subKey, subId);
+            touchedSubActivityIds.add(subId);
+            createdSubActivitiesCount += 1;
+          }
+        }
+      }
+    }
+  }
+  return {
+    outcomesToUpsert: Array.from(touchedOutcomeIds).map((id) => outcomeById.get(id)),
+    outputsToUpsert: Array.from(touchedOutputIds).map((id) => outputById.get(id)),
+    activitiesToUpsert: Array.from(touchedActivityIds).map((id) => activityById.get(id)),
+    subActivitiesToUpsert: Array.from(touchedSubActivityIds).map((id) => subActivityById.get(id)),
+    createdOutcomesCount,
+    updatedOutcomesCount,
+    addedOutcomeIndicatorsCount,
+    createdOutputsCount,
+    updatedOutputsCount,
+    addedOutputIndicatorsCount,
+    createdActivitiesCount,
+    updatedActivitiesCount,
+    createdSubActivitiesCount,
+    expandedOutcomeIds: Array.from(expandedOutcomeIds),
+    expandedOutputIds: Array.from(expandedOutputIds)
+  };
+}
+
 // server.ts
 var __filename = fileURLToPath2(import.meta.url);
 var __dirname = path3.dirname(__filename);
+var MAX_HIERARCHY_EXCEL_BYTES = 5 * 1024 * 1024;
+async function extractExcelUploadFromRequest(req) {
+  const contentType = String(req.headers["content-type"] || "");
+  if (contentType.toLowerCase().includes("application/json")) {
+    const rawName = String(req.body?.fileName || "").trim();
+    const rawB64 = String(req.body?.fileBase64 || "").trim();
+    if (!rawName || !rawB64) {
+      throw Object.assign(new Error("Missing fileName or fileBase64 in JSON upload."), {
+        httpStatus: 400,
+        errorCategory: "UPLOAD_ERROR",
+        userMessage: "[UPLOAD ERROR] File Excel belum dipilih atau gagal dikirim ke server."
+      });
+    }
+    const cleanB64 = rawB64.replace(/^data:[^;]+;base64,/, "");
+    const buffer = Buffer.from(cleanB64, "base64");
+    if (buffer.byteLength === 0) {
+      throw Object.assign(new Error("Uploaded Excel file is 0 bytes."), {
+        httpStatus: 400,
+        errorCategory: "UPLOAD_ERROR",
+        userMessage: "[UPLOAD ERROR] File Excel kosong (0 byte)."
+      });
+    }
+    if (buffer.byteLength > MAX_HIERARCHY_EXCEL_BYTES) {
+      throw Object.assign(new Error("Uploaded Excel file exceeds 5 MB limit."), {
+        httpStatus: 400,
+        errorCategory: "UPLOAD_ERROR",
+        userMessage: "[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB)."
+      });
+    }
+    return { fileName: rawName, buffer };
+  }
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;,\s]+))/i);
+  if (!contentType.toLowerCase().includes("multipart/form-data") || !boundaryMatch) {
+    throw Object.assign(new Error(`Unsupported upload Content-Type: ${contentType}`), {
+      httpStatus: 400,
+      errorCategory: "UPLOAD_ERROR",
+      userMessage: "[UPLOAD ERROR] Format pengiriman file tidak valid. Silakan pilih ulang file Excel (.xlsx, .xls, atau .csv)."
+    });
+  }
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+  const maxStreamBytes = MAX_HIERARCHY_EXCEL_BYTES + 256 * 1024;
+  const rawBody = await new Promise((resolve, reject) => {
+    const chunks = [];
+    let received = 0;
+    let settled = false;
+    req.on("data", (chunk) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      received += buf.length;
+      if (received > maxStreamBytes) {
+        settled = true;
+        reject(
+          Object.assign(new Error("Multipart upload exceeded 5 MB limit."), {
+            httpStatus: 400,
+            errorCategory: "UPLOAD_ERROR",
+            userMessage: "[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB)."
+          })
+        );
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (streamErr) => {
+      if (settled) return;
+      settled = true;
+      reject(
+        Object.assign(streamErr, {
+          httpStatus: 400,
+          errorCategory: "UPLOAD_ERROR",
+          userMessage: "[UPLOAD ERROR] Koneksi terputus saat mengunggah file Excel ke server."
+        })
+      );
+    });
+  });
+  const delimiter = Buffer.from(`--${boundary}`, "latin1");
+  const headerEndMarker = Buffer.from("\r\n\r\n", "latin1");
+  let searchPos = 0;
+  while (searchPos < rawBody.length) {
+    const partStart = rawBody.indexOf(delimiter, searchPos);
+    if (partStart === -1) break;
+    const afterDelimiter = partStart + delimiter.length;
+    if (rawBody[afterDelimiter] === 45 && rawBody[afterDelimiter + 1] === 45) {
+      break;
+    }
+    const headerStart = rawBody[afterDelimiter] === 13 && rawBody[afterDelimiter + 1] === 10 ? afterDelimiter + 2 : afterDelimiter;
+    const headerEnd = rawBody.indexOf(headerEndMarker, headerStart);
+    if (headerEnd === -1) break;
+    const rawHeaders = rawBody.subarray(headerStart, headerEnd).toString("utf8");
+    const contentStart = headerEnd + headerEndMarker.length;
+    const nextPartBoundary = rawBody.indexOf(delimiter, contentStart);
+    if (nextPartBoundary === -1) break;
+    let contentEnd = nextPartBoundary;
+    if (contentEnd >= 2 && rawBody[contentEnd - 2] === 13 && rawBody[contentEnd - 1] === 10) {
+      contentEnd -= 2;
+    }
+    const filenameMatch = rawHeaders.match(/filename="([^"]*)"/i);
+    if (filenameMatch) {
+      const fileName = filenameMatch[1].trim();
+      const fileSlice = Buffer.from(rawBody.subarray(contentStart, contentEnd));
+      if (!fileName) {
+        throw Object.assign(new Error("Empty filename in multipart upload."), {
+          httpStatus: 400,
+          errorCategory: "UPLOAD_ERROR",
+          userMessage: "[UPLOAD ERROR] Nama file Excel tidak ditemukan pada unggahan."
+        });
+      }
+      if (fileSlice.byteLength === 0) {
+        throw Object.assign(new Error("Uploaded Excel file buffer is 0 bytes."), {
+          httpStatus: 400,
+          errorCategory: "UPLOAD_ERROR",
+          userMessage: "[UPLOAD ERROR] File Excel kosong (0 byte)."
+        });
+      }
+      if (fileSlice.byteLength > MAX_HIERARCHY_EXCEL_BYTES) {
+        throw Object.assign(new Error("Uploaded Excel file exceeds 5 MB limit."), {
+          httpStatus: 400,
+          errorCategory: "UPLOAD_ERROR",
+          userMessage: "[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB)."
+        });
+      }
+      return { fileName, buffer: fileSlice };
+    }
+    searchPos = nextPartBoundary;
+  }
+  throw Object.assign(new Error("No file field found in multipart/form-data payload."), {
+    httpStatus: 400,
+    errorCategory: "UPLOAD_ERROR",
+    userMessage: "[UPLOAD ERROR] File Excel tidak ditemukan pada form unggahan."
+  });
+}
 function getNextTorSequenceForYear(data, targetYear) {
   let maxSeq = 0;
   for (const t of data.tors || []) {
@@ -6303,10 +7904,17 @@ async function startServer() {
             originalSend(body);
           }).catch((commitErr) => {
             const errStatus = Number(commitErr?.httpStatus || commitErr?.status || 500);
-            const errMsg = commitErr?.userMessage || "Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.";
+            const errMsg = commitErr?.userMessage || "[DATABASE WRITE ERROR] Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.";
             res.status(errStatus);
             res.setHeader("Content-Type", "application/json; charset=utf-8");
-            originalSend(JSON.stringify({ error: errMsg }));
+            originalSend(
+              JSON.stringify({
+                error: errMsg,
+                errorCategory: commitErr?.errorCategory || "DATABASE_WRITE_ERROR",
+                failedTable: commitErr?.failedTable || void 0,
+                mysqlErrorCode: commitErr?.code || void 0
+              })
+            );
           });
           return res;
         }
@@ -7567,11 +9175,18 @@ async function startServer() {
       return res.status(400).json({ error: "Program induk yang dipilih tidak ditemukan" });
     }
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const existingProgOutcomeCount = (data.outcomes || []).filter(
+      (o) => o.programId === program.id
+    ).length;
+    const resolvedOutcomeNumber = cleanNumber || cleanName.match(/^(Outcome\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, " ").trim() || `Outcome ${existingProgOutcomeCount + 1}`;
+    const resolvedCode = typeof req.body?.code === "string" && req.body.code.trim() || resolvedOutcomeNumber;
     const newOutcome = {
       id: `out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       programId: program.id,
       programName: program.name,
-      outcomeNumber: cleanNumber || void 0,
+      outcomeNumber: resolvedOutcomeNumber,
+      code: resolvedCode,
       name: cleanName,
       description: cleanDesc || cleanName,
       picId: picUser.id,
@@ -7579,7 +9194,8 @@ async function startServer() {
       projectName: program.name,
       status: status || "Belum Dimulai",
       indicators: Array.isArray(indicators) ? indicators : [],
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
     db.update((d) => {
       d.outcomes.push(newOutcome);
@@ -7592,7 +9208,7 @@ async function startServer() {
         entityType: "PROGRAM",
         entityId: newOutcome.id,
         details: `Membuat Outcome baru: ${newOutcome.name} di bawah Program: ${program.name}`,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        timestamp: nowIso
       });
     });
     res.status(201).json(newOutcome);
@@ -7603,9 +9219,18 @@ async function startServer() {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Outcome" });
     }
     const { id } = req.params;
-    const { outcomeNumber, name, description, picId, projectName, indicators, status } = req.body;
+    const { outcomeNumber, code, name, description, picId, projectName, indicators, status } = req.body;
     const data = db.getData();
+    const existingOutcome = (data.outcomes || []).find((o) => o.id === id);
+    if (!existingOutcome) {
+      return res.status(404).json({ error: "Outcome tidak ditemukan" });
+    }
+    const parentProgram = (data.programs || []).find((p) => p.id === existingOutcome.programId);
+    if (!parentProgram) {
+      return res.status(400).json({ error: "Program induk dari Outcome ini tidak ditemukan" });
+    }
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     let updated = null;
     db.update((d) => {
       const idx = d.outcomes.findIndex((o) => o.id === id);
@@ -7613,18 +9238,33 @@ async function startServer() {
         const nextNum = outcomeNumber !== void 0 ? String(outcomeNumber).trim() : d.outcomes[idx].outcomeNumber;
         const nextDesc = description !== void 0 ? String(description).trim() : d.outcomes[idx].description;
         const nextName = name !== void 0 && String(name).trim() ? String(name).trim() : nextNum && nextDesc ? `${nextNum}: ${nextDesc}` : d.outcomes[idx].name;
+        const nextCode = typeof code === "string" && code.trim() || nextNum || d.outcomes[idx].code || void 0;
         d.outcomes[idx] = {
           ...d.outcomes[idx],
+          programId: parentProgram.id,
           outcomeNumber: nextNum || void 0,
+          code: nextCode,
           name: nextName,
           description: nextDesc ?? d.outcomes[idx].description,
           picId: picUser ? picUser.id : d.outcomes[idx].picId,
           picName: picUser ? picUser.name : d.outcomes[idx].picName,
-          projectName: projectName ?? d.outcomes[idx].projectName,
+          projectName: projectName ?? d.outcomes[idx].projectName ?? parentProgram.name,
           indicators: indicators ?? d.outcomes[idx].indicators,
-          status: status ?? d.outcomes[idx].status
+          status: status ?? d.outcomes[idx].status,
+          updatedAt: nowIso
         };
         updated = d.outcomes[idx];
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: "Perubahan Outcome",
+          entityType: "PROGRAM",
+          entityId: id,
+          details: `Memperbarui Outcome: ${nextName}`,
+          timestamp: nowIso
+        });
       }
     });
     if (!updated) return res.status(404).json({ error: "Outcome tidak ditemukan" });
@@ -7664,7 +9304,7 @@ async function startServer() {
     if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Output" });
     }
-    const { outcomeId, outputNumber, name, description, picId, indicators, status } = req.body;
+    const { outcomeId, outputNumber, code, name, description, picId, indicators, status } = req.body;
     const cleanNumber = String(outputNumber || "").trim();
     const cleanDesc = String(description || "").trim();
     const cleanName = String(name || "").trim() || (cleanNumber && cleanDesc ? `${cleanNumber}: ${cleanDesc}` : cleanDesc || cleanNumber);
@@ -7672,25 +9312,47 @@ async function startServer() {
       return res.status(400).json({ error: "Outcome dan Nomor/Deskripsi Output wajib diisi" });
     }
     const data = db.getData();
-    const outcomeExists = data.outcomes.some((o) => o.id === outcomeId);
-    if (!outcomeExists) {
-      return res.status(400).json({ error: "Outcome yang dipilih tidak valid" });
+    const parentOutcome = data.outcomes.find((o) => o.id === outcomeId);
+    if (!parentOutcome) {
+      return res.status(400).json({ error: "Outcome induk yang dipilih tidak ditemukan" });
+    }
+    if (!parentOutcome.programId) {
+      return res.status(400).json({ error: "Outcome induk belum terhubung ke Program yang valid" });
     }
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const siblingCount = (data.outputs || []).filter((o) => o.outcomeId === outcomeId).length;
+    const ocDigits = parentOutcome.outcomeNumber?.match(/\d+/)?.[0] || "1";
+    const resolvedOutputNumber = cleanNumber || cleanName.match(/^(Output\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, " ").trim() || `Output ${ocDigits}.${siblingCount + 1}`;
+    const resolvedCode = typeof code === "string" && code.trim() || resolvedOutputNumber;
     const newOutput = {
       id: `outp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      outcomeId,
-      outputNumber: cleanNumber || void 0,
+      programId: parentOutcome.programId,
+      outcomeId: parentOutcome.id,
+      outputNumber: resolvedOutputNumber,
+      code: resolvedCode,
       name: cleanName,
       description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
       status: status || "Belum Dimulai",
       indicators: Array.isArray(indicators) ? indicators : [],
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
     db.update((d) => {
       d.outputs.push(newOutput);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Pembuatan Output",
+        entityType: "PROGRAM",
+        entityId: newOutput.id,
+        details: `Membuat Output baru: ${newOutput.name} di bawah Outcome: ${parentOutcome.name}`,
+        timestamp: nowIso
+      });
     });
     res.status(201).json(newOutput);
   });
@@ -7700,9 +9362,19 @@ async function startServer() {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Output" });
     }
     const { id } = req.params;
-    const { outputNumber, name, description, picId, indicators, status, outcomeId } = req.body;
+    const { outputNumber, code, name, description, picId, indicators, status, outcomeId } = req.body;
     const data = db.getData();
+    const existingOutput = data.outputs.find((o) => o.id === id);
+    if (!existingOutput) {
+      return res.status(404).json({ error: "Output tidak ditemukan" });
+    }
+    const targetOutcomeId = outcomeId ?? existingOutput.outcomeId;
+    const parentOutcome = data.outcomes.find((o) => o.id === targetOutcomeId);
+    if (!parentOutcome) {
+      return res.status(400).json({ error: "Outcome induk dari Output ini tidak ditemukan" });
+    }
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     let updated = null;
     db.update((d) => {
       const idx = d.outputs.findIndex((o) => o.id === id);
@@ -7710,18 +9382,33 @@ async function startServer() {
         const nextNum = outputNumber !== void 0 ? String(outputNumber).trim() : d.outputs[idx].outputNumber;
         const nextDesc = description !== void 0 ? String(description).trim() : d.outputs[idx].description;
         const nextName = name !== void 0 && String(name).trim() ? String(name).trim() : nextNum && nextDesc ? `${nextNum}: ${nextDesc}` : d.outputs[idx].name;
+        const nextCode = typeof code === "string" && code.trim() || nextNum || d.outputs[idx].code || void 0;
         d.outputs[idx] = {
           ...d.outputs[idx],
-          outcomeId: outcomeId ?? d.outputs[idx].outcomeId,
+          programId: parentOutcome.programId,
+          outcomeId: parentOutcome.id,
           outputNumber: nextNum || void 0,
+          code: nextCode,
           name: nextName,
           description: nextDesc ?? d.outputs[idx].description,
           picId: picUser ? picUser.id : d.outputs[idx].picId,
           picName: picUser ? picUser.name : d.outputs[idx].picName,
           indicators: indicators ?? d.outputs[idx].indicators,
-          status: status ?? d.outputs[idx].status
+          status: status ?? d.outputs[idx].status,
+          updatedAt: nowIso
         };
         updated = d.outputs[idx];
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: "Perubahan Output",
+          entityType: "PROGRAM",
+          entityId: id,
+          details: `Memperbarui Output: ${nextName}`,
+          timestamp: nowIso
+        });
       }
     });
     if (!updated) return res.status(404).json({ error: "Output tidak ditemukan" });
@@ -7742,6 +9429,17 @@ async function startServer() {
     }
     db.update((d) => {
       d.outputs = d.outputs.filter((o) => o.id !== id);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Penghapusan Output",
+        entityType: "PROGRAM",
+        entityId: id,
+        details: `Menghapus Output ID: ${id}`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
     });
     res.json({ message: "Output berhasil dihapus" });
   });
@@ -7767,29 +9465,55 @@ async function startServer() {
       return res.status(400).json({ error: "Output dan Nama Activity wajib diisi" });
     }
     const data = db.getData();
-    const outputExists = data.outputs.some((o) => o.id === outputId);
-    if (!outputExists) {
-      return res.status(400).json({ error: "Output yang dipilih tidak valid" });
+    const parentOutput = data.outputs.find((o) => o.id === outputId);
+    if (!parentOutput) {
+      return res.status(400).json({ error: "Output induk yang dipilih tidak ditemukan" });
+    }
+    const parentOutcome = data.outcomes.find((oc) => oc.id === parentOutput.outcomeId);
+    const resolvedProgramId = parentOutput.programId || parentOutcome?.programId || "";
+    if (!resolvedProgramId || !parentOutput.outcomeId) {
+      return res.status(400).json({
+        error: "Relasi Program / Outcome induk pada Output ini belum lengkap"
+      });
     }
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const siblingActCount = (data.activities || []).filter((a) => a.outputId === outputId).length;
+    const opDigits = parentOutput.outputNumber?.match(/[\d.]+/)?.[0] || "1.1";
+    const resolvedActNumber = typeof activityNumber === "string" && activityNumber.trim() || String(name).match(/^(Activity\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, " ").trim() || `Activity ${opDigits}.${siblingActCount + 1}`;
+    const resolvedCode = typeof code === "string" && code.trim() || `${opDigits}.${siblingActCount + 1}`;
     const newActivity = {
       id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      outputId,
-      activityNumber: typeof activityNumber === "string" && activityNumber.trim() ? activityNumber.trim() : void 0,
-      name,
-      code: typeof code === "string" && code.trim() ? code.trim() : void 0,
+      programId: resolvedProgramId,
+      outcomeId: parentOutput.outcomeId,
+      outputId: parentOutput.id,
+      activityNumber: resolvedActNumber,
+      name: String(name).trim(),
+      code: resolvedCode,
       description: description || "",
       anticipatedInputs: typeof anticipatedInputs === "string" ? anticipatedInputs.trim() : void 0,
       plannedParticipantsBreakdown: typeof plannedParticipantsBreakdown === "string" ? plannedParticipantsBreakdown.trim() : void 0,
       picId: picUser.id,
       picName: picUser.name,
-      startDate: startDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
-      endDate: endDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+      startDate: startDate || nowIso.slice(0, 10),
+      endDate: endDate || nowIso.slice(0, 10),
       status: status || "Belum Dimulai",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
     db.update((d) => {
       d.activities.push(newActivity);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Pembuatan Activity",
+        entityType: "PROGRAM",
+        entityId: newActivity.id,
+        details: `Membuat Activity baru: ${newActivity.name} di bawah Output: ${parentOutput.name}`,
+        timestamp: nowIso
+      });
     });
     res.status(201).json(newActivity);
   });
@@ -7813,16 +9537,32 @@ async function startServer() {
       outputId
     } = req.body;
     const data = db.getData();
+    const existingAct = data.activities.find((a) => a.id === id);
+    if (!existingAct) {
+      return res.status(404).json({ error: "Activity tidak ditemukan" });
+    }
+    const targetOutputId = outputId ?? existingAct.outputId;
+    const parentOutput = data.outputs.find((o) => o.id === targetOutputId);
+    if (!parentOutput) {
+      return res.status(400).json({ error: "Output induk dari Activity ini tidak ditemukan" });
+    }
+    const parentOutcome = data.outcomes.find((oc) => oc.id === parentOutput.outcomeId);
+    const resolvedProgramId = parentOutput.programId || parentOutcome?.programId || existingAct.programId || "";
+    const resolvedOutcomeId = parentOutput.outcomeId || existingAct.outcomeId || "";
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     let updated = null;
     db.update((d) => {
       const idx = d.activities.findIndex((a) => a.id === id);
       if (idx !== -1) {
-        const nextCode = code !== void 0 ? typeof code === "string" && code.trim() ? code.trim() : void 0 : d.activities[idx].code;
+        const nextActNum = activityNumber !== void 0 ? typeof activityNumber === "string" && activityNumber.trim() ? activityNumber.trim() : void 0 : d.activities[idx].activityNumber;
+        const nextCode = code !== void 0 ? typeof code === "string" && code.trim() ? code.trim() : void 0 : d.activities[idx].code || nextActNum;
         d.activities[idx] = {
           ...d.activities[idx],
-          outputId: outputId ?? d.activities[idx].outputId,
-          activityNumber: activityNumber !== void 0 ? typeof activityNumber === "string" && activityNumber.trim() ? activityNumber.trim() : void 0 : d.activities[idx].activityNumber,
+          programId: resolvedProgramId,
+          outcomeId: resolvedOutcomeId,
+          outputId: parentOutput.id,
+          activityNumber: nextActNum,
           name: name ?? d.activities[idx].name,
           code: nextCode,
           description: description ?? d.activities[idx].description,
@@ -7832,7 +9572,8 @@ async function startServer() {
           picName: picUser ? picUser.name : d.activities[idx].picName,
           startDate: startDate ?? d.activities[idx].startDate,
           endDate: endDate ?? d.activities[idx].endDate,
-          status: status ?? d.activities[idx].status
+          status: status ?? d.activities[idx].status,
+          updatedAt: nowIso
         };
         updated = d.activities[idx];
         if (nextCode) {
@@ -7843,6 +9584,17 @@ async function startServer() {
             }
           });
         }
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: "Perubahan Activity",
+          entityType: "PROGRAM",
+          entityId: id,
+          details: `Memperbarui Activity: ${d.activities[idx].name}`,
+          timestamp: nowIso
+        });
       }
     });
     if (!updated) return res.status(404).json({ error: "Activity tidak ditemukan" });
@@ -7864,6 +9616,17 @@ async function startServer() {
     db.update((d) => {
       d.activities = d.activities.filter((a) => a.id !== id);
       d.subActivities = d.subActivities.filter((s) => s.activityId !== id);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Penghapusan Activity",
+        entityType: "PROGRAM",
+        entityId: id,
+        details: `Menghapus Activity ID: ${id}`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
     });
     res.json({ message: "Activity berhasil dihapus" });
   });
@@ -7872,25 +9635,78 @@ async function startServer() {
     if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Sub-Activity" });
     }
-    const { activityId, name, description, picName, startDate, endDate, status } = req.body;
+    const { activityId, name, code, description, picName, startDate, endDate, status } = req.body;
     if (!activityId || !name) {
       return res.status(400).json({ error: "Activity ID dan Nama Sub-Activity wajib diisi" });
     }
+    const data = db.getData();
+    const parentAct = data.activities.find((a) => a.id === activityId);
+    if (!parentAct) {
+      return res.status(400).json({ error: "Activity induk yang dipilih tidak ditemukan" });
+    }
+    const parentOutp = data.outputs.find((o) => o.id === parentAct.outputId);
+    const parentOutc = parentOutp ? data.outcomes.find((oc) => oc.id === parentOutp.outcomeId) : void 0;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const newSub = {
-      id: `sub-${Date.now()}`,
-      activityId,
-      name,
+      id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      programId: parentAct.programId || parentOutp?.programId || parentOutc?.programId || "",
+      outcomeId: parentAct.outcomeId || parentOutp?.outcomeId || "",
+      outputId: parentAct.outputId || "",
+      activityId: parentAct.id,
+      code: typeof code === "string" && code.trim() ? code.trim() : void 0,
+      name: String(name).trim(),
       description: description || "",
       picName: picName || "",
       startDate: startDate || "",
       endDate: endDate || "",
       status: status || "Belum Dimulai",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
     db.update((d) => {
       d.subActivities.push(newSub);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Pembuatan Sub-Activity",
+        entityType: "PROGRAM",
+        entityId: newSub.id,
+        details: `Membuat Sub-Activity baru: ${newSub.name}`,
+        timestamp: nowIso
+      });
     });
     res.status(201).json(newSub);
+  });
+  app.put("/api/sub-activities/:id", (req, res) => {
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+      return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Sub-Activity" });
+    }
+    const { id } = req.params;
+    const { name, code, description, picName, startDate, endDate, status } = req.body;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    let updated = null;
+    db.update((d) => {
+      const idx = d.subActivities.findIndex((s) => s.id === id);
+      if (idx !== -1) {
+        d.subActivities[idx] = {
+          ...d.subActivities[idx],
+          name: name ?? d.subActivities[idx].name,
+          code: code !== void 0 ? String(code).trim() || void 0 : d.subActivities[idx].code,
+          description: description ?? d.subActivities[idx].description,
+          picName: picName ?? d.subActivities[idx].picName,
+          startDate: startDate ?? d.subActivities[idx].startDate,
+          endDate: endDate ?? d.subActivities[idx].endDate,
+          status: status ?? d.subActivities[idx].status,
+          updatedAt: nowIso
+        };
+        updated = d.subActivities[idx];
+      }
+    });
+    if (!updated) return res.status(404).json({ error: "Sub-Activity tidak ditemukan" });
+    res.json(updated);
   });
   app.delete("/api/sub-activities/:id", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -7902,6 +9718,193 @@ async function startServer() {
       d.subActivities = d.subActivities.filter((s) => s.id !== id);
     });
     res.json({ message: "Sub-Activity berhasil dihapus" });
+  });
+  app.post("/api/programs/:id/import-hierarchy", async (req, res) => {
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+      return res.status(403).json({
+        errorCategory: "AUTHORIZATION_ERROR",
+        error: "Tidak memiliki kewenangan untuk mengimpor Hirarki Program."
+      });
+    }
+    const programId = String(req.params.id || "").trim();
+    console.log(
+      `[IMPORT] IMPORT REQUEST RECEIVED (programId=${programId}, user=${currentUser.id}, role=${currentUser.role})`
+    );
+    if (!programId) {
+      return res.status(400).json({
+        errorCategory: "VALIDATION_ERROR",
+        error: "[VALIDATION ERROR] ID Program induk wajib disertakan."
+      });
+    }
+    const { fileName, buffer } = await extractExcelUploadFromRequest(req);
+    const lowerFileName = fileName.toLowerCase();
+    if (!/\.(xlsx|xls|csv)$/.test(lowerFileName)) {
+      console.warn(`[IMPORT] UPLOAD REJECTED (invalid format: ${fileName})`);
+      return res.status(400).json({
+        errorCategory: "UPLOAD_ERROR",
+        error: `[UPLOAD ERROR] Format file "${fileName}" tidak didukung. Gunakan file .xlsx, .xls, atau .csv.`
+      });
+    }
+    const currentData = db.getData();
+    const targetProgram = (currentData.programs || []).find((p) => p.id === programId);
+    if (!targetProgram) {
+      return res.status(404).json({
+        errorCategory: "VALIDATION_ERROR",
+        error: "[VALIDATION ERROR] Program induk yang dipilih tidak ditemukan di database."
+      });
+    }
+    let parsedResult;
+    try {
+      parsedResult = parseProgramHierarchyWorkbookBuffer({
+        buffer,
+        program: targetProgram,
+        existingOutcomes: currentData.outcomes || [],
+        existingOutputs: currentData.outputs || [],
+        existingActivities: currentData.activities || [],
+        existingSubActivities: currentData.subActivities || []
+      });
+    } catch (parseErr) {
+      console.error(
+        `[IMPORT] EXCEL PARSING FAILED (file="${fileName}"): ${parseErr?.message || parseErr}`
+      );
+      return res.status(400).json({
+        errorCategory: "EXCEL_PARSING_ERROR",
+        error: `[EXCEL PARSING ERROR] File "${fileName}" gagal dibaca: ${parseErr?.message || "Format workbook Excel rusak atau tidak valid."}`
+      });
+    }
+    console.log(
+      `[IMPORT] FILE PARSED (file="${fileName}", sheet="${parsedResult.sheetName}", sheets=${parsedResult.sheetCount})`
+    );
+    console.log(`[IMPORT] ROWS DETECTED: ${parsedResult.rows.length}`);
+    if (!parsedResult.headerMatched && parsedResult.rawRowCount > 0) {
+      return res.status(400).json({
+        errorCategory: "VALIDATION_ERROR",
+        error: `[VALIDATION ERROR] Kolom wajib Hirarki Program (Outcome / Nomor outcome, Output, Activity) tidak ditemukan pada file "${fileName}".`
+      });
+    }
+    if (parsedResult.rows.length === 0) {
+      return res.status(400).json({
+        errorCategory: "VALIDATION_ERROR",
+        error: `[VALIDATION ERROR] File Excel "${fileName}" kosong atau tidak memiliki baris data Hirarki Program yang dapat diimpor.`
+      });
+    }
+    const invalidRows = parsedResult.rows.filter((r) => r.status === "invalid");
+    if (invalidRows.length > 0) {
+      const rowErrorPreview = invalidRows.slice(0, 5).map((r) => `Baris ${r.rowNumber}: ${r.statusMessage}`).join("; ");
+      console.warn(
+        `[IMPORT] VALIDATION FAILED (invalidRows=${invalidRows.length}): ${rowErrorPreview}`
+      );
+      return res.status(400).json({
+        errorCategory: "VALIDATION_ERROR",
+        error: `[VALIDATION ERROR] Ditemukan ${invalidRows.length} baris tidak valid pada file "${fileName}" (${rowErrorPreview}). Perbaiki baris tersebut terlebih dahulu \u2014 tidak ada data yang disimpan.`,
+        rowErrors: invalidRows.map((r) => ({
+          rowNumber: r.rowNumber,
+          message: r.statusMessage
+        }))
+      });
+    }
+    const validRows = parsedResult.rows.filter((r) => r.status === "valid");
+    const duplicateRows = parsedResult.rows.filter((r) => r.status === "duplicate");
+    console.log(
+      `[IMPORT] VALIDATION PASSED (validRows=${validRows.length}, duplicateRows=${duplicateRows.length})`
+    );
+    if (validRows.length === 0) {
+      return res.json({
+        alreadyUpToDate: true,
+        message: `Seluruh ${duplicateRows.length} baris pada file "${fileName}" sudah terdaftar di Hirarki Program "${targetProgram.name}".`,
+        summary: {
+          detectedRows: parsedResult.rows.length,
+          importedRows: 0,
+          duplicateRows: duplicateRows.length,
+          createdOutcomes: 0,
+          createdOutputs: 0,
+          createdActivities: 0,
+          createdSubActivities: 0
+        },
+        expandedOutcomeIds: [],
+        expandedOutputIds: []
+      });
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const plan = buildHierarchyImportPlan({
+      validRows,
+      program: targetProgram,
+      existingOutcomes: currentData.outcomes || [],
+      existingOutputs: currentData.outputs || [],
+      existingActivities: currentData.activities || [],
+      existingSubActivities: currentData.subActivities || [],
+      nowIso
+    });
+    const summaryParts = [];
+    if (plan.createdOutcomesCount > 0) summaryParts.push(`${plan.createdOutcomesCount} Outcome`);
+    if (plan.addedOutcomeIndicatorsCount > 0) {
+      summaryParts.push(`${plan.addedOutcomeIndicatorsCount} Indikator Outcome`);
+    }
+    if (plan.createdOutputsCount > 0) summaryParts.push(`${plan.createdOutputsCount} Output`);
+    if (plan.addedOutputIndicatorsCount > 0) {
+      summaryParts.push(`${plan.addedOutputIndicatorsCount} Indikator Output`);
+    }
+    if (plan.createdActivitiesCount > 0) {
+      summaryParts.push(`${plan.createdActivitiesCount} Activity`);
+    }
+    if (plan.createdSubActivitiesCount > 0) {
+      summaryParts.push(`${plan.createdSubActivitiesCount} Sub-Activity`);
+    }
+    const auditLog = {
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      actorId: currentUser.id,
+      actorName: currentUser.name,
+      actorRole: currentUser.roleTitle,
+      action: "Import Excel Hirarki Program",
+      entityType: "PROGRAM",
+      entityId: targetProgram.id,
+      details: `Mengimpor Hirarki Program dari file "${fileName}" ke Program "${targetProgram.name}": ${summaryParts.join(", ") || "Pembaruan hirarki"}`,
+      timestamp: nowIso
+    };
+    const freshData = await db.executeHierarchyImportTransaction({
+      programId: targetProgram.id,
+      outcomesToUpsert: plan.outcomesToUpsert,
+      outputsToUpsert: plan.outputsToUpsert,
+      activitiesToUpsert: plan.activitiesToUpsert,
+      subActivitiesToUpsert: plan.subActivitiesToUpsert,
+      auditLog
+    });
+    const progOutcomeIds = new Set(
+      (freshData.outcomes || []).filter((o) => o.programId === targetProgram.id).map((o) => o.id)
+    );
+    const progOutputIds = new Set(
+      (freshData.outputs || []).filter((o) => progOutcomeIds.has(o.outcomeId)).map((o) => o.id)
+    );
+    const progActivityIds = new Set(
+      (freshData.activities || []).filter((a) => progOutputIds.has(a.outputId)).map((a) => a.id)
+    );
+    res.status(200).json({
+      alreadyUpToDate: false,
+      message: `Hirarki Program berhasil diimpor dan tersimpan ke database dari file "${fileName}": ${summaryParts.join(", ") || "Hirarki diperbarui"}.`,
+      summary: {
+        detectedRows: parsedResult.rows.length,
+        importedRows: validRows.length,
+        duplicateRows: duplicateRows.length,
+        createdOutcomes: plan.createdOutcomesCount,
+        updatedOutcomes: plan.updatedOutcomesCount,
+        addedOutcomeIndicators: plan.addedOutcomeIndicatorsCount,
+        createdOutputs: plan.createdOutputsCount,
+        updatedOutputs: plan.updatedOutputsCount,
+        addedOutputIndicators: plan.addedOutputIndicatorsCount,
+        createdActivities: plan.createdActivitiesCount,
+        updatedActivities: plan.updatedActivitiesCount,
+        createdSubActivities: plan.createdSubActivitiesCount
+      },
+      expandedOutcomeIds: plan.expandedOutcomeIds,
+      expandedOutputIds: plan.expandedOutputIds,
+      outcomes: (freshData.outcomes || []).filter((o) => progOutcomeIds.has(o.id)),
+      outputs: (freshData.outputs || []).filter((o) => progOutputIds.has(o.id)),
+      activities: (freshData.activities || []).filter((a) => progActivityIds.has(a.id)),
+      subActivities: (freshData.subActivities || []).filter(
+        (s) => progActivityIds.has(s.activityId)
+      )
+    });
   });
   app.get("/api/tors", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -13742,7 +15745,10 @@ async function startServer() {
     if (res.headersSent) return;
     const statusCode = Number(err?.httpStatus || err?.status || 500);
     res.status(statusCode).json({
-      error: err?.userMessage || (statusCode === 401 ? "Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali." : "Terjadi kesalahan pemrosesan pada server saat menyimpan atau memuat data.")
+      error: err?.userMessage || (statusCode === 401 ? "Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali." : "Terjadi kesalahan pemrosesan pada server saat menyimpan atau memuat data."),
+      errorCategory: err?.errorCategory || void 0,
+      failedTable: err?.failedTable || void 0,
+      mysqlErrorCode: err?.code || void 0
     });
   });
   const distDir = path3.join(__dirname, "dist");

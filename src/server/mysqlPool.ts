@@ -563,18 +563,31 @@ export async function loadDatabaseFromMysql(
     createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
+  const stripInternalCodePrefix = (val: unknown): string => {
+    const s = String(val ?? '');
+    return s.includes('::') ? s.split('::').slice(1).join('::') : s;
+  };
+
   const outcomes = parseAndHydrateRows<any>(outcomeRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ''),
     programId: r?.program_id || raw.programId || '',
-    code: r?.code || raw.code || '',
+    outcomeNumber:
+      raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || undefined,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || '',
     name: r?.name || raw.name || raw.title || '',
     title: raw.title || r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
+    indicators: Array.isArray(raw.indicators)
+      ? raw.indicators
+      : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+    status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || undefined,
+    updatedAt: r?.updated_at || raw.updatedAt || undefined,
   }));
 
   const outputs = parseAndHydrateRows<any>(outputRows, (r, raw) => ({
@@ -582,14 +595,22 @@ export async function loadDatabaseFromMysql(
     id: String(r?.id || raw.id || ''),
     programId: r?.program_id || raw.programId || '',
     outcomeId: r?.outcome_id || raw.outcomeId || '',
-    code: r?.code || raw.code || '',
+    outputNumber:
+      raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || undefined,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || '',
     name: r?.name || raw.name || raw.title || '',
     title: raw.title || r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
+    indicators: Array.isArray(raw.indicators)
+      ? raw.indicators
+      : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+    status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || undefined,
+    updatedAt: r?.updated_at || raw.updatedAt || undefined,
   }));
 
   const activities = parseAndHydrateRows<any>(activityRows, (r, raw) => ({
@@ -598,27 +619,40 @@ export async function loadDatabaseFromMysql(
     programId: r?.program_id || raw.programId || '',
     outcomeId: r?.outcome_id || raw.outcomeId || '',
     outputId: r?.output_id || raw.outputId || '',
-    code: r?.code || raw.code || '',
+    activityNumber: raw.activityNumber || r?.activity_number || undefined,
+    code: stripInternalCodePrefix(r?.code) || raw.code || raw.activityNumber || '',
     name: r?.name || raw.name || raw.title || '',
     title: raw.title || r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
+    startDate: r?.start_date || raw.startDate || '',
+    endDate: r?.end_date || raw.endDate || '',
+    status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || undefined,
+    updatedAt: r?.updated_at || raw.updatedAt || undefined,
   }));
 
   const subActivities = parseAndHydrateRows<any>(subActivityRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ''),
+    programId: r?.program_id || raw.programId || '',
+    outcomeId: r?.outcome_id || raw.outcomeId || '',
+    outputId: r?.output_id || raw.outputId || '',
     activityId: r?.activity_id || raw.activityId || '',
-    code: r?.code || raw.code || '',
+    code: stripInternalCodePrefix(r?.code) || raw.code || '',
     name: r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
+    picName: r?.pic_name || raw.picName || '',
+    status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+    createdAt: r?.created_at || raw.createdAt || undefined,
+    updatedAt: r?.updated_at || raw.updatedAt || undefined,
   }));
 
   const tors = parseAndHydrateRows<any>(torRows, (r, raw) => ({
@@ -886,6 +920,12 @@ function toMysqlDateOnlyString(val: any): string | null {
 
 function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
   const typeLower = (colMeta.type || '').toLowerCase();
+  const colNameLower = (colMeta.name || '').toLowerCase();
+  const isForeignIdLike =
+    colNameLower !== 'id' &&
+    colNameLower !== 'store_key' &&
+    (colNameLower.endsWith('_id') || colNameLower.endsWith('_by'));
+  const isUniqueIndexed = String(colMeta.key || '').toUpperCase() === 'UNI';
   const canLeaveNull =
     colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes('auto_increment');
 
@@ -911,6 +951,12 @@ function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
     }
     return '';
   };
+
+  // Jangan pernah mengirim string kosong '' pada kolom Foreign Key (*_id) atau kolom UNIQUE yang nullable,
+  // karena '' melanggar FOREIGN KEY (ER_NO_REFERENCED_ROW_2) atau UNIQUE (ER_DUP_ENTRY) di MySQL.
+  if (val === '' && (isForeignIdLike || isUniqueIndexed) && canLeaveNull) {
+    return null;
+  }
 
   if (val === undefined || val === null) {
     return canLeaveNull ? null : fallbackForStrictNotNull();
@@ -1126,12 +1172,47 @@ async function executeAdaptiveUpsert(
       continue;
     }
     if (Object.prototype.hasOwnProperty.call(candidateRow, colName)) {
+      let rawCandidateVal = candidateRow[colName];
+      // Jika tabel hirarki anak di Hostinger memiliki indeks UNIQUE global pada kolom `code`
+      // (mis. `Outcome 1` di dua Program berbeda), beri namespace program singkat agar bebas ER_DUP_ENTRY.
+      if (
+        colName === 'code' &&
+        String(colMeta.key || '').toUpperCase() === 'UNI' &&
+        (tableName === 'outcomes' ||
+          tableName === 'outputs' ||
+          tableName === 'activities' ||
+          tableName === 'sub_activities')
+      ) {
+        const baseCode =
+          typeof rawCandidateVal === 'string' && rawCandidateVal.trim() !== ''
+            ? rawCandidateVal.trim()
+            : String(candidateRow[pkCol] || '');
+        const progTag = candidateRow.program_id ? String(candidateRow.program_id).slice(-8) : '';
+        rawCandidateVal =
+          progTag && !baseCode.includes('::') ? `${progTag}::${baseCode}` : baseCode;
+      }
+      let formatted = formatValueForMysqlColumn(rawCandidateVal, colMeta);
+      if (
+        (formatted === null || formatted === '') &&
+        !colMeta.nullable &&
+        !colMeta.hasDefault &&
+        String(colMeta.key || '').toUpperCase() === 'UNI'
+      ) {
+        formatted = String(candidateRow[pkCol] || '').slice(0, 64);
+      }
       selectedCols.push(colName);
-      params.push(formatValueForMysqlColumn(candidateRow[colName], colMeta));
+      params.push(formatted);
     } else if (!colMeta.nullable && !colMeta.hasDefault && !colMeta.extra.includes('auto_increment')) {
       // Sediakan nilai fallback aman jika tabel produksi Hostinger memiliki kolom tambahan NOT NULL tanpa default
+      let fallbackVal = formatValueForMysqlColumn(null, colMeta);
+      if (
+        (fallbackVal === null || fallbackVal === '') &&
+        String(colMeta.key || '').toUpperCase() === 'UNI'
+      ) {
+        fallbackVal = String(candidateRow[pkCol] || '').slice(0, 64);
+      }
       selectedCols.push(colName);
-      params.push(formatValueForMysqlColumn(null, colMeta));
+      params.push(fallbackVal);
     }
   }
 
@@ -1217,53 +1298,104 @@ function buildProgramCandidateRow(p: any, nowIso: string): Record<string, any> {
   };
 }
 
-function buildOutcomeCandidateRow(oc: any): Record<string, any> {
+function buildOutcomeCandidateRow(oc: any, nowIso?: string): Record<string, any> {
+  const ts = nowIso || new Date().toISOString();
+  const effectiveName = truncStr(oc.name || oc.title, 500) || '';
+  const indicatorsJson = JSON.stringify(Array.isArray(oc.indicators) ? oc.indicators : []);
+  const resolvedCode = truncStr(oc.code || oc.outcomeNumber || oc.id, 64);
   return {
     id: String(oc.id).slice(0, 128),
-    program_id: truncStr(oc.programId, 128) || '',
-    code: truncStr(oc.code, 64),
-    name: truncStr(oc.name || oc.title, 500) || '',
+    program_id: truncStr(oc.programId, 128),
+    code: resolvedCode,
+    outcome_number: truncStr(oc.outcomeNumber || oc.code || oc.id, 64),
+    name: effectiveName,
+    title: truncStr(oc.title || oc.name, 500) || effectiveName,
     description: oc.description || null,
+    pic_id: truncStr(oc.picId, 128),
+    pic_name: truncStr(oc.picName, 255),
+    status: truncStr(oc.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
+    indicators_json: indicatorsJson,
+    indicators: indicatorsJson,
+    created_at: oc.createdAt || ts,
+    updated_at: oc.updatedAt || ts,
     raw_json: JSON.stringify(oc),
   };
 }
 
-function buildOutputCandidateRow(op: any): Record<string, any> {
+function buildOutputCandidateRow(op: any, nowIso?: string): Record<string, any> {
+  const ts = nowIso || new Date().toISOString();
+  const effectiveName = truncStr(op.name || op.title, 500) || '';
+  const indicatorsJson = JSON.stringify(Array.isArray(op.indicators) ? op.indicators : []);
+  const resolvedCode = truncStr(op.code || op.outputNumber || op.id, 64);
   return {
     id: String(op.id).slice(0, 128),
     program_id: truncStr(op.programId, 128),
-    outcome_id: truncStr(op.outcomeId, 128) || '',
-    code: truncStr(op.code, 64),
-    name: truncStr(op.name || op.title, 500) || '',
+    outcome_id: truncStr(op.outcomeId, 128),
+    code: resolvedCode,
+    output_number: truncStr(op.outputNumber || op.code || op.id, 64),
+    name: effectiveName,
+    title: truncStr(op.title || op.name, 500) || effectiveName,
     description: op.description || null,
+    pic_id: truncStr(op.picId, 128),
+    pic_name: truncStr(op.picName, 255),
+    status: truncStr(op.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
+    indicators_json: indicatorsJson,
+    indicators: indicatorsJson,
+    created_at: op.createdAt || ts,
+    updated_at: op.updatedAt || ts,
     raw_json: JSON.stringify(op),
   };
 }
 
-function buildActivityCandidateRow(ac: any): Record<string, any> {
+function buildActivityCandidateRow(ac: any, nowIso?: string): Record<string, any> {
+  const ts = nowIso || new Date().toISOString();
+  const effectiveName = truncStr(ac.name || ac.title, 500) || '';
+  const resolvedCode = truncStr(ac.code || ac.activityNumber || ac.id, 64);
   return {
     id: String(ac.id).slice(0, 128),
     program_id: truncStr(ac.programId, 128),
     outcome_id: truncStr(ac.outcomeId, 128),
-    output_id: truncStr(ac.outputId, 128) || '',
-    code: truncStr(ac.code, 64),
-    name: truncStr(ac.name || ac.title, 500) || '',
+    output_id: truncStr(ac.outputId, 128),
+    code: resolvedCode,
+    activity_number: truncStr(ac.activityNumber || ac.code || ac.id, 64),
+    name: effectiveName,
+    title: truncStr(ac.title || ac.name, 500) || effectiveName,
     description: ac.description || null,
+    pic_id: truncStr(ac.picId, 128),
+    pic_name: truncStr(ac.picName, 255),
+    start_date: truncStr(ac.startDate, 32),
+    end_date: truncStr(ac.endDate, 32),
+    status: truncStr(ac.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(ac.budgetAllocated ?? ac.budget, 0),
+    created_at: ac.createdAt || ts,
+    updated_at: ac.updatedAt || ts,
     raw_json: JSON.stringify(ac),
   };
 }
 
-function buildSubActivityCandidateRow(sa: any): Record<string, any> {
+function buildSubActivityCandidateRow(sa: any, nowIso?: string): Record<string, any> {
+  const ts = nowIso || new Date().toISOString();
+  const effectiveName = truncStr(sa.name, 500) || '';
+  const resolvedCode = truncStr(sa.code || sa.id, 64);
   return {
     id: String(sa.id).slice(0, 128),
-    activity_id: truncStr(sa.activityId, 128) || '',
-    code: truncStr(sa.code, 64),
-    name: truncStr(sa.name, 500) || '',
+    program_id: truncStr(sa.programId, 128),
+    outcome_id: truncStr(sa.outcomeId, 128),
+    output_id: truncStr(sa.outputId, 128),
+    activity_id: truncStr(sa.activityId, 128),
+    code: resolvedCode,
+    name: effectiveName,
+    title: effectiveName,
     description: sa.description || null,
+    pic_name: truncStr(sa.picName, 255),
+    start_date: truncStr(sa.startDate, 32),
+    end_date: truncStr(sa.endDate, 32),
+    status: truncStr(sa.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(sa.budgetAllocated ?? sa.budget, 0),
+    created_at: sa.createdAt || ts,
+    updated_at: sa.updatedAt || ts,
     raw_json: JSON.stringify(sa),
   };
 }
@@ -1490,25 +1622,25 @@ const ENTITY_TABLE_SPECS: EntityTableSyncSpec[] = [
   {
     tableName: 'outcomes',
     getRows: (d) => d.outcomes || [],
-    buildCandidate: (oc) => buildOutcomeCandidateRow(oc),
+    buildCandidate: (oc, nowIso) => buildOutcomeCandidateRow(oc, nowIso),
     allowTargetedDelete: true,
   },
   {
     tableName: 'outputs',
     getRows: (d) => d.outputs || [],
-    buildCandidate: (op) => buildOutputCandidateRow(op),
+    buildCandidate: (op, nowIso) => buildOutputCandidateRow(op, nowIso),
     allowTargetedDelete: true,
   },
   {
     tableName: 'activities',
     getRows: (d) => d.activities || [],
-    buildCandidate: (ac) => buildActivityCandidateRow(ac),
+    buildCandidate: (ac, nowIso) => buildActivityCandidateRow(ac, nowIso),
     allowTargetedDelete: true,
   },
   {
     tableName: 'sub_activities',
     getRows: (d) => d.subActivities || [],
-    buildCandidate: (sa) => buildSubActivityCandidateRow(sa),
+    buildCandidate: (sa, nowIso) => buildSubActivityCandidateRow(sa, nowIso),
     allowTargetedDelete: true,
   },
   {
@@ -1654,11 +1786,17 @@ export async function saveDiffToMysql(
   let totalAffectedRows = 0;
   let upsertedRows = 0;
   let deletedRows = 0;
+  let activeTable = '';
+  let activeOperation = '';
 
   try {
     await conn.beginTransaction();
 
-    for (const op of plannedOps) {
+    // 1. Eksekusi DELETE terlebih dahulu dalam urutan terbalik (child -> parent) agar aman terhadap FOREIGN KEY
+    for (const op of [...plannedOps].reverse()) {
+      if (op.toDeleteIds.length === 0) continue;
+      activeTable = op.spec.tableName;
+      activeOperation = 'DELETE';
       for (const delId of op.toDeleteIds) {
         const [delRes]: any = await conn.query(
           `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
@@ -1667,7 +1805,13 @@ export async function saveDiffToMysql(
         deletedRows += 1;
         totalAffectedRows += Number(delRes?.affectedRows || 0);
       }
+    }
 
+    // 2. Eksekusi INSERT / UPDATE dalam urutan maju (parent -> child: programs -> outcomes -> outputs -> activities -> sub_activities)
+    for (const op of plannedOps) {
+      if (op.toUpsert.length === 0) continue;
+      activeTable = op.spec.tableName;
+      activeOperation = 'UPSERT';
       for (const item of op.toUpsert) {
         const affected = await executeAdaptiveUpsert(
           conn,
@@ -1680,23 +1824,28 @@ export async function saveDiffToMysql(
       }
     }
 
-    for (const [kvKey, kvJson] of changedKvEntries) {
-      const affected = await executeAdaptiveUpsert(
-        conn,
-        'system_kv_store',
-        {
-          store_key: kvKey.slice(0, 128),
-          store_value: kvJson,
-          updated_at: nowIso,
-        },
-        {
-          primaryKeyColumn: 'store_key',
-          immutableOnUpdateColumns: [],
-        }
-      );
-      totalAffectedRows += affected;
+    if (changedKvEntries.length > 0) {
+      activeTable = 'system_kv_store';
+      activeOperation = 'UPSERT_KV';
+      for (const [kvKey, kvJson] of changedKvEntries) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          'system_kv_store',
+          {
+            store_key: kvKey.slice(0, 128),
+            store_value: kvJson,
+            updated_at: nowIso,
+          },
+          {
+            primaryKeyColumn: 'store_key',
+            immutableOnUpdateColumns: [],
+          }
+        );
+        totalAffectedRows += affected;
+      }
     }
 
+    activeOperation = 'COMMIT';
     await conn.commit();
     console.log(
       `[WRITE] DATABASE QUERY SUCCESS (${contextLabel}) -> upserted=${upsertedRows}, deleted=${deletedRows}, kvUpdated=${changedKvEntries.length}, affectedRows=${totalAffectedRows}`
@@ -1715,11 +1864,170 @@ export async function saveDiffToMysql(
     } catch {
       // ignore rollback secondary failure
     }
+    if (err && typeof err === 'object') {
+      err.failedTable = activeTable || undefined;
+      err.failedOperation = activeOperation || undefined;
+    }
     const safeCode = err?.code ? ` [${err.code}]` : '';
     const safeMsg = String(err?.message || err || 'Unknown SQL error')
       .replace(/mysql2?:\/\/[^\s@]+@/gi, 'mysql://***@')
       .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
-    console.error(`[WRITE] DATABASE QUERY FAILED (${contextLabel})${safeCode}: ${safeMsg}`);
+    console.error(
+      `[WRITE] DATABASE QUERY FAILED (${contextLabel}) table=${activeTable || 'unknown'} op=${activeOperation || 'unknown'}${safeCode}: ${safeMsg}`
+    );
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+export interface MysqlHierarchyImportBatchParams {
+  programId: string;
+  outcomesToUpsert: any[];
+  outputsToUpsert: any[];
+  activitiesToUpsert: any[];
+  subActivitiesToUpsert: any[];
+  auditLog?: any;
+}
+
+/**
+ * Menyimpan seluruh hasil Import Excel Hirarki Program dalam SATU transaksi MySQL atomik:
+ * START TRANSACTION -> Verifikasi Program Induk di MySQL -> INSERT/UPDATE outcomes -> outputs -> activities -> sub_activities -> COMMIT.
+ * Jika terjadi kegagalan di salah satu tahap, seluruh perubahan di-ROLLBACK sehingga tidak ada data setengah masuk (no partial import).
+ */
+export async function importProgramHierarchyToMysql(
+  pool: MysqlPoolLike,
+  params: MysqlHierarchyImportBatchParams
+): Promise<{ totalAffectedRows: number }> {
+  const {
+    programId,
+    outcomesToUpsert,
+    outputsToUpsert,
+    activitiesToUpsert,
+    subActivitiesToUpsert,
+    auditLog,
+  } = params;
+  const nowIso = new Date().toISOString();
+  const conn = await pool.getConnection();
+
+  let currentStage = 'DATABASE TRANSACTION STARTED';
+  let currentTable = 'programs';
+  let totalAffectedRows = 0;
+
+  try {
+    console.log(`[IMPORT] DATABASE TRANSACTION STARTED (programId=${programId})`);
+    await conn.beginTransaction();
+
+    // 1. Verifikasi keberadaan Program induk langsung di tabel programs MySQL
+    currentStage = 'PROGRAM VERIFICATION';
+    currentTable = 'programs';
+    const [progRows]: any = await conn.query(
+      'SELECT `id`, `name` FROM `programs` WHERE `id` = ? LIMIT 1',
+      [String(programId).slice(0, 128)]
+    );
+    if (!Array.isArray(progRows) || progRows.length === 0) {
+      throw Object.assign(
+        new Error(`Parent program '${programId}' was not found in MySQL table 'programs'.`),
+        {
+          code: 'PROGRAM_NOT_FOUND_IN_MYSQL',
+          failedTable: 'programs',
+          failedStage: currentStage,
+        }
+      );
+    }
+    console.log(`[IMPORT] PROGRAM VERIFIED (programId=${programId})`);
+
+    // 2. Simpan Outcomes terlebih dahulu (induk dari Output)
+    currentStage = 'OUTCOME INSERT';
+    currentTable = 'outcomes';
+    console.log(`[IMPORT] OUTCOME INSERT STARTED (count=${outcomesToUpsert.length})`);
+    for (const oc of outcomesToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        'outcomes',
+        buildOutcomeCandidateRow({ ...oc, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+
+    // 3. Simpan Outputs (menggunakan outcome_id dan program_id yang valid)
+    currentStage = 'OUTPUT INSERT';
+    currentTable = 'outputs';
+    console.log(`[IMPORT] OUTPUT INSERT STARTED (count=${outputsToUpsert.length})`);
+    for (const op of outputsToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        'outputs',
+        buildOutputCandidateRow({ ...op, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+
+    // 4. Simpan Activities (menggunakan output_id, outcome_id, dan program_id yang valid)
+    currentStage = 'ACTIVITY INSERT';
+    currentTable = 'activities';
+    console.log(`[IMPORT] ACTIVITY INSERT STARTED (count=${activitiesToUpsert.length})`);
+    for (const ac of activitiesToUpsert) {
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        'activities',
+        buildActivityCandidateRow({ ...ac, programId }, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+
+    // 5. Simpan Sub-Activities jika ada
+    if (subActivitiesToUpsert.length > 0) {
+      currentStage = 'SUB_ACTIVITY INSERT';
+      currentTable = 'sub_activities';
+      console.log(`[IMPORT] SUB_ACTIVITY INSERT STARTED (count=${subActivitiesToUpsert.length})`);
+      for (const sa of subActivitiesToUpsert) {
+        const affected = await executeAdaptiveUpsert(
+          conn,
+          'sub_activities',
+          buildSubActivityCandidateRow({ ...sa, programId }, nowIso)
+        );
+        totalAffectedRows += affected;
+      }
+    }
+
+    // 6. Catat Audit Log ke tabel audit_logs dalam transaksi yang sama
+    if (auditLog && auditLog.id) {
+      currentStage = 'AUDIT LOG INSERT';
+      currentTable = 'audit_logs';
+      const affected = await executeAdaptiveUpsert(
+        conn,
+        'audit_logs',
+        buildAuditLogCandidateRow(auditLog, nowIso)
+      );
+      totalAffectedRows += affected;
+    }
+
+    currentStage = 'COMMIT';
+    await conn.commit();
+    console.log(
+      `[IMPORT] COMMIT SUCCESS (programId=${programId}, outcomes=${outcomesToUpsert.length}, outputs=${outputsToUpsert.length}, activities=${activitiesToUpsert.length}, subActivities=${subActivitiesToUpsert.length}, affectedRows=${totalAffectedRows})`
+    );
+
+    return { totalAffectedRows };
+  } catch (err: any) {
+    try {
+      await conn.rollback();
+    } catch {
+      // ignore secondary rollback error
+    }
+    if (err && typeof err === 'object') {
+      err.failedTable = err.failedTable || currentTable;
+      err.failedStage = err.failedStage || currentStage;
+      err.failedOperation = 'IMPORT_TRANSACTION';
+    }
+    const safeCode = err?.code ? ` [${err.code}]` : '';
+    const safeMsg = String(err?.message || err || 'Unknown SQL error')
+      .replace(/mysql2?:\/\/[^\s@]+@/gi, 'mysql://***@')
+      .replace(/(password\s*[=:]\s*)([^\s,;]+)/gi, '$1***');
+    console.error(
+      `[IMPORT] TRANSACTION ROLLBACK (stage=${currentStage}, table=${currentTable})${safeCode}: ${safeMsg}`
+    );
     throw err;
   } finally {
     conn.release();

@@ -53,8 +53,9 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
     console.info(`[API] Request started: ${method} ${safePath}`);
   }
 
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     'X-Requested-With': 'XMLHttpRequest',
     ...(activeAuthToken ? { Authorization: `Bearer ${activeAuthToken}` } : {}),
     ...((options.headers as Record<string, string>) || {}),
@@ -125,6 +126,10 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
         : `Request failed (Status: ${response.status})`;
     throw Object.assign(new Error((data && data.error) || fallbackError), {
       status: response.status,
+      errorCategory: data?.errorCategory,
+      failedTable: data?.failedTable,
+      mysqlErrorCode: data?.mysqlErrorCode,
+      rowErrors: data?.rowErrors,
     });
   }
 
@@ -240,6 +245,37 @@ export const api = {
     }),
   deleteProgram: (id: string) =>
     request<{ message: string }>(`/api/programs/${id}`, { method: 'DELETE' }),
+  importProgramHierarchyExcel: (programId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return request<{
+      alreadyUpToDate: boolean;
+      message: string;
+      summary: {
+        detectedRows: number;
+        importedRows: number;
+        duplicateRows: number;
+        createdOutcomes: number;
+        updatedOutcomes?: number;
+        addedOutcomeIndicators?: number;
+        createdOutputs: number;
+        updatedOutputs?: number;
+        addedOutputIndicators?: number;
+        createdActivities: number;
+        updatedActivities?: number;
+        createdSubActivities: number;
+      };
+      expandedOutcomeIds: string[];
+      expandedOutputIds: string[];
+      outcomes?: Outcome[];
+      outputs?: Output[];
+      activities?: Activity[];
+      subActivities?: SubActivity[];
+    }>(`/api/programs/${encodeURIComponent(programId)}/import-hierarchy`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
 
   createOutcome: (outcome: Partial<Outcome>) =>
     request<Outcome>('/api/outcomes', {

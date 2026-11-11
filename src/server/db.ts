@@ -28,10 +28,12 @@ import {
   ensureMysqlSchema,
   fetchUsersFromMysql,
   getMysqlPool,
+  importProgramHierarchyToMysql,
   isCloudRunEnvironment,
   isMysqlConfigured,
   isProductionHostingerEnvironment,
   loadDatabaseFromMysql,
+  type MysqlHierarchyImportBatchParams,
   type MysqlPrivilegeSummary,
   resetMysqlPool,
   saveDatabaseToMysql,
@@ -389,6 +391,61 @@ function normalizeSchema(
   if (!Array.isArray(parsed.subActivities)) {
     parsed.subActivities = [];
   }
+
+  // Pastikan seluruh relasi hirarki (Output -> Outcome -> Program, Activity -> Output -> Outcome -> Program)
+  // memiliki programId dan outcomeId lengkap agar operasi UPDATE/INSERT ke MySQL selalu memenuhi FOREIGN KEY.
+  const outcomeByIdMap = new Map<string, Outcome>();
+  for (const oc of parsed.outcomes) {
+    if (oc && oc.id) {
+      outcomeByIdMap.set(oc.id, oc);
+    }
+  }
+  const outputByIdMap = new Map<string, Output>();
+  parsed.outputs = parsed.outputs.map((op: any) => {
+    const parentOc = op?.outcomeId ? outcomeByIdMap.get(op.outcomeId) : undefined;
+    const enriched =
+      !op?.programId && parentOc?.programId
+        ? { ...op, programId: parentOc.programId }
+        : op;
+    if (enriched && enriched.id) {
+      outputByIdMap.set(enriched.id, enriched);
+    }
+    return enriched;
+  });
+  const activityByIdMap = new Map<string, Activity>();
+  parsed.activities = parsed.activities.map((ac: any) => {
+    const parentOp: any = ac?.outputId ? outputByIdMap.get(ac.outputId) : undefined;
+    const resolvedOutcomeId = ac?.outcomeId || parentOp?.outcomeId || '';
+    const parentOc = resolvedOutcomeId ? outcomeByIdMap.get(resolvedOutcomeId) : undefined;
+    const resolvedProgramId = ac?.programId || parentOp?.programId || parentOc?.programId || '';
+    const enriched =
+      (!ac?.outcomeId && resolvedOutcomeId) || (!ac?.programId && resolvedProgramId)
+        ? {
+            ...ac,
+            ...(resolvedOutcomeId ? { outcomeId: resolvedOutcomeId } : {}),
+            ...(resolvedProgramId ? { programId: resolvedProgramId } : {}),
+          }
+        : ac;
+    if (enriched && enriched.id) {
+      activityByIdMap.set(enriched.id, enriched);
+    }
+    return enriched;
+  });
+  parsed.subActivities = parsed.subActivities.map((sa: any) => {
+    const parentAct: any = sa?.activityId ? activityByIdMap.get(sa.activityId) : undefined;
+    if (!parentAct) return sa;
+    const needsBackfill =
+      (!sa?.outputId && parentAct.outputId) ||
+      (!sa?.outcomeId && parentAct.outcomeId) ||
+      (!sa?.programId && parentAct.programId);
+    if (!needsBackfill) return sa;
+    return {
+      ...sa,
+      ...(parentAct.outputId && !sa.outputId ? { outputId: parentAct.outputId } : {}),
+      ...(parentAct.outcomeId && !sa.outcomeId ? { outcomeId: parentAct.outcomeId } : {}),
+      ...(parentAct.programId && !sa.programId ? { programId: parentAct.programId } : {}),
+    };
+  });
   if (!Array.isArray(parsed.tors)) {
     parsed.tors = [];
   }
@@ -494,13 +551,19 @@ function buildMysqlWriteFailureError(err: any, contextLabel: string): Error & {
   httpStatus?: number;
   userMessage?: string;
   code?: string;
+  errorCategory?: string;
+  failedTable?: string;
+  failedStage?: string;
 } {
   const sqlCode = String(err?.code || '');
+  const failedTable = err?.failedTable ? String(err.failedTable) : undefined;
+  const failedStage = err?.failedStage ? String(err.failedStage) : undefined;
   const safeDetail = sanitizeDbError(err);
+  const tableInfo = failedTable ? ` pada tabel '${failedTable}'` : '';
+  const codeInfo = sqlCode ? ` (${sqlCode})` : '';
 
   let httpStatus = 500;
-  let userMessage =
-    'Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan agar tampilan tetap akurat.';
+  let userMessage = `[DATABASE WRITE ERROR] Gagal menyimpan perubahan${tableInfo} ke database MySQL produksi${codeInfo}. Perubahan dibatalkan agar tampilan tetap akurat.`;
 
   if (
     sqlCode === 'ER_TABLEACCESS_DENIED_ERROR' ||
@@ -510,7 +573,7 @@ function buildMysqlWriteFailureError(err: any, contextLabel: string): Error & {
   ) {
     httpStatus = 500;
     userMessage =
-      'Database MySQL menolak penyimpanan karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.';
+      `[DATABASE WRITE ERROR] Database MySQL menolak penyimpanan${tableInfo} karena user database belum memiliki hak akses tulis (INSERT / UPDATE / DELETE). Periksa hak akses user MySQL di panel Hostinger.`;
   } else if (
     sqlCode === 'ECONNREFUSED' ||
     sqlCode === 'PROTOCOL_CONNECTION_LOST' ||
@@ -519,20 +582,43 @@ function buildMysqlWriteFailureError(err: any, contextLabel: string): Error & {
   ) {
     httpStatus = 503;
     userMessage =
-      'Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.';
+      '[DATABASE WRITE ERROR] Koneksi ke server MySQL terputus saat menyimpan data. Silakan coba kembali beberapa saat lagi.';
+  } else if (
+    sqlCode === 'ER_NO_REFERENCED_ROW_2' ||
+    sqlCode === 'ER_NO_REFERENCED_ROW' ||
+    sqlCode === 'PROGRAM_NOT_FOUND_IN_MYSQL'
+  ) {
+    httpStatus = 400;
+    userMessage =
+      `[DATABASE WRITE ERROR] Relasi data induk tidak ditemukan${tableInfo}${codeInfo}. Pastikan Program, Outcome, atau Output induk sudah tersimpan di database MySQL.`;
+  } else if (sqlCode === 'ER_ROW_IS_REFERENCED_2' || sqlCode === 'ER_ROW_IS_REFERENCED') {
+    httpStatus = 409;
+    userMessage =
+      `[DATABASE WRITE ERROR] Data${tableInfo} tidak dapat dihapus atau diubah karena masih direferensikan oleh data turunan di database MySQL${codeInfo}.`;
+  } else if (sqlCode === 'ER_BAD_NULL_ERROR' || sqlCode === 'ER_NO_DEFAULT_FOR_FIELD') {
+    httpStatus = 400;
+    userMessage =
+      `[DATABASE WRITE ERROR] Kolom wajib${tableInfo} belum lengkap untuk struktur tabel MySQL${codeInfo}. Perubahan dibatalkan agar data tetap konsisten.`;
+  } else if (sqlCode === 'ER_NO_SUCH_TABLE' || sqlCode === 'ER_BAD_FIELD_ERROR') {
+    httpStatus = 500;
+    userMessage =
+      `[DATABASE WRITE ERROR] Struktur tabel atau kolom${tableInfo} di database MySQL belum sesuai${codeInfo}.`;
   } else if (sqlCode === 'ER_DUP_ENTRY') {
     httpStatus = 409;
-    userMessage = 'Data dengan kode atau identitas tersebut sudah terdaftar di database MySQL.';
+    userMessage = `[DATABASE WRITE ERROR] Data dengan kode atau identitas tersebut sudah terdaftar${tableInfo} di database MySQL.`;
   } else if (sqlCode === 'ER_DATA_TOO_LONG' || sqlCode === 'ER_TRUNCATED_WRONG_VALUE') {
     httpStatus = 400;
     userMessage =
-      'Format atau panjang data tidak sesuai dengan kolom tabel MySQL. Periksa kembali isian formulir Anda.';
+      `[DATABASE WRITE ERROR] Format atau panjang data tidak sesuai dengan kolom${tableInfo} di MySQL${codeInfo}. Periksa kembali isian Anda.`;
   }
 
   return Object.assign(new Error(`[MySQL Write Failed: ${contextLabel}] ${safeDetail}`), {
     httpStatus,
     userMessage,
     code: sqlCode || undefined,
+    errorCategory: 'DATABASE_WRITE_ERROR',
+    failedTable,
+    failedStage,
   });
 }
 
@@ -750,6 +836,118 @@ class Database {
         this.dirtySinceCommit = false;
         this.lastFullMysqlSyncAt = Date.now();
         this.lastUsersRefreshAt = Date.now();
+      } catch (err) {
+        this.lastMysqlErrorSummary = sanitizeDbError(err);
+        if (this.lastCommittedJson) {
+          try {
+            this.data = JSON.parse(this.lastCommittedJson);
+          } catch {
+            // ignore
+          }
+        }
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      } finally {
+        this.isCommittingWrite = false;
+      }
+    });
+  }
+
+  /**
+   * Mengeksekusi seluruh batch Import Excel Hirarki Program dalam satu transaksi atomik:
+   * - Pada mode MySQL produksi: memverifikasi Program induk di MySQL, menjalankan START TRANSACTION -> outcomes -> outputs -> activities -> sub_activities -> COMMIT,
+   *   lalu membaca ulang (SELECT) state terbaru dari MySQL agar data di memori & respons API 100% akurat sesuai isi tabel MySQL.
+   * - Jika gagal di tahap mana pun: ROLLBACK penuh tanpa meninggalkan data parsial.
+   */
+  public async executeHierarchyImportTransaction(
+    batchParams: MysqlHierarchyImportBatchParams
+  ): Promise<DatabaseSchema> {
+    const contextLabel = `POST /api/programs/${batchParams.programId}/import-hierarchy`;
+
+    if (!this.isStrictMysqlRequired()) {
+      const backupJson = JSON.stringify(this.data);
+      try {
+        console.log(`[IMPORT] DATABASE TRANSACTION STARTED (programId=${batchParams.programId}, mode=preview-local)`);
+        const progExists = (this.data.programs || []).some((p) => p.id === batchParams.programId);
+        if (!progExists) {
+          throw Object.assign(
+            new Error(`Parent program '${batchParams.programId}' not found.`),
+            {
+              code: 'PROGRAM_NOT_FOUND_IN_MYSQL',
+              failedTable: 'programs',
+              failedStage: 'PROGRAM VERIFICATION',
+            }
+          );
+        }
+        console.log(`[IMPORT] PROGRAM VERIFIED (programId=${batchParams.programId})`);
+
+        const upsertById = <T extends { id: string }>(list: T[], incoming: T[]): T[] => {
+          const map = new Map<string, T>();
+          for (const item of list) map.set(item.id, item);
+          for (const item of incoming) map.set(item.id, item);
+          return Array.from(map.values());
+        };
+
+        console.log(`[IMPORT] OUTCOME INSERT STARTED (count=${batchParams.outcomesToUpsert.length})`);
+        this.data.outcomes = upsertById(this.data.outcomes || [], batchParams.outcomesToUpsert);
+
+        console.log(`[IMPORT] OUTPUT INSERT STARTED (count=${batchParams.outputsToUpsert.length})`);
+        this.data.outputs = upsertById(this.data.outputs || [], batchParams.outputsToUpsert);
+
+        console.log(`[IMPORT] ACTIVITY INSERT STARTED (count=${batchParams.activitiesToUpsert.length})`);
+        this.data.activities = upsertById(this.data.activities || [], batchParams.activitiesToUpsert);
+
+        if (batchParams.subActivitiesToUpsert.length > 0) {
+          this.data.subActivities = upsertById(
+            this.data.subActivities || [],
+            batchParams.subActivitiesToUpsert
+          );
+        }
+        if (batchParams.auditLog) {
+          this.data.auditLogs = [...(this.data.auditLogs || []), batchParams.auditLog];
+        }
+
+        this.persistLocalJsonOnly(this.data);
+        this.lastCommittedJson = JSON.stringify(this.data);
+        this.dirtySinceCommit = false;
+        console.log(`[IMPORT] COMMIT SUCCESS (programId=${batchParams.programId}, mode=preview-local)`);
+        return this.data;
+      } catch (err) {
+        this.data = JSON.parse(backupJson);
+        this.dirtySinceCommit = false;
+        throw buildMysqlWriteFailureError(err, contextLabel);
+      }
+    }
+
+    if (this.mysqlStatus !== 'ready') {
+      throw Object.assign(new Error('MySQL database is not ready for hierarchy import.'), {
+        httpStatus: 503,
+        errorCategory: 'DATABASE_WRITE_ERROR',
+        userMessage:
+          '[DATABASE WRITE ERROR] Database MySQL sedang tidak siap menerima import hirarki. Silakan muat ulang halaman dan coba kembali.',
+      });
+    }
+
+    return this.enqueueWriteTask(async () => {
+      this.isCommittingWrite = true;
+      try {
+        const pool = await getMysqlPool();
+        if (!pool) {
+          throw new Error('MySQL connection pool is unavailable during hierarchy import.');
+        }
+
+        await importProgramHierarchyToMysql(pool, batchParams);
+
+        // Setelah COMMIT sukses di MySQL, muat ulang data otoritatif langsung dari MySQL (SELECT)
+        const freshFromMysql = await loadDatabaseFromMysql(pool);
+        if (freshFromMysql) {
+          this.data = normalizeSchema(freshFromMysql, { isFromMysql: true });
+          this.lastCommittedJson = JSON.stringify(this.data);
+          this.dirtySinceCommit = false;
+          this.lastFullMysqlSyncAt = Date.now();
+          this.lastUsersRefreshAt = Date.now();
+        }
+        return this.data;
       } catch (err) {
         this.lastMysqlErrorSummary = sanitizeDbError(err);
         if (this.lastCommittedJson) {

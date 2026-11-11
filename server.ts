@@ -68,9 +68,185 @@ import {
   resolveAttendanceWorkflowType,
   isAttendanceArrangementActiveOnCalendar,
 } from './src/server/attendanceService.ts';
+import {
+  buildHierarchyImportPlan,
+  parseProgramHierarchyWorkbookBuffer,
+} from './src/lib/hierarchyExcelParser.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const MAX_HIERARCHY_EXCEL_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Mengekstrak file biner Excel dari request `multipart/form-data` (tanpa menulis file sementara ke disk
+ * dan tanpa merusak byte biner ZIP `.xlsx`) maupun payload JSON `{ fileName, fileBase64 }`.
+ */
+async function extractExcelUploadFromRequest(
+  req: Request
+): Promise<{ fileName: string; buffer: Buffer }> {
+  const contentType = String(req.headers['content-type'] || '');
+
+  // Jalur 1: JSON base64 fallback
+  if (contentType.toLowerCase().includes('application/json')) {
+    const rawName = String(req.body?.fileName || '').trim();
+    const rawB64 = String(req.body?.fileBase64 || '').trim();
+    if (!rawName || !rawB64) {
+      throw Object.assign(new Error('Missing fileName or fileBase64 in JSON upload.'), {
+        httpStatus: 400,
+        errorCategory: 'UPLOAD_ERROR',
+        userMessage: '[UPLOAD ERROR] File Excel belum dipilih atau gagal dikirim ke server.',
+      });
+    }
+    const cleanB64 = rawB64.replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(cleanB64, 'base64');
+    if (buffer.byteLength === 0) {
+      throw Object.assign(new Error('Uploaded Excel file is 0 bytes.'), {
+        httpStatus: 400,
+        errorCategory: 'UPLOAD_ERROR',
+        userMessage: '[UPLOAD ERROR] File Excel kosong (0 byte).',
+      });
+    }
+    if (buffer.byteLength > MAX_HIERARCHY_EXCEL_BYTES) {
+      throw Object.assign(new Error('Uploaded Excel file exceeds 5 MB limit.'), {
+        httpStatus: 400,
+        errorCategory: 'UPLOAD_ERROR',
+        userMessage: '[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB).',
+      });
+    }
+    return { fileName: rawName, buffer };
+  }
+
+  // Jalur 2: Standar multipart/form-data binary upload
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;,\s]+))/i);
+  if (!contentType.toLowerCase().includes('multipart/form-data') || !boundaryMatch) {
+    throw Object.assign(new Error(`Unsupported upload Content-Type: ${contentType}`), {
+      httpStatus: 400,
+      errorCategory: 'UPLOAD_ERROR',
+      userMessage:
+        '[UPLOAD ERROR] Format pengiriman file tidak valid. Silakan pilih ulang file Excel (.xlsx, .xls, atau .csv).',
+    });
+  }
+
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+  const maxStreamBytes = MAX_HIERARCHY_EXCEL_BYTES + 256 * 1024;
+
+  const rawBody = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let settled = false;
+
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      received += buf.length;
+      if (received > maxStreamBytes) {
+        settled = true;
+        reject(
+          Object.assign(new Error('Multipart upload exceeded 5 MB limit.'), {
+            httpStatus: 400,
+            errorCategory: 'UPLOAD_ERROR',
+            userMessage: '[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB).',
+          })
+        );
+        return;
+      }
+      chunks.push(buf);
+    });
+
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+
+    req.on('error', (streamErr) => {
+      if (settled) return;
+      settled = true;
+      reject(
+        Object.assign(streamErr, {
+          httpStatus: 400,
+          errorCategory: 'UPLOAD_ERROR',
+          userMessage: '[UPLOAD ERROR] Koneksi terputus saat mengunggah file Excel ke server.',
+        })
+      );
+    });
+  });
+
+  const delimiter = Buffer.from(`--${boundary}`, 'latin1');
+  const headerEndMarker = Buffer.from('\r\n\r\n', 'latin1');
+
+  let searchPos = 0;
+  while (searchPos < rawBody.length) {
+    const partStart = rawBody.indexOf(delimiter, searchPos);
+    if (partStart === -1) break;
+    const afterDelimiter = partStart + delimiter.length;
+    if (
+      rawBody[afterDelimiter] === 0x2d &&
+      rawBody[afterDelimiter + 1] === 0x2d
+    ) {
+      break; // Penanda akhir `--boundary--`
+    }
+
+    const headerStart =
+      rawBody[afterDelimiter] === 0x0d && rawBody[afterDelimiter + 1] === 0x0a
+        ? afterDelimiter + 2
+        : afterDelimiter;
+    const headerEnd = rawBody.indexOf(headerEndMarker, headerStart);
+    if (headerEnd === -1) break;
+
+    const rawHeaders = rawBody.subarray(headerStart, headerEnd).toString('utf8');
+    const contentStart = headerEnd + headerEndMarker.length;
+    const nextPartBoundary = rawBody.indexOf(delimiter, contentStart);
+    if (nextPartBoundary === -1) break;
+
+    // Hapus trailing \r\n sebelum boundary berikutnya
+    let contentEnd = nextPartBoundary;
+    if (
+      contentEnd >= 2 &&
+      rawBody[contentEnd - 2] === 0x0d &&
+      rawBody[contentEnd - 1] === 0x0a
+    ) {
+      contentEnd -= 2;
+    }
+
+    const filenameMatch = rawHeaders.match(/filename="([^"]*)"/i);
+    if (filenameMatch) {
+      const fileName = filenameMatch[1].trim();
+      const fileSlice = Buffer.from(rawBody.subarray(contentStart, contentEnd));
+      if (!fileName) {
+        throw Object.assign(new Error('Empty filename in multipart upload.'), {
+          httpStatus: 400,
+          errorCategory: 'UPLOAD_ERROR',
+          userMessage: '[UPLOAD ERROR] Nama file Excel tidak ditemukan pada unggahan.',
+        });
+      }
+      if (fileSlice.byteLength === 0) {
+        throw Object.assign(new Error('Uploaded Excel file buffer is 0 bytes.'), {
+          httpStatus: 400,
+          errorCategory: 'UPLOAD_ERROR',
+          userMessage: '[UPLOAD ERROR] File Excel kosong (0 byte).',
+        });
+      }
+      if (fileSlice.byteLength > MAX_HIERARCHY_EXCEL_BYTES) {
+        throw Object.assign(new Error('Uploaded Excel file exceeds 5 MB limit.'), {
+          httpStatus: 400,
+          errorCategory: 'UPLOAD_ERROR',
+          userMessage: '[UPLOAD ERROR] Ukuran file Excel melebihi batas maksimum (5 MB).',
+        });
+      }
+      return { fileName, buffer: fileSlice };
+    }
+
+    searchPos = nextPartBoundary;
+  }
+
+  throw Object.assign(new Error('No file field found in multipart/form-data payload.'), {
+    httpStatus: 400,
+    errorCategory: 'UPLOAD_ERROR',
+    userMessage: '[UPLOAD ERROR] File Excel tidak ditemukan pada form unggahan.',
+  });
+}
 
 /**
  * Mendapatkan nomor urut TOR berikutnya untuk tahun tertentu.
@@ -823,10 +999,17 @@ async function startServer() {
               const errStatus = Number(commitErr?.httpStatus || commitErr?.status || 500);
               const errMsg =
                 commitErr?.userMessage ||
-                'Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.';
+                '[DATABASE WRITE ERROR] Gagal menyimpan perubahan ke database MySQL produksi. Perubahan dibatalkan.';
               res.status(errStatus);
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
-              originalSend(JSON.stringify({ error: errMsg }));
+              originalSend(
+                JSON.stringify({
+                  error: errMsg,
+                  errorCategory: commitErr?.errorCategory || 'DATABASE_WRITE_ERROR',
+                  failedTable: commitErr?.failedTable || undefined,
+                  mysqlErrorCode: commitErr?.code || undefined,
+                })
+              );
             });
           return res;
         }
@@ -2393,12 +2576,23 @@ async function startServer() {
     }
 
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = new Date().toISOString();
+    const existingProgOutcomeCount = (data.outcomes || []).filter(
+      (o) => o.programId === program.id
+    ).length;
+    const resolvedOutcomeNumber =
+      cleanNumber ||
+      cleanName.match(/^(Outcome\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, ' ').trim() ||
+      `Outcome ${existingProgOutcomeCount + 1}`;
+    const resolvedCode =
+      (typeof req.body?.code === 'string' && req.body.code.trim()) || resolvedOutcomeNumber;
 
     const newOutcome: Outcome = {
       id: `out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       programId: program.id,
       programName: program.name,
-      outcomeNumber: cleanNumber || undefined,
+      outcomeNumber: resolvedOutcomeNumber,
+      code: resolvedCode,
       name: cleanName,
       description: cleanDesc || cleanName,
       picId: picUser.id,
@@ -2406,8 +2600,9 @@ async function startServer() {
       projectName: program.name,
       status: status || 'Belum Dimulai',
       indicators: Array.isArray(indicators) ? indicators : [],
-      createdAt: new Date().toISOString(),
-    };
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    } as any;
 
     db.update((d) => {
       d.outcomes.push(newOutcome);
@@ -2420,7 +2615,7 @@ async function startServer() {
         entityType: 'PROGRAM',
         entityId: newOutcome.id,
         details: `Membuat Outcome baru: ${newOutcome.name} di bawah Program: ${program.name}`,
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso,
       });
     });
 
@@ -2440,9 +2635,19 @@ async function startServer() {
     }
 
     const { id } = req.params;
-    const { outcomeNumber, name, description, picId, projectName, indicators, status } = req.body;
+    const { outcomeNumber, code, name, description, picId, projectName, indicators, status } =
+      req.body;
     const data = db.getData();
+    const existingOutcome = (data.outcomes || []).find((o) => o.id === id);
+    if (!existingOutcome) {
+      return res.status(404).json({ error: 'Outcome tidak ditemukan' });
+    }
+    const parentProgram = (data.programs || []).find((p) => p.id === existingOutcome.programId);
+    if (!parentProgram) {
+      return res.status(400).json({ error: 'Program induk dari Outcome ini tidak ditemukan' });
+    }
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = new Date().toISOString();
 
     let updated: Outcome | null = null;
     db.update((d) => {
@@ -2462,19 +2667,38 @@ async function startServer() {
             : nextNum && nextDesc
             ? `${nextNum}: ${nextDesc}`
             : d.outcomes[idx].name;
+        const nextCode =
+          (typeof code === 'string' && code.trim()) ||
+          nextNum ||
+          (d.outcomes[idx] as any).code ||
+          undefined;
 
         d.outcomes[idx] = {
           ...d.outcomes[idx],
+          programId: parentProgram.id,
           outcomeNumber: nextNum || undefined,
+          code: nextCode,
           name: nextName,
           description: nextDesc ?? d.outcomes[idx].description,
           picId: picUser ? picUser.id : d.outcomes[idx].picId,
           picName: picUser ? picUser.name : d.outcomes[idx].picName,
-          projectName: projectName ?? d.outcomes[idx].projectName,
+          projectName: projectName ?? d.outcomes[idx].projectName ?? parentProgram.name,
           indicators: indicators ?? d.outcomes[idx].indicators,
           status: status ?? d.outcomes[idx].status,
-        };
+          updatedAt: nowIso,
+        } as any;
         updated = d.outcomes[idx];
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: 'Perubahan Outcome',
+          entityType: 'PROGRAM',
+          entityId: id,
+          details: `Memperbarui Outcome: ${nextName}`,
+          timestamp: nowIso,
+        });
       }
     });
 
@@ -2534,7 +2758,8 @@ async function startServer() {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Output' });
     }
 
-    const { outcomeId, outputNumber, name, description, picId, indicators, status } = req.body;
+    const { outcomeId, outputNumber, code, name, description, picId, indicators, status } =
+      req.body;
     const cleanNumber = String(outputNumber || '').trim();
     const cleanDesc = String(description || '').trim();
     const cleanName =
@@ -2548,28 +2773,53 @@ async function startServer() {
     }
 
     const data = db.getData();
-    const outcomeExists = data.outcomes.some((o) => o.id === outcomeId);
-    if (!outcomeExists) {
-      return res.status(400).json({ error: 'Outcome yang dipilih tidak valid' });
+    const parentOutcome = data.outcomes.find((o) => o.id === outcomeId);
+    if (!parentOutcome) {
+      return res.status(400).json({ error: 'Outcome induk yang dipilih tidak ditemukan' });
+    }
+    if (!parentOutcome.programId) {
+      return res.status(400).json({ error: 'Outcome induk belum terhubung ke Program yang valid' });
     }
 
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = new Date().toISOString();
+    const siblingCount = (data.outputs || []).filter((o) => o.outcomeId === outcomeId).length;
+    const ocDigits = parentOutcome.outcomeNumber?.match(/\d+/)?.[0] || '1';
+    const resolvedOutputNumber =
+      cleanNumber ||
+      cleanName.match(/^(Output\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, ' ').trim() ||
+      `Output ${ocDigits}.${siblingCount + 1}`;
+    const resolvedCode = (typeof code === 'string' && code.trim()) || resolvedOutputNumber;
 
     const newOutput: Output = {
       id: `outp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      outcomeId,
-      outputNumber: cleanNumber || undefined,
+      programId: parentOutcome.programId,
+      outcomeId: parentOutcome.id,
+      outputNumber: resolvedOutputNumber,
+      code: resolvedCode,
       name: cleanName,
       description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
       status: status || 'Belum Dimulai',
       indicators: Array.isArray(indicators) ? indicators : [],
-      createdAt: new Date().toISOString(),
-    };
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    } as any;
 
     db.update((d) => {
       d.outputs.push(newOutput);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Pembuatan Output',
+        entityType: 'PROGRAM',
+        entityId: newOutput.id,
+        details: `Membuat Output baru: ${newOutput.name} di bawah Outcome: ${parentOutcome.name}`,
+        timestamp: nowIso,
+      });
     });
 
     res.status(201).json(newOutput);
@@ -2588,9 +2838,20 @@ async function startServer() {
     }
 
     const { id } = req.params;
-    const { outputNumber, name, description, picId, indicators, status, outcomeId } = req.body;
+    const { outputNumber, code, name, description, picId, indicators, status, outcomeId } =
+      req.body;
     const data = db.getData();
+    const existingOutput = data.outputs.find((o) => o.id === id);
+    if (!existingOutput) {
+      return res.status(404).json({ error: 'Output tidak ditemukan' });
+    }
+    const targetOutcomeId = outcomeId ?? existingOutput.outcomeId;
+    const parentOutcome = data.outcomes.find((o) => o.id === targetOutcomeId);
+    if (!parentOutcome) {
+      return res.status(400).json({ error: 'Outcome induk dari Output ini tidak ditemukan' });
+    }
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = new Date().toISOString();
 
     let updated: Output | null = null;
     db.update((d) => {
@@ -2610,19 +2871,38 @@ async function startServer() {
             : nextNum && nextDesc
             ? `${nextNum}: ${nextDesc}`
             : d.outputs[idx].name;
+        const nextCode =
+          (typeof code === 'string' && code.trim()) ||
+          nextNum ||
+          (d.outputs[idx] as any).code ||
+          undefined;
 
         d.outputs[idx] = {
           ...d.outputs[idx],
-          outcomeId: outcomeId ?? d.outputs[idx].outcomeId,
+          programId: parentOutcome.programId,
+          outcomeId: parentOutcome.id,
           outputNumber: nextNum || undefined,
+          code: nextCode,
           name: nextName,
           description: nextDesc ?? d.outputs[idx].description,
           picId: picUser ? picUser.id : d.outputs[idx].picId,
           picName: picUser ? picUser.name : d.outputs[idx].picName,
           indicators: indicators ?? d.outputs[idx].indicators,
           status: status ?? d.outputs[idx].status,
-        };
+          updatedAt: nowIso,
+        } as any;
         updated = d.outputs[idx];
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: 'Perubahan Output',
+          entityType: 'PROGRAM',
+          entityId: id,
+          details: `Memperbarui Output: ${nextName}`,
+          timestamp: nowIso,
+        });
       }
     });
 
@@ -2653,6 +2933,17 @@ async function startServer() {
 
     db.update((d) => {
       d.outputs = d.outputs.filter((o) => o.id !== id);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Penghapusan Output',
+        entityType: 'PROGRAM',
+        entityId: id,
+        details: `Menghapus Output ID: ${id}`,
+        timestamp: new Date().toISOString(),
+      });
     });
 
     res.json({ message: 'Output berhasil dihapus' });
@@ -2689,22 +2980,37 @@ async function startServer() {
     }
 
     const data = db.getData();
-    const outputExists = data.outputs.some((o) => o.id === outputId);
-    if (!outputExists) {
-      return res.status(400).json({ error: 'Output yang dipilih tidak valid' });
+    const parentOutput: any = data.outputs.find((o) => o.id === outputId);
+    if (!parentOutput) {
+      return res.status(400).json({ error: 'Output induk yang dipilih tidak ditemukan' });
+    }
+    const parentOutcome = data.outcomes.find((oc) => oc.id === parentOutput.outcomeId);
+    const resolvedProgramId = parentOutput.programId || parentOutcome?.programId || '';
+    if (!resolvedProgramId || !parentOutput.outcomeId) {
+      return res.status(400).json({
+        error: 'Relasi Program / Outcome induk pada Output ini belum lengkap',
+      });
     }
 
     const picUser = data.users.find((u) => u.id === picId) || currentUser;
+    const nowIso = new Date().toISOString();
+    const siblingActCount = (data.activities || []).filter((a) => a.outputId === outputId).length;
+    const opDigits = parentOutput.outputNumber?.match(/[\d.]+/)?.[0] || '1.1';
+    const resolvedActNumber =
+      (typeof activityNumber === 'string' && activityNumber.trim()) ||
+      String(name).match(/^(Activity\s*[\d.]+)/i)?.[1]?.replace(/\s+/g, ' ').trim() ||
+      `Activity ${opDigits}.${siblingActCount + 1}`;
+    const resolvedCode =
+      (typeof code === 'string' && code.trim()) || `${opDigits}.${siblingActCount + 1}`;
 
     const newActivity: Activity = {
       id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      outputId,
-      activityNumber:
-        typeof activityNumber === 'string' && activityNumber.trim()
-          ? activityNumber.trim()
-          : undefined,
-      name,
-      code: typeof code === 'string' && code.trim() ? code.trim() : undefined,
+      programId: resolvedProgramId,
+      outcomeId: parentOutput.outcomeId,
+      outputId: parentOutput.id,
+      activityNumber: resolvedActNumber,
+      name: String(name).trim(),
+      code: resolvedCode,
       description: description || '',
       anticipatedInputs:
         typeof anticipatedInputs === 'string' ? anticipatedInputs.trim() : undefined,
@@ -2714,14 +3020,26 @@ async function startServer() {
           : undefined,
       picId: picUser.id,
       picName: picUser.name,
-      startDate: startDate || new Date().toISOString().slice(0, 10),
-      endDate: endDate || new Date().toISOString().slice(0, 10),
+      startDate: startDate || nowIso.slice(0, 10),
+      endDate: endDate || nowIso.slice(0, 10),
       status: status || 'Belum Dimulai',
-      createdAt: new Date().toISOString(),
-    };
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    } as any;
 
     db.update((d) => {
       d.activities.push(newActivity);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Pembuatan Activity',
+        entityType: 'PROGRAM',
+        entityId: newActivity.id,
+        details: `Membuat Activity baru: ${newActivity.name} di bawah Output: ${parentOutput.name}`,
+        timestamp: nowIso,
+      });
     });
 
     res.status(201).json(newActivity);
@@ -2754,27 +3072,44 @@ async function startServer() {
       outputId,
     } = req.body;
     const data = db.getData();
+    const existingAct: any = data.activities.find((a) => a.id === id);
+    if (!existingAct) {
+      return res.status(404).json({ error: 'Activity tidak ditemukan' });
+    }
+    const targetOutputId = outputId ?? existingAct.outputId;
+    const parentOutput: any = data.outputs.find((o) => o.id === targetOutputId);
+    if (!parentOutput) {
+      return res.status(400).json({ error: 'Output induk dari Activity ini tidak ditemukan' });
+    }
+    const parentOutcome = data.outcomes.find((oc) => oc.id === parentOutput.outcomeId);
+    const resolvedProgramId =
+      parentOutput.programId || parentOutcome?.programId || existingAct.programId || '';
+    const resolvedOutcomeId = parentOutput.outcomeId || existingAct.outcomeId || '';
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = new Date().toISOString();
 
     let updated: Activity | null = null;
     db.update((d) => {
       const idx = d.activities.findIndex((a) => a.id === id);
       if (idx !== -1) {
+        const nextActNum =
+          activityNumber !== undefined
+            ? typeof activityNumber === 'string' && activityNumber.trim()
+              ? activityNumber.trim()
+              : undefined
+            : d.activities[idx].activityNumber;
         const nextCode =
           code !== undefined
             ? typeof code === 'string' && code.trim()
               ? code.trim()
               : undefined
-            : d.activities[idx].code;
+            : d.activities[idx].code || nextActNum;
         d.activities[idx] = {
           ...d.activities[idx],
-          outputId: outputId ?? d.activities[idx].outputId,
-          activityNumber:
-            activityNumber !== undefined
-              ? typeof activityNumber === 'string' && activityNumber.trim()
-                ? activityNumber.trim()
-                : undefined
-              : d.activities[idx].activityNumber,
+          programId: resolvedProgramId,
+          outcomeId: resolvedOutcomeId,
+          outputId: parentOutput.id,
+          activityNumber: nextActNum,
           name: name ?? d.activities[idx].name,
           code: nextCode,
           description: description ?? d.activities[idx].description,
@@ -2795,7 +3130,8 @@ async function startServer() {
           startDate: startDate ?? d.activities[idx].startDate,
           endDate: endDate ?? d.activities[idx].endDate,
           status: status ?? d.activities[idx].status,
-        };
+          updatedAt: nowIso,
+        } as any;
         updated = d.activities[idx];
 
         if (nextCode) {
@@ -2806,6 +3142,18 @@ async function startServer() {
             }
           });
         }
+
+        d.auditLogs.unshift({
+          id: `log-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: 'Perubahan Activity',
+          entityType: 'PROGRAM',
+          entityId: id,
+          details: `Memperbarui Activity: ${d.activities[idx].name}`,
+          timestamp: nowIso,
+        });
       }
     });
 
@@ -2837,6 +3185,17 @@ async function startServer() {
     db.update((d) => {
       d.activities = d.activities.filter((a) => a.id !== id);
       d.subActivities = d.subActivities.filter((s) => s.activityId !== id);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Penghapusan Activity',
+        entityType: 'PROGRAM',
+        entityId: id,
+        details: `Menghapus Activity ID: ${id}`,
+        timestamp: new Date().toISOString(),
+      });
     });
 
     res.json({ message: 'Activity berhasil dihapus' });
@@ -2855,28 +3214,94 @@ async function startServer() {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Sub-Activity' });
     }
 
-    const { activityId, name, description, picName, startDate, endDate, status } = req.body;
+    const { activityId, name, code, description, picName, startDate, endDate, status } = req.body;
     if (!activityId || !name) {
       return res.status(400).json({ error: 'Activity ID dan Nama Sub-Activity wajib diisi' });
     }
 
+    const data = db.getData();
+    const parentAct: any = data.activities.find((a) => a.id === activityId);
+    if (!parentAct) {
+      return res.status(400).json({ error: 'Activity induk yang dipilih tidak ditemukan' });
+    }
+    const parentOutp: any = data.outputs.find((o) => o.id === parentAct.outputId);
+    const parentOutc = parentOutp
+      ? data.outcomes.find((oc) => oc.id === parentOutp.outcomeId)
+      : undefined;
+    const nowIso = new Date().toISOString();
+
     const newSub: SubActivity = {
-      id: `sub-${Date.now()}`,
-      activityId,
-      name,
+      id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      programId: parentAct.programId || parentOutp?.programId || parentOutc?.programId || '',
+      outcomeId: parentAct.outcomeId || parentOutp?.outcomeId || '',
+      outputId: parentAct.outputId || '',
+      activityId: parentAct.id,
+      code: typeof code === 'string' && code.trim() ? code.trim() : undefined,
+      name: String(name).trim(),
       description: description || '',
       picName: picName || '',
       startDate: startDate || '',
       endDate: endDate || '',
       status: status || 'Belum Dimulai',
-      createdAt: new Date().toISOString(),
-    };
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    } as any;
 
     db.update((d) => {
       d.subActivities.push(newSub);
+      d.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Pembuatan Sub-Activity',
+        entityType: 'PROGRAM',
+        entityId: newSub.id,
+        details: `Membuat Sub-Activity baru: ${newSub.name}`,
+        timestamp: nowIso,
+      });
     });
 
     res.status(201).json(newSub);
+  });
+
+  app.put('/api/sub-activities/:id', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
+      return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Sub-Activity' });
+    }
+
+    const { id } = req.params;
+    const { name, code, description, picName, startDate, endDate, status } = req.body;
+    const nowIso = new Date().toISOString();
+    let updated: SubActivity | null = null;
+
+    db.update((d) => {
+      const idx = d.subActivities.findIndex((s) => s.id === id);
+      if (idx !== -1) {
+        d.subActivities[idx] = {
+          ...d.subActivities[idx],
+          name: name ?? d.subActivities[idx].name,
+          code: code !== undefined ? String(code).trim() || undefined : (d.subActivities[idx] as any).code,
+          description: description ?? d.subActivities[idx].description,
+          picName: picName ?? d.subActivities[idx].picName,
+          startDate: startDate ?? d.subActivities[idx].startDate,
+          endDate: endDate ?? d.subActivities[idx].endDate,
+          status: status ?? d.subActivities[idx].status,
+          updatedAt: nowIso,
+        } as any;
+        updated = d.subActivities[idx];
+      }
+    });
+
+    if (!updated) return res.status(404).json({ error: 'Sub-Activity tidak ditemukan' });
+    res.json(updated);
   });
 
   app.delete('/api/sub-activities/:id', (req: Request, res: Response) => {
@@ -2893,6 +3318,241 @@ async function startServer() {
       d.subActivities = d.subActivities.filter((s) => s.id !== id);
     });
     res.json({ message: 'Sub-Activity berhasil dihapus' });
+  });
+
+  /**
+   * Endpoint Transaksional Atomik untuk Import Excel Hirarki Program:
+   * Upload File -> Parse Excel -> Validate All Rows -> Map Hierarchy -> Single MySQL Transaction -> COMMIT/ROLLBACK -> Reload from MySQL
+   */
+  app.post('/api/programs/:id/import-hierarchy', async (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'meal' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
+      return res.status(403).json({
+        errorCategory: 'AUTHORIZATION_ERROR',
+        error: 'Tidak memiliki kewenangan untuk mengimpor Hirarki Program.',
+      });
+    }
+
+    const programId = String(req.params.id || '').trim();
+    console.log(
+      `[IMPORT] IMPORT REQUEST RECEIVED (programId=${programId}, user=${currentUser.id}, role=${currentUser.role})`
+    );
+
+    if (!programId) {
+      return res.status(400).json({
+        errorCategory: 'VALIDATION_ERROR',
+        error: '[VALIDATION ERROR] ID Program induk wajib disertakan.',
+      });
+    }
+
+    // 1. Ekstrak & validasi file unggahan (UPLOAD ERROR check)
+    const { fileName, buffer } = await extractExcelUploadFromRequest(req);
+    const lowerFileName = fileName.toLowerCase();
+    if (!/\.(xlsx|xls|csv)$/.test(lowerFileName)) {
+      console.warn(`[IMPORT] UPLOAD REJECTED (invalid format: ${fileName})`);
+      return res.status(400).json({
+        errorCategory: 'UPLOAD_ERROR',
+        error: `[UPLOAD ERROR] Format file "${fileName}" tidak didukung. Gunakan file .xlsx, .xls, atau .csv.`,
+      });
+    }
+
+    const currentData = db.getData();
+    const targetProgram = (currentData.programs || []).find((p) => p.id === programId);
+    if (!targetProgram) {
+      return res.status(404).json({
+        errorCategory: 'VALIDATION_ERROR',
+        error: '[VALIDATION ERROR] Program induk yang dipilih tidak ditemukan di database.',
+      });
+    }
+
+    // 2. Parse workbook Excel di server (EXCEL PARSING ERROR check)
+    let parsedResult;
+    try {
+      parsedResult = parseProgramHierarchyWorkbookBuffer({
+        buffer,
+        program: targetProgram,
+        existingOutcomes: currentData.outcomes || [],
+        existingOutputs: currentData.outputs || [],
+        existingActivities: currentData.activities || [],
+        existingSubActivities: currentData.subActivities || [],
+      });
+    } catch (parseErr: any) {
+      console.error(
+        `[IMPORT] EXCEL PARSING FAILED (file="${fileName}"): ${parseErr?.message || parseErr}`
+      );
+      return res.status(400).json({
+        errorCategory: 'EXCEL_PARSING_ERROR',
+        error: `[EXCEL PARSING ERROR] File "${fileName}" gagal dibaca: ${
+          parseErr?.message || 'Format workbook Excel rusak atau tidak valid.'
+        }`,
+      });
+    }
+
+    console.log(
+      `[IMPORT] FILE PARSED (file="${fileName}", sheet="${parsedResult.sheetName}", sheets=${parsedResult.sheetCount})`
+    );
+    console.log(`[IMPORT] ROWS DETECTED: ${parsedResult.rows.length}`);
+
+    // 3. Validasi struktur kolom & keutuhan seluruh baris sebelum menyentuh database (VALIDATION ERROR check)
+    if (!parsedResult.headerMatched && parsedResult.rawRowCount > 0) {
+      return res.status(400).json({
+        errorCategory: 'VALIDATION_ERROR',
+        error: `[VALIDATION ERROR] Kolom wajib Hirarki Program (Outcome / Nomor outcome, Output, Activity) tidak ditemukan pada file "${fileName}".`,
+      });
+    }
+
+    if (parsedResult.rows.length === 0) {
+      return res.status(400).json({
+        errorCategory: 'VALIDATION_ERROR',
+        error: `[VALIDATION ERROR] File Excel "${fileName}" kosong atau tidak memiliki baris data Hirarki Program yang dapat diimpor.`,
+      });
+    }
+
+    const invalidRows = parsedResult.rows.filter((r) => r.status === 'invalid');
+    if (invalidRows.length > 0) {
+      const rowErrorPreview = invalidRows
+        .slice(0, 5)
+        .map((r) => `Baris ${r.rowNumber}: ${r.statusMessage}`)
+        .join('; ');
+      console.warn(
+        `[IMPORT] VALIDATION FAILED (invalidRows=${invalidRows.length}): ${rowErrorPreview}`
+      );
+      return res.status(400).json({
+        errorCategory: 'VALIDATION_ERROR',
+        error: `[VALIDATION ERROR] Ditemukan ${invalidRows.length} baris tidak valid pada file "${fileName}" (${rowErrorPreview}). Perbaiki baris tersebut terlebih dahulu — tidak ada data yang disimpan.`,
+        rowErrors: invalidRows.map((r) => ({
+          rowNumber: r.rowNumber,
+          message: r.statusMessage,
+        })),
+      });
+    }
+
+    const validRows = parsedResult.rows.filter((r) => r.status === 'valid');
+    const duplicateRows = parsedResult.rows.filter((r) => r.status === 'duplicate');
+    console.log(
+      `[IMPORT] VALIDATION PASSED (validRows=${validRows.length}, duplicateRows=${duplicateRows.length})`
+    );
+
+    if (validRows.length === 0) {
+      return res.json({
+        alreadyUpToDate: true,
+        message: `Seluruh ${duplicateRows.length} baris pada file "${fileName}" sudah terdaftar di Hirarki Program "${targetProgram.name}".`,
+        summary: {
+          detectedRows: parsedResult.rows.length,
+          importedRows: 0,
+          duplicateRows: duplicateRows.length,
+          createdOutcomes: 0,
+          createdOutputs: 0,
+          createdActivities: 0,
+          createdSubActivities: 0,
+        },
+        expandedOutcomeIds: [],
+        expandedOutputIds: [],
+      });
+    }
+
+    // 4. Bangun rencana relasional lengkap (Program -> Outcome -> Output -> Activity -> SubActivity)
+    const nowIso = new Date().toISOString();
+    const plan = buildHierarchyImportPlan({
+      validRows,
+      program: targetProgram,
+      existingOutcomes: currentData.outcomes || [],
+      existingOutputs: currentData.outputs || [],
+      existingActivities: currentData.activities || [],
+      existingSubActivities: currentData.subActivities || [],
+      nowIso,
+    });
+
+    const summaryParts: string[] = [];
+    if (plan.createdOutcomesCount > 0) summaryParts.push(`${plan.createdOutcomesCount} Outcome`);
+    if (plan.addedOutcomeIndicatorsCount > 0) {
+      summaryParts.push(`${plan.addedOutcomeIndicatorsCount} Indikator Outcome`);
+    }
+    if (plan.createdOutputsCount > 0) summaryParts.push(`${plan.createdOutputsCount} Output`);
+    if (plan.addedOutputIndicatorsCount > 0) {
+      summaryParts.push(`${plan.addedOutputIndicatorsCount} Indikator Output`);
+    }
+    if (plan.createdActivitiesCount > 0) {
+      summaryParts.push(`${plan.createdActivitiesCount} Activity`);
+    }
+    if (plan.createdSubActivitiesCount > 0) {
+      summaryParts.push(`${plan.createdSubActivitiesCount} Sub-Activity`);
+    }
+
+    const auditLog: AuditLog = {
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      actorId: currentUser.id,
+      actorName: currentUser.name,
+      actorRole: currentUser.roleTitle,
+      action: 'Import Excel Hirarki Program',
+      entityType: 'PROGRAM',
+      entityId: targetProgram.id,
+      details: `Mengimpor Hirarki Program dari file "${fileName}" ke Program "${targetProgram.name}": ${
+        summaryParts.join(', ') || 'Pembaruan hirarki'
+      }`,
+      timestamp: nowIso,
+    };
+
+    // 5. Eksekusi dalam SATU transaksi MySQL atomik + muat ulang data terbaru dari MySQL
+    const freshData = await db.executeHierarchyImportTransaction({
+      programId: targetProgram.id,
+      outcomesToUpsert: plan.outcomesToUpsert,
+      outputsToUpsert: plan.outputsToUpsert,
+      activitiesToUpsert: plan.activitiesToUpsert,
+      subActivitiesToUpsert: plan.subActivitiesToUpsert,
+      auditLog,
+    });
+
+    const progOutcomeIds = new Set(
+      (freshData.outcomes || [])
+        .filter((o) => o.programId === targetProgram.id)
+        .map((o) => o.id)
+    );
+    const progOutputIds = new Set(
+      (freshData.outputs || [])
+        .filter((o) => progOutcomeIds.has(o.outcomeId))
+        .map((o) => o.id)
+    );
+    const progActivityIds = new Set(
+      (freshData.activities || [])
+        .filter((a) => progOutputIds.has(a.outputId))
+        .map((a) => a.id)
+    );
+
+    res.status(200).json({
+      alreadyUpToDate: false,
+      message: `Hirarki Program berhasil diimpor dan tersimpan ke database dari file "${fileName}": ${
+        summaryParts.join(', ') || 'Hirarki diperbarui'
+      }.`,
+      summary: {
+        detectedRows: parsedResult.rows.length,
+        importedRows: validRows.length,
+        duplicateRows: duplicateRows.length,
+        createdOutcomes: plan.createdOutcomesCount,
+        updatedOutcomes: plan.updatedOutcomesCount,
+        addedOutcomeIndicators: plan.addedOutcomeIndicatorsCount,
+        createdOutputs: plan.createdOutputsCount,
+        updatedOutputs: plan.updatedOutputsCount,
+        addedOutputIndicators: plan.addedOutputIndicatorsCount,
+        createdActivities: plan.createdActivitiesCount,
+        updatedActivities: plan.updatedActivitiesCount,
+        createdSubActivities: plan.createdSubActivitiesCount,
+      },
+      expandedOutcomeIds: plan.expandedOutcomeIds,
+      expandedOutputIds: plan.expandedOutputIds,
+      outcomes: (freshData.outcomes || []).filter((o) => progOutcomeIds.has(o.id)),
+      outputs: (freshData.outputs || []).filter((o) => progOutputIds.has(o.id)),
+      activities: (freshData.activities || []).filter((a) => progActivityIds.has(a.id)),
+      subActivities: (freshData.subActivities || []).filter((s) =>
+        progActivityIds.has(s.activityId)
+      ),
+    });
   });
 
   // --- TOR APIS ---
@@ -10365,6 +11025,9 @@ async function startServer() {
         (statusCode === 401
           ? 'Sesi otentikasi tidak valid atau telah berakhir. Silakan login kembali.'
           : 'Terjadi kesalahan pemrosesan pada server saat menyimpan atau memuat data.'),
+      errorCategory: err?.errorCategory || undefined,
+      failedTable: err?.failedTable || undefined,
+      mysqlErrorCode: err?.code || undefined,
     });
   });
 

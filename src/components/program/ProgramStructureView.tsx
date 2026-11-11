@@ -244,6 +244,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     HierarchyExcelPreviewRow[]
   >([]);
   const [hierarchyExcelFileName, setHierarchyExcelFileName] = useState('');
+  const [pendingHierarchyExcelFile, setPendingHierarchyExcelFile] = useState<File | null>(null);
   const [showHierarchyExcelPreviewModal, setShowHierarchyExcelPreviewModal] = useState(false);
   const [importingHierarchyExcel, setImportingHierarchyExcel] = useState(false);
 
@@ -586,13 +587,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         description: cleanDesc,
         indicators: cleanedIndicators,
       } as any);
+      await Promise.resolve(onRefresh());
       setSelectedOutcomeDetail(updated);
       setIsEditingOutcomeModal(false);
+      setErrorMessage(null);
       setSuccessMessage(
-        `Outcome "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan.`
+        `Outcome "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan ke database.`
       );
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err?.message || 'Gagal menyimpan perubahan Outcome.');
     } finally {
       setSavingOutcomeDetail(false);
@@ -685,13 +688,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         description: cleanDesc,
         indicators: cleanedIndicators,
       } as any);
+      await Promise.resolve(onRefresh());
       setSelectedOutputDetail(updated);
       setIsEditingOutputModal(false);
+      setErrorMessage(null);
       setSuccessMessage(
-        `Output "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan.`
+        `Output "${cleanNum}" beserta ${cleanedIndicators.length} Progress Indicator berhasil disimpan ke database.`
       );
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err?.message || 'Gagal menyimpan perubahan Output.');
     } finally {
       setSavingOutputDetail(false);
@@ -1444,310 +1449,71 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     await executeDirectMasterCodeImport(excelPreviewRows, excelFileName);
   };
 
-  // Hirarki Program (3 Level: Outcome -> Output -> Activity) Excel Template & Automatic Direct Import Handler
+  // Hirarki Program (Outcome -> Output -> Activity -> Sub-Activity) Atomic Server Transaction Import Handler
   const executeHierarchyExcelImport = async (
-    rowsToImport: HierarchyExcelPreviewRow[],
+    fileToUpload: File,
+    rowsToPreview: HierarchyExcelPreviewRow[],
     targetProg: Program,
     fileNameLabel: string
   ) => {
-    const validRows = rowsToImport.filter((r) => r.status === 'valid');
-    if (validRows.length === 0) {
-      setShowHierarchyExcelPreviewModal(false);
-      setSuccessMessage(
-        `Seluruh data pada file "${fileNameLabel}" sudah terdaftar di Hirarki Program "${targetProg.name}".`
+    const invalidRows = rowsToPreview.filter((r) => r.status === 'invalid');
+    if (invalidRows.length > 0) {
+      const firstErrors = invalidRows
+        .slice(0, 4)
+        .map((r) => `Baris ${r.rowNumber}: ${r.statusMessage}`)
+        .join('; ');
+      setHierarchyExcelPreviewRows(rowsToPreview);
+      setShowHierarchyExcelPreviewModal(true);
+      setSuccessMessage(null);
+      setErrorMessage(
+        `[VALIDATION ERROR] Ditemukan ${invalidRows.length} baris tidak valid pada file "${fileNameLabel}" (${firstErrors}). Perbaiki file Excel terlebih dahulu — tidak ada data yang disimpan ke database.`
       );
       return;
     }
 
     setImportingHierarchyExcel(true);
     setErrorMessage(null);
+    setSuccessMessage(null);
 
     try {
-      const outcomeIdByName = new Map<string, string>();
-      const outcomeIndicatorsById = new Map<string, Indicator[]>();
-      const outputIdByKey = new Map<string, string>();
-      const outputIndicatorsById = new Map<string, Indicator[]>();
-      const activityIdByKey = new Map<string, string>();
+      const result = await api.importProgramHierarchyExcel(targetProg.id, fileToUpload);
 
-      const normalizeOcKey = (num: string, desc: string, fallbackName: string): string => {
-        const cleanNum = (num || (fallbackName.match(/^(Outcome\s*[\d.]+)/i)?.[1] ?? ''))
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toLowerCase();
-        if (cleanNum) return cleanNum;
-        return (fallbackName || desc).trim().toLowerCase();
-      };
+      // Muat ulang data aktual dari database MySQL sebelum menampilkan status berhasil
+      await Promise.resolve(onRefresh());
 
-      const normalizeOpKey = (num: string, desc: string, fallbackName: string): string => {
-        const cleanNum = (num || (fallbackName.match(/^(Output\s*[\d.]+)/i)?.[1] ?? ''))
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toLowerCase();
-        if (cleanNum) return cleanNum;
-        return (fallbackName || desc).trim().toLowerCase();
-      };
-
-      const normalizeActKey = (num: string, actName: string): string => {
-        const cleanNum = (num || (actName.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? ''))
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toLowerCase();
-        if (cleanNum) return cleanNum;
-        return actName.replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '').trim().toLowerCase();
-      };
-
-      const progOutcomes = outcomes.filter((o) => o.programId === targetProg.id);
-      progOutcomes.forEach((oc) => {
-        const ocKey = normalizeOcKey(oc.outcomeNumber || '', oc.description || '', oc.name);
-        outcomeIdByName.set(ocKey, oc.id);
-        outcomeIdByName.set(oc.name.trim().toLowerCase(), oc.id);
-        if (oc.outcomeNumber) {
-          outcomeIdByName.set(oc.outcomeNumber.trim().toLowerCase(), oc.id);
-        }
-        outcomeIndicatorsById.set(oc.id, [...(oc.indicators || [])]);
-        outputs
-          .filter((op) => op.outcomeId === oc.id)
-          .forEach((op) => {
-            const opNorm = normalizeOpKey(op.outputNumber || '', op.description || '', op.name);
-            const opKey = `${ocKey}__${opNorm}`;
-            outputIdByKey.set(opKey, op.id);
-            outputIdByKey.set(`${ocKey}__${op.name.trim().toLowerCase()}`, op.id);
-            if (op.outputNumber) {
-              outputIdByKey.set(`${ocKey}__${op.outputNumber.trim().toLowerCase()}`, op.id);
-            }
-            outputIndicatorsById.set(op.id, [...(op.indicators || [])]);
-            activities
-              .filter((a) => a.outputId === op.id)
-              .forEach((act) => {
-                const actNorm = normalizeActKey(act.activityNumber || '', act.name);
-                activityIdByKey.set(`${opKey}__${actNorm}`, act.id);
-                activityIdByKey.set(`${opKey}__${act.name.trim().toLowerCase()}`, act.id);
-              });
-          });
-      });
-
-      let createdOutcomesCount = 0;
-      let addedOutcomeIndicatorsCount = 0;
-      let createdOutputsCount = 0;
-      let addedOutputIndicatorsCount = 0;
-      let createdActivitiesCount = 0;
-      const newlyExpandedOutcomes: Record<string, boolean> = {};
-      const newlyExpandedOutputs: Record<string, boolean> = {};
-
-      for (const row of validRows) {
-        const ocKey = normalizeOcKey(
-          row.outcomeNumber,
-          row.outcomeDescription,
-          row.outcomeName
-        );
-        let outcomeId =
-          outcomeIdByName.get(ocKey) ||
-          outcomeIdByName.get(row.outcomeName.trim().toLowerCase()) ||
-          (row.outcomeNumber
-            ? outcomeIdByName.get(row.outcomeNumber.trim().toLowerCase())
-            : undefined);
-
-        const buildOutcomeIndicatorFromRow = (): Indicator | null => {
-          if (!row.outcomeIndicator || !row.outcomeIndicator.trim()) return null;
-          return {
-            id: `ind-oc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            name: row.outcomeIndicator.trim(),
-            description: '',
-            dataSource: row.outcomeDataSource || 'Laporan MEAL',
-            cumulativeType: row.outcomeCumulative || 'Non cumulative',
-            plannedDataBreakdown: row.outcomePlannedBreakdown || '',
-            reportingFrequency: row.outcomeReportingFrequency || 'Annual',
-            baseline: row.outcomeBaseline || 'TBA',
-            target: row.outcomeTarget || '',
-            endOfProjectGoal: row.outcomeTarget || '',
-            unit: row.outcomeUnit || '',
-            verificationMethod: row.outcomeDataSource || 'Laporan MEAL',
-          };
-        };
-
-        if (!outcomeId) {
-          const indicators: Indicator[] = [];
-          const firstInd = buildOutcomeIndicatorFromRow();
-          if (firstInd) {
-            indicators.push(firstInd);
-            addedOutcomeIndicatorsCount += 1;
-          }
-          const createdOc = await api.createOutcome({
-            programId: targetProg.id,
-            outcomeNumber: row.outcomeNumber || undefined,
-            name: row.outcomeName.trim(),
-            projectName: targetProg.name,
-            description: row.outcomeDescription || row.outcomeName.trim(),
-            indicators,
-            status: 'Belum Dimulai',
-          } as any);
-          outcomeId = createdOc.id;
-          outcomeIdByName.set(ocKey, outcomeId);
-          outcomeIdByName.set(row.outcomeName.trim().toLowerCase(), outcomeId);
-          if (row.outcomeNumber) {
-            outcomeIdByName.set(row.outcomeNumber.trim().toLowerCase(), outcomeId);
-          }
-          outcomeIndicatorsById.set(outcomeId, indicators);
-          newlyExpandedOutcomes[outcomeId] = true;
-          createdOutcomesCount += 1;
-        } else {
-          newlyExpandedOutcomes[outcomeId] = true;
-          const nextInd = buildOutcomeIndicatorFromRow();
-          if (nextInd) {
-            const currentInds = outcomeIndicatorsById.get(outcomeId) || [];
-            const alreadyHas = currentInds.some(
-              (i) => i.name.trim().toLowerCase() === nextInd.name.toLowerCase()
-            );
-            if (!alreadyHas) {
-              const updatedInds = [...currentInds, nextInd];
-              outcomeIndicatorsById.set(outcomeId, updatedInds);
-              await api.updateOutcome(outcomeId, {
-                indicators: updatedInds,
-              } as any);
-              addedOutcomeIndicatorsCount += 1;
-            }
-          }
-        }
-
-        if (row.outputName && outcomeId) {
-          const opNorm = normalizeOpKey(
-            row.outputNumber,
-            row.outputDescription,
-            row.outputName
-          );
-          const opKey = `${ocKey}__${opNorm}`;
-          let outputId =
-            outputIdByKey.get(opKey) ||
-            outputIdByKey.get(`${ocKey}__${row.outputName.trim().toLowerCase()}`) ||
-            (row.outputNumber
-              ? outputIdByKey.get(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`)
-              : undefined);
-
-          const buildOutputIndicatorFromRow = (): Indicator | null => {
-            if (!row.outputIndicator || !row.outputIndicator.trim()) return null;
-            return {
-              id: `ind-op-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              name: row.outputIndicator.trim(),
-              description: '',
-              dataSource: row.outputDataSource || 'Activity report',
-              cumulativeType: row.outputCumulative || 'Non cumulative',
-              plannedDataBreakdown: row.outputPlannedBreakdown || '',
-              reportingFrequency: row.outputReportingFrequency || 'Annual',
-              baseline: row.outputBaseline || 'TBA',
-              target: row.outputTarget || '',
-              endOfProjectGoal: row.outputTarget || '',
-              unit: row.outputUnit || '',
-              verificationMethod: row.outputDataSource || 'Activity report',
-            };
-          };
-
-          if (!outputId) {
-            const indicators: Indicator[] = [];
-            const firstOpInd = buildOutputIndicatorFromRow();
-            if (firstOpInd) {
-              indicators.push(firstOpInd);
-              addedOutputIndicatorsCount += 1;
-            }
-            const createdOp = await api.createOutput({
-              outcomeId,
-              outputNumber: row.outputNumber || undefined,
-              name: row.outputName.trim(),
-              description: row.outputDescription || row.outputName.trim(),
-              indicators,
-              status: 'Belum Dimulai',
-            } as any);
-            outputId = createdOp.id;
-            outputIdByKey.set(opKey, outputId);
-            outputIdByKey.set(`${ocKey}__${row.outputName.trim().toLowerCase()}`, outputId);
-            if (row.outputNumber) {
-              outputIdByKey.set(`${ocKey}__${row.outputNumber.trim().toLowerCase()}`, outputId);
-            }
-            outputIndicatorsById.set(outputId, indicators);
-            newlyExpandedOutputs[outputId] = true;
-            createdOutputsCount += 1;
-          } else {
-            newlyExpandedOutputs[outputId] = true;
-            const nextOpInd = buildOutputIndicatorFromRow();
-            if (nextOpInd) {
-              const currentOpInds = outputIndicatorsById.get(outputId) || [];
-              const alreadyHas = currentOpInds.some(
-                (i) => i.name.trim().toLowerCase() === nextOpInd.name.toLowerCase()
-              );
-              if (!alreadyHas) {
-                const updatedOpInds = [...currentOpInds, nextOpInd];
-                outputIndicatorsById.set(outputId, updatedOpInds);
-                await api.updateOutput(outputId, {
-                  indicators: updatedOpInds,
-                } as any);
-                addedOutputIndicatorsCount += 1;
-              }
-            }
-          }
-
-          if (row.activityName && outputId) {
-            const actNorm = normalizeActKey(row.activityNumber, row.activityName);
-            const actKey = `${opKey}__${actNorm}`;
-            let activityId =
-              activityIdByKey.get(actKey) ||
-              activityIdByKey.get(`${opKey}__${row.activityName.trim().toLowerCase()}`);
-
-            if (!activityId) {
-              const createdAct = await api.createActivity({
-                outputId,
-                activityNumber: row.activityNumber || undefined,
-                name: row.activityName.trim(),
-                description: row.activityDescription || '',
-                anticipatedInputs: row.activityAnticipatedInputs || '',
-                plannedParticipantsBreakdown: row.activityPlannedParticipants || '',
-                startDate: row.activityStartDate || targetProg.startDate,
-                endDate: row.activityEndDate || targetProg.endDate,
-                status: 'Belum Dimulai',
-              } as any);
-              activityId = createdAct.id;
-              activityIdByKey.set(actKey, activityId);
-              activityIdByKey.set(`${opKey}__${row.activityName.trim().toLowerCase()}`, activityId);
-              createdActivitiesCount += 1;
-            } else if (
-              row.activityDescription ||
-              row.activityAnticipatedInputs ||
-              row.activityPlannedParticipants
-            ) {
-              await api.updateActivity(activityId, {
-                ...(row.activityDescription ? { description: row.activityDescription } : {}),
-                ...(row.activityAnticipatedInputs
-                  ? { anticipatedInputs: row.activityAnticipatedInputs }
-                  : {}),
-                ...(row.activityPlannedParticipants
-                  ? { plannedParticipantsBreakdown: row.activityPlannedParticipants }
-                  : {}),
-              } as any);
-            }
-          }
-        }
+      if (Array.isArray(result.expandedOutcomeIds) && result.expandedOutcomeIds.length > 0) {
+        const expOc: Record<string, boolean> = {};
+        result.expandedOutcomeIds.forEach((id) => {
+          expOc[id] = true;
+        });
+        setExpandedOutcomes((prev) => ({ ...prev, ...expOc }));
+      }
+      if (Array.isArray(result.expandedOutputIds) && result.expandedOutputIds.length > 0) {
+        const expOp: Record<string, boolean> = {};
+        result.expandedOutputIds.forEach((id) => {
+          expOp[id] = true;
+        });
+        setExpandedOutputs((prev) => ({ ...prev, ...expOp }));
       }
 
-      setExpandedOutcomes((prev) => ({ ...prev, ...newlyExpandedOutcomes }));
-      setExpandedOutputs((prev) => ({ ...prev, ...newlyExpandedOutputs }));
       setShowHierarchyExcelPreviewModal(false);
       setHierarchyExcelPreviewRows([]);
-      onRefresh();
-
-      const summaryParts: string[] = [];
-      if (createdOutcomesCount > 0) summaryParts.push(`${createdOutcomesCount} Outcome`);
-      if (addedOutcomeIndicatorsCount > 0)
-        summaryParts.push(`${addedOutcomeIndicatorsCount} Progress Indicator Outcome`);
-      if (createdOutputsCount > 0) summaryParts.push(`${createdOutputsCount} Output`);
-      if (addedOutputIndicatorsCount > 0)
-        summaryParts.push(`${addedOutputIndicatorsCount} Progress Indicator Output`);
-      if (createdActivitiesCount > 0) summaryParts.push(`${createdActivitiesCount} Activity`);
-
-      setSuccessMessage(
-        `Hirarki Program (Outcome → Output → Activity) berhasil dimasukkan secara otomatis dari Excel "${fileNameLabel}": ${
-          summaryParts.join(', ') || 'Hirarki diperbarui'
-        }.`
-      );
+      setPendingHierarchyExcelFile(null);
+      setSuccessMessage(result.message);
     } catch (err: any) {
-      setErrorMessage(err?.message || 'Gagal mengimpor Hirarki Program dari Excel.');
+      setSuccessMessage(null);
+      const rawMsg = String(err?.message || 'Gagal mengimpor Hirarki Program dari Excel.');
+      const categoryPrefix =
+        err?.errorCategory === 'UPLOAD_ERROR' && !rawMsg.startsWith('[UPLOAD')
+          ? '[UPLOAD ERROR] '
+          : err?.errorCategory === 'EXCEL_PARSING_ERROR' && !rawMsg.startsWith('[EXCEL')
+          ? '[EXCEL PARSING ERROR] '
+          : err?.errorCategory === 'VALIDATION_ERROR' && !rawMsg.startsWith('[VALIDATION')
+          ? '[VALIDATION ERROR] '
+          : err?.errorCategory === 'DATABASE_WRITE_ERROR' && !rawMsg.startsWith('[DATABASE')
+          ? '[DATABASE WRITE ERROR] '
+          : '';
+      setErrorMessage(`${categoryPrefix}${rawMsg}`);
     } finally {
       setImportingHierarchyExcel(false);
     }
@@ -1758,27 +1524,45 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     if (!file) return;
     const targetProg = currentSelectedProgram || activeBudgetProgram;
     if (!targetProg) {
-      setErrorMessage('Pilih Program terlebih dahulu untuk mengimpor Hirarki Program.');
+      setSuccessMessage(null);
+      setErrorMessage('[VALIDATION ERROR] Pilih Program terlebih dahulu untuk mengimpor Hirarki Program.');
       return;
     }
     try {
       setErrorMessage(null);
+      setSuccessMessage(null);
       setHierarchyExcelFileName(file.name);
-      const preview = await parseProgramHierarchyExcelFile({
-        file,
-        program: targetProg,
-        existingOutcomes: outcomes,
-        existingOutputs: outputs,
-        existingActivities: activities,
-        existingSubActivities: subActivities,
-      });
-      if (preview.length === 0) {
-        setErrorMessage('File Excel tidak memiliki baris data Hirarki Program yang dapat dibaca.');
+      setPendingHierarchyExcelFile(file);
+
+      let preview: HierarchyExcelPreviewRow[] = [];
+      try {
+        preview = await parseProgramHierarchyExcelFile({
+          file,
+          program: targetProg,
+          existingOutcomes: outcomes,
+          existingOutputs: outputs,
+          existingActivities: activities,
+          existingSubActivities: subActivities,
+        });
+      } catch (parseErr: any) {
+        const msg = String(parseErr?.message || 'Gagal membaca file Excel Hirarki Program.');
+        setErrorMessage(
+          msg.startsWith('[') ? msg : `[EXCEL PARSING ERROR] ${msg}`
+        );
         return;
       }
-      // Langsung masukkan secara otomatis ke Hirarki Program saat file Excel dipilih
-      await executeHierarchyExcelImport(preview, targetProg, file.name);
+
+      if (preview.length === 0) {
+        setErrorMessage(
+          `[VALIDATION ERROR] File Excel "${file.name}" kosong atau tidak memiliki baris data Hirarki Program yang dapat dibaca.`
+        );
+        return;
+      }
+
+      // Jalankan validasi & transaksi atomik ke backend MySQL
+      await executeHierarchyExcelImport(file, preview, targetProg, file.name);
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err?.message || 'Gagal membaca file Excel Hirarki Program.');
     } finally {
       if (hierarchyFileInputRef.current) {
@@ -1789,8 +1573,9 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleConfirmHierarchyExcelImport = async () => {
     const targetProg = currentSelectedProgram || activeBudgetProgram;
-    if (!targetProg) return;
+    if (!targetProg || !pendingHierarchyExcelFile) return;
     await executeHierarchyExcelImport(
+      pendingHierarchyExcelFile,
       hierarchyExcelPreviewRows,
       targetProg,
       hierarchyExcelFileName
@@ -1889,6 +1674,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         } catch {
           // ignore
         }
+        await Promise.resolve(onRefresh());
+        setErrorMessage(null);
         setSuccessMessage('Program berhasil diperbarui.');
       } else {
         const created = await api.createProgram(payload);
@@ -1899,13 +1686,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         } catch {
           // ignore
         }
+        await Promise.resolve(onRefresh());
+        setErrorMessage(null);
         setSuccessMessage('Program baru berhasil dibuat.');
         setSelectedProgramId(created.id);
         handleSelectBudgetProgram(created.id);
       }
       setShowProgramModal(false);
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message || 'Gagal menyimpan program.');
     }
   };
@@ -1920,12 +1709,14 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     }
     try {
       await api.deleteProgram(progId);
+      await Promise.resolve(onRefresh());
+      setErrorMessage(null);
       setSuccessMessage(`Program "${targetProg.name}" berhasil dihapus.`);
       if (selectedProgramId === progId) {
         setSelectedProgramId(null);
       }
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message || 'Gagal menghapus program.');
     }
   };
@@ -1934,9 +1725,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleDeleteOutcome = async (id: string) => {
     try {
       await api.deleteOutcome(id);
+      await Promise.resolve(onRefresh());
+      setErrorMessage(null);
       setSuccessMessage('Outcome berhasil dihapus');
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -1944,9 +1737,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleDeleteOutput = async (id: string) => {
     try {
       await api.deleteOutput(id);
+      await Promise.resolve(onRefresh());
+      setErrorMessage(null);
       setSuccessMessage('Output berhasil dihapus');
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -1954,9 +1749,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleDeleteActivity = async (id: string) => {
     try {
       await api.deleteActivity(id);
+      await Promise.resolve(onRefresh());
+      setErrorMessage(null);
       setSuccessMessage('Activity berhasil dihapus');
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -1995,6 +1792,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         indicators,
         status: 'Belum Dimulai',
       });
+      await Promise.resolve(onRefresh());
       setShowAddOutcome(false);
       setOutcomeForm({
         name: '',
@@ -2008,9 +1806,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         reportingFrequency: 'Bulanan',
         dataSource: '',
       });
-      setSuccessMessage('Outcome baru berhasil ditambahkan');
-      onRefresh();
+      setErrorMessage(null);
+      setSuccessMessage('Outcome baru berhasil ditambahkan dan tersimpan ke database.');
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -2040,6 +1839,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         indicators,
         status: 'Belum Dimulai',
       });
+      await Promise.resolve(onRefresh());
       setShowAddOutput(null);
       setOutputForm({
         name: '',
@@ -2051,9 +1851,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         verificationMethod: '',
         reportingFrequency: 'Bulanan',
       });
-      setSuccessMessage('Output baru berhasil ditambahkan');
-      onRefresh();
+      setErrorMessage(null);
+      setSuccessMessage('Output baru berhasil ditambahkan dan tersimpan ke database.');
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -2061,6 +1862,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleCreateOrUpdateActivitySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!showAddActivity && !editingActivity) return;
+    const wasEditing = Boolean(editingActivity);
     try {
       const cleanActNum = (activityForm.activityNumber || '').trim();
       const rawName = activityForm.name.trim();
@@ -2093,6 +1895,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         } as any);
       }
 
+      await Promise.resolve(onRefresh());
       setShowAddActivity(null);
       setEditingActivity(null);
       setActivityForm({
@@ -2105,11 +1908,14 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         startDate: new Date().toISOString().slice(0, 10),
         endDate: new Date().toISOString().slice(0, 10),
       });
+      setErrorMessage(null);
       setSuccessMessage(
-        editingActivity ? 'Activity berhasil diperbarui' : 'Activity baru berhasil ditambahkan'
+        wasEditing
+          ? 'Activity berhasil diperbarui dan tersimpan ke database.'
+          : 'Activity baru berhasil ditambahkan dan tersimpan ke database.'
       );
-      onRefresh();
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -2125,11 +1931,13 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         picName: subActivityForm.picName,
         status: 'Belum Dimulai',
       });
+      await Promise.resolve(onRefresh());
       setShowAddSubActivity(null);
       setSubActivityForm({ name: '', description: '', picName: '' });
-      setSuccessMessage('Sub-Activity berhasil ditambahkan');
-      onRefresh();
+      setErrorMessage(null);
+      setSuccessMessage('Sub-Activity berhasil ditambahkan dan tersimpan ke database.');
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message);
     }
   };
@@ -5081,7 +4889,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                             ? 'Siap'
                             : row.status === 'duplicate'
                             ? 'Terdaftar'
-                            : 'Invalid'}
+                            : `Baris ${row.rowNumber}: ${row.statusMessage}`}
                         </span>
                       </td>
                     </tr>
@@ -5092,11 +4900,24 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#EAEAEA] text-xs">
               <div className="text-[#787774]">
-                Siap diimpor otomatis:{' '}
-                <strong className="text-[#0F7B6C]">
-                  {hierarchyExcelPreviewRows.filter((r) => r.status === 'valid').length} baris
-                  hirarki baru
-                </strong>
+                {hierarchyExcelPreviewRows.some((r) => r.status === 'invalid') ? (
+                  <span className="text-[#C93B3B] font-medium">
+                    Perbaiki{' '}
+                    <strong>
+                      {hierarchyExcelPreviewRows.filter((r) => r.status === 'invalid').length} baris
+                      invalid
+                    </strong>{' '}
+                    pada file Excel lalu unggah ulang.
+                  </span>
+                ) : (
+                  <>
+                    Siap diimpor otomatis:{' '}
+                    <strong className="text-[#0F7B6C]">
+                      {hierarchyExcelPreviewRows.filter((r) => r.status === 'valid').length} baris
+                      hirarki baru
+                    </strong>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -5105,12 +4926,13 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   onClick={() => setShowHierarchyExcelPreviewModal(false)}
                   className="px-3 py-1.5 rounded border border-[#D4D4D0] text-[#5A5A58] hover:bg-[#F4F4F2] cursor-pointer"
                 >
-                  Batal
+                  Tutup
                 </button>
                 <button
                   type="button"
                   disabled={
                     importingHierarchyExcel ||
+                    hierarchyExcelPreviewRows.some((r) => r.status === 'invalid') ||
                     hierarchyExcelPreviewRows.filter((r) => r.status === 'valid').length === 0
                   }
                   onClick={handleConfirmHierarchyExcelImport}

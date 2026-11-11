@@ -44,7 +44,7 @@
       "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
       "passwordUpdatedAt": "2026-01-10T08:00:00Z",
       "mustChangePassword": true,
-      "lastLoginAt": "2026-11-11T04:52:10.281Z"
+      "lastLoginAt": "2026-11-11T06:26:46.295Z"
     },
     {
       "id": "user-finance",
@@ -167,6 +167,281 @@
   "approvalRecords": [],
   "auditLogs": [
     {
+      "id": "log-1794378406617",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Penghapusan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378406425",
+      "details": "Menghapus Program Selesai: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:26:46.617Z"
+    },
+    {
+      "id": "log-1794378406613",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembaruan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378406425",
+      "details": "Memperbarui informasi Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:26:46.613Z"
+    },
+    {
+      "id": "log-1794378406496",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Sub-Activity",
+      "entityType": "PROGRAM",
+      "entityId": "sub-1794378406495-qcn8",
+      "details": "Membuat Sub-Activity baru: Sub-Activity Manual Awal",
+      "timestamp": "2026-11-11T06:26:46.495Z"
+    },
+    {
+      "id": "log-1794378406489",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Activity",
+      "entityType": "PROGRAM",
+      "entityId": "act-1794378406482-ibg9",
+      "details": "Memperbarui Activity: Activity Manual Diperbarui",
+      "timestamp": "2026-11-11T06:26:46.489Z"
+    },
+    {
+      "id": "log-1794378406482",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Activity",
+      "entityType": "PROGRAM",
+      "entityId": "act-1794378406482-ibg9",
+      "details": "Membuat Activity baru: Activity Manual Awal di bawah Output: Output Manual Diperbarui",
+      "timestamp": "2026-11-11T06:26:46.482Z"
+    },
+    {
+      "id": "log-1794378406475",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Output",
+      "entityType": "PROGRAM",
+      "entityId": "outp-1794378406466-amk8",
+      "details": "Memperbarui Output: Output Manual Diperbarui",
+      "timestamp": "2026-11-11T06:26:46.475Z"
+    },
+    {
+      "id": "log-1794378406466",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Output",
+      "entityType": "PROGRAM",
+      "entityId": "outp-1794378406466-amk8",
+      "details": "Membuat Output baru: Output Manual Awal di bawah Outcome: Outcome Manual Diperbarui",
+      "timestamp": "2026-11-11T06:26:46.466Z"
+    },
+    {
+      "id": "log-1794378406459",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Outcome",
+      "entityType": "PROGRAM",
+      "entityId": "out-1794378406449-1uhf",
+      "details": "Memperbarui Outcome: Outcome Manual Diperbarui",
+      "timestamp": "2026-11-11T06:26:46.458Z"
+    },
+    {
+      "id": "log-1794378406450",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Outcome",
+      "entityType": "PROGRAM",
+      "entityId": "out-1794378406449-1uhf",
+      "details": "Membuat Outcome baru: Outcome Manual Awal di bawah Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:26:46.449Z"
+    },
+    {
+      "id": "log-1794378406434",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembaruan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378406425",
+      "details": "Memperbarui informasi Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:26:46.434Z"
+    },
+    {
+      "id": "log-1794378406425",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378406425",
+      "details": "Membuat Program baru: Program Audit Integrasi Hierarki di Jakarta",
+      "timestamp": "2026-11-11T06:26:46.425Z"
+    },
+    {
+      "id": "log-login-ok-1794378406354",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-director",
+      "details": "Pengguna Dr. Hendra Wijaya (Executive Director · Direktorat Eksekutif) berhasil login ke sistem.",
+      "timestamp": "2026-11-11T06:26:46.295Z"
+    },
+    {
+      "id": "log-1794378230582",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Penghapusan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Menghapus Program Selesai: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:23:50.582Z"
+    },
+    {
+      "id": "log-1794378230579",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembaruan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Memperbarui informasi Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:23:50.579Z"
+    },
+    {
+      "id": "log-1794378230481",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Sub-Activity",
+      "entityType": "PROGRAM",
+      "entityId": "sub-1794378230481-t9qz",
+      "details": "Membuat Sub-Activity baru: Sub-Activity Manual Awal",
+      "timestamp": "2026-11-11T06:23:50.481Z"
+    },
+    {
+      "id": "log-1794378230474",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Activity",
+      "entityType": "PROGRAM",
+      "entityId": "act-1794378230466-txwc",
+      "details": "Memperbarui Activity: Activity Manual Diperbarui",
+      "timestamp": "2026-11-11T06:23:50.474Z"
+    },
+    {
+      "id": "log-1794378230466",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Activity",
+      "entityType": "PROGRAM",
+      "entityId": "act-1794378230466-txwc",
+      "details": "Membuat Activity baru: Activity Manual Awal di bawah Output: Output Manual Diperbarui",
+      "timestamp": "2026-11-11T06:23:50.466Z"
+    },
+    {
+      "id": "log-1794378230458",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Output",
+      "entityType": "PROGRAM",
+      "entityId": "outp-1794378230452-xgvw",
+      "details": "Memperbarui Output: Output Manual Diperbarui",
+      "timestamp": "2026-11-11T06:23:50.458Z"
+    },
+    {
+      "id": "log-1794378230452",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Output",
+      "entityType": "PROGRAM",
+      "entityId": "outp-1794378230452-xgvw",
+      "details": "Membuat Output baru: Output Manual Awal di bawah Outcome: Outcome Manual Diperbarui",
+      "timestamp": "2026-11-11T06:23:50.452Z"
+    },
+    {
+      "id": "log-1794378230448",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Perubahan Outcome",
+      "entityType": "PROGRAM",
+      "entityId": "out-1794378230440-p3r4",
+      "details": "Memperbarui Outcome: Outcome Manual Diperbarui",
+      "timestamp": "2026-11-11T06:23:50.447Z"
+    },
+    {
+      "id": "log-1794378230440",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Outcome",
+      "entityType": "PROGRAM",
+      "entityId": "out-1794378230440-p3r4",
+      "details": "Membuat Outcome baru: Outcome Manual Awal di bawah Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:23:50.440Z"
+    },
+    {
+      "id": "log-1794378230429",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembaruan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Memperbarui informasi Program: Program Audit Integrasi Hierarki (Updated)",
+      "timestamp": "2026-11-11T06:23:50.429Z"
+    },
+    {
+      "id": "log-1794378230421",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Pembuatan Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Membuat Program baru: Program Audit Integrasi Hierarki di Jakarta",
+      "timestamp": "2026-11-11T06:23:50.421Z"
+    },
+    {
+      "id": "log-login-ok-1794378230399",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-director",
+      "details": "Pengguna Dr. Hendra Wijaya (Executive Director · Direktorat Eksekutif) berhasil login ke sistem.",
+      "timestamp": "2026-11-11T06:23:50.352Z"
+    },
+    {
+      "id": "log-login-ok-1794378191850",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-director",
+      "details": "Pengguna Dr. Hendra Wijaya (Executive Director · Direktorat Eksekutif) berhasil login ke sistem.",
+      "timestamp": "2026-11-11T06:23:11.792Z"
+    },
+    {
       "id": "log-1794372730417",
       "actorId": "user-director",
       "actorName": "Dr. Hendra Wijaya",
@@ -231,6 +506,39 @@
       "entityId": "user-admin",
       "details": "Pengguna Bambang Sudiro (System Administrator · Teknologi & Tata Kelola Sistem) berhasil login ke sistem.",
       "timestamp": "2026-11-06T14:43:04.259Z"
+    },
+    {
+      "id": "log-1794378230536-jkgu",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Import Excel Hirarki Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Mengimpor Hirarki Program dari file \"struktur-hierarki-valid.xlsx\" ke Program \"Program Audit Integrasi Hierarki (Updated)\": 2 Outcome, 2 Indikator Outcome, 2 Output, 2 Indikator Output, 3 Activity, 1 Sub-Activity",
+      "timestamp": "2026-11-11T06:23:50.534Z"
+    },
+    {
+      "id": "log-1794378230572-iwic",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Import Excel Hirarki Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378230421",
+      "details": "Mengimpor Hirarki Program dari file \"hierarki-invalid.xlsx\" ke Program \"Program Audit Integrasi Hierarki (Updated)\": 1 Outcome, 1 Output, 3 Activity",
+      "timestamp": "2026-11-11T06:23:50.572Z"
+    },
+    {
+      "id": "log-1794378406559-czcz",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Import Excel Hirarki Program",
+      "entityType": "PROGRAM",
+      "entityId": "prog-1794378406425",
+      "details": "Mengimpor Hirarki Program dari file \"struktur-hierarki-valid.xlsx\" ke Program \"Program Audit Integrasi Hierarki (Updated)\": 2 Outcome, 2 Indikator Outcome, 2 Output, 2 Indikator Output, 3 Activity, 1 Sub-Activity",
+      "timestamp": "2026-11-11T06:26:46.557Z"
     }
   ],
   "cashAdvances": [],
