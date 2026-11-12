@@ -12,6 +12,7 @@ import {
 import { Download, X, FileText, Sliders, Check } from 'lucide-react';
 import { formatIndonesianDate, formatPeriodRange } from '../../lib/dateUtils.js';
 import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
+import { formatTorTeamSummary } from './torTeamFormatter.js';
 
 interface TorPdfExportModalProps {
   tor: Tor;
@@ -49,32 +50,10 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
     return `Outcome ${firstNum} ; Activity ${codeStr}`;
   }, [tor.activityCode, tor.hierarchyCode]);
 
-  const organizerLines = useMemo(() => {
-    const hasForeign = /PIPKA|GKMI|air purifier/i.test(tor.organizerPersonInCharge || '');
-    if (tor.organizerPersonInCharge && tor.organizerPersonInCharge.trim() && !hasForeign) {
-      return tor.organizerPersonInCharge;
-    }
-    const lines: string[] = [
-      `Penyelenggara: Yayasan WIJNA (${resolvedProgramName})`,
-      `Penanggung jawab WIJNA: ${tor.picName || 'Budi Santoso'}`,
-      `Koordinasi TOR: ${tor.createdByName || tor.picName || 'Budi Santoso'}`,
-    ];
-    if (tor.implementingTeam && tor.implementingTeam.length > 0) {
-      lines.push('Tim pelaksana wilayah:');
-      tor.implementingTeam.forEach((member) => {
-        lines.push(`    - ${member}`);
-      });
-    }
-    if (tor.rolesResponsibilities && tor.rolesResponsibilities.length > 0) {
-      lines.push('Penanggung jawab peran kegiatan:');
-      tor.rolesResponsibilities.forEach((r, idx) => {
-        const label =
-          r.nameInstitution || (r.institution ? `${r.picName} (${r.institution})` : r.picName);
-        lines.push(`    ${idx + 1}. ${label} — ${r.role}`);
-      });
-    }
-    return lines.join('\n');
-  }, [tor, resolvedProgramName]);
+  const organizerLines = useMemo(
+    () => formatTorTeamSummary(tor, '-'),
+    [tor]
+  );
 
   const complementaryObjectives: TorSpecificObjectiveItem[] = useMemo(() => {
     const hasForeign = tor.specificObjectives?.some((s) =>
@@ -588,7 +567,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
                 )}
                 <tr>
                   <td className="border border-black px-2.5 py-1 font-bold align-top">
-                    Organizer &amp; Person in Charge
+                    Tim Pelaksana
                   </td>
                   <td className="border border-black px-2.5 py-1 align-top whitespace-pre-wrap leading-[1.38]">
                     {organizerLines}

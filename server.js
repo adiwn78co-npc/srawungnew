@@ -517,20 +517,29 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     cityOrRegency: raw.cityOrRegency || r?.village_or_city || void 0,
     createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
   })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-  const hydratedAttendanceRecords = parseAndHydrateRows(attendanceRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    date: r?.record_date || raw.date || "",
-    userId: r?.user_id || raw.userId || "",
-    userName: r?.user_name || raw.userName || "",
-    recordType: r?.record_type || raw.recordType || "ATTENDANCE",
-    clockInTime: r?.clock_in_time ?? raw.clockInTime,
-    clockOutTime: r?.clock_out_time ?? raw.clockOutTime,
-    totalWorkHours: r?.total_work_hours !== void 0 && r?.total_work_hours !== null ? Number(r.total_work_hours) : Number(raw.totalWorkHours ?? 0),
-    isOutsideWorkLocation: r?.is_outside_work_location !== void 0 && r?.is_outside_work_location !== null ? Boolean(Number(r.is_outside_work_location)) : Boolean(raw.isOutsideWorkLocation),
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-  })).sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const hydratedAttendanceRecords = parseAndHydrateRows(attendanceRows, (r, raw) => {
+    const rawHasActiveUnclosedClock = Boolean(raw && typeof raw.clockInTime === "string" && raw.clockInTime.trim() && !raw.clockInTime.startsWith("0000-00-00")) && (!raw.clockOutTime || String(raw.clockOutTime).trim() === "" || String(raw.clockOutTime).startsWith("0000-00-00"));
+    const normalizedClockIn = normalizeHydratedAttendanceTimestamp(r?.clock_in_time, raw?.clockInTime, false);
+    const normalizedClockOut = normalizeHydratedAttendanceTimestamp(
+      r?.clock_out_time,
+      raw?.clockOutTime,
+      rawHasActiveUnclosedClock
+    );
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      date: toMysqlDateOnlyString(raw.date || r?.record_date) || String(r?.record_date || raw.date || ""),
+      userId: r?.user_id || raw.userId || "",
+      userName: r?.user_name || raw.userName || "",
+      recordType: normalizedClockIn ? "ATTENDANCE" : r?.record_type || raw.recordType || "ATTENDANCE",
+      clockInTime: normalizedClockIn,
+      clockOutTime: normalizedClockOut,
+      totalWorkHours: r?.total_work_hours !== void 0 && r?.total_work_hours !== null ? Number(r.total_work_hours) : Number(raw.totalWorkHours ?? 0),
+      isOutsideWorkLocation: r?.is_outside_work_location !== void 0 && r?.is_outside_work_location !== null ? Boolean(Number(r.is_outside_work_location)) : Boolean(raw.isOutsideWorkLocation),
+      createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }).sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
   const auditLogs = parseAndHydrateRows(auditRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
@@ -564,8 +573,27 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     workRecapVerifications: {},
     auditTrail: []
   };
-  if (hydratedAttendanceRecords.length > 0 || !Array.isArray(attendanceSystem.records)) {
-    attendanceSystem.records = hydratedAttendanceRecords;
+  const kvAttendanceRecords = Array.isArray(attendanceSystem.records) ? attendanceSystem.records : [];
+  if (hydratedAttendanceRecords.length > 0) {
+    const mergedById = /* @__PURE__ */ new Map();
+    for (const rec of hydratedAttendanceRecords) {
+      if (rec && rec.id) {
+        mergedById.set(String(rec.id), rec);
+      }
+    }
+    for (const kvRec of kvAttendanceRecords) {
+      if (!kvRec || !kvRec.id) continue;
+      const recId = String(kvRec.id);
+      const isKvActiveClock = Boolean(kvRec.clockInTime) && !String(kvRec.clockInTime).startsWith("0000-00-00") && (!kvRec.clockOutTime || String(kvRec.clockOutTime).startsWith("0000-00-00"));
+      if (!mergedById.has(recId) && isKvActiveClock) {
+        mergedById.set(recId, { ...kvRec, clockOutTime: void 0 });
+      }
+    }
+    attendanceSystem.records = Array.from(mergedById.values()).sort(
+      (a, b) => String(b.date || "").localeCompare(String(a.date || ""))
+    );
+  } else {
+    attendanceSystem.records = kvAttendanceRecords;
   }
   return {
     users,
@@ -637,6 +665,24 @@ function toMysqlDateOnlyString(val) {
   }
   return null;
 }
+function normalizeHydratedAttendanceTimestamp(colVal, rawVal, isExplicitlyActiveInRawJson = false) {
+  const cleanIsoOrTime = (v) => {
+    if (v === null || v === void 0) return void 0;
+    if (v instanceof Date) {
+      return Number.isNaN(v.getTime()) ? void 0 : v.toISOString();
+    }
+    const s = String(v).trim();
+    if (!s || s.startsWith("0000-00-00")) return void 0;
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s)) {
+      return `${s.replace(" ", "T")}Z`;
+    }
+    return s;
+  };
+  const fromRaw = cleanIsoOrTime(rawVal);
+  if (fromRaw) return fromRaw;
+  if (isExplicitlyActiveInRawJson) return void 0;
+  return cleanIsoOrTime(colVal);
+}
 function formatValueForMysqlColumn(val, colMeta) {
   const typeLower = (colMeta.type || "").toLowerCase();
   const colNameLower = (colMeta.name || "").toLowerCase();
@@ -648,6 +694,9 @@ function formatValueForMysqlColumn(val, colMeta) {
       return 0;
     }
     if (typeLower.startsWith("datetime") || typeLower.startsWith("timestamp")) {
+      if (colNameLower === "clock_out_time") {
+        return "0000-00-00 00:00:00";
+      }
       return (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ");
     }
     if (typeLower === "date") {
@@ -1098,19 +1147,25 @@ function buildParticipantCandidateRow(pt, nowIso) {
   };
 }
 function buildAttendanceRecordCandidateRow(att, nowIso) {
+  const cleanClockIn = typeof att.clockInTime === "string" && att.clockInTime.trim() && !att.clockInTime.startsWith("0000-00-00") ? truncStr(att.clockInTime, 64) : null;
+  const cleanClockOut = typeof att.clockOutTime === "string" && att.clockOutTime.trim() && !att.clockOutTime.startsWith("0000-00-00") ? truncStr(att.clockOutTime, 64) : null;
   return {
     id: String(att.id).slice(0, 128),
     record_date: truncStr(att.date, 32) || "",
     user_id: truncStr(att.userId, 128) || "",
     user_name: truncStr(att.userName, 255),
-    record_type: truncStr(att.recordType || "ATTENDANCE", 64),
-    clock_in_time: truncStr(att.clockInTime, 64),
-    clock_out_time: truncStr(att.clockOutTime, 64),
+    record_type: truncStr(cleanClockIn ? "ATTENDANCE" : att.recordType || "ATTENDANCE", 64),
+    clock_in_time: cleanClockIn,
+    clock_out_time: cleanClockOut,
     total_work_hours: safeFiniteNumber(att.totalWorkHours, 0),
     is_outside_work_location: att.isOutsideWorkLocation ? 1 : 0,
     created_at: att.createdAt || nowIso,
     updated_at: att.updatedAt || nowIso,
-    raw_json: JSON.stringify(att)
+    raw_json: JSON.stringify({
+      ...att,
+      clockInTime: cleanClockIn ?? void 0,
+      clockOutTime: cleanClockOut ?? void 0
+    })
   };
 }
 function buildAuditLogCandidateRow(al, nowIso) {
@@ -5911,6 +5966,29 @@ function executeApprovalHubAction(params) {
 }
 
 // src/server/attendanceService.ts
+function normalizeValidClockIso(val) {
+  if (typeof val !== "string") return void 0;
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.startsWith("0000-00-00")) return void 0;
+  return trimmed;
+}
+function isActiveAttendanceClockSession(record) {
+  if (!record) return false;
+  const hasClockIn = Boolean(normalizeValidClockIso(record.clockInTime));
+  const hasClockOut = Boolean(normalizeValidClockIso(record.clockOutTime));
+  return hasClockIn && !hasClockOut;
+}
+function findActiveClockSessionForUser(records, userId) {
+  if (!Array.isArray(records) || !userId) return void 0;
+  const activeMatches = records.filter(
+    (r) => r && r.userId === userId && isActiveAttendanceClockSession(r)
+  );
+  if (activeMatches.length === 0) return void 0;
+  if (activeMatches.length === 1) return activeMatches[0];
+  return [...activeMatches].sort(
+    (a, b) => String(b.clockInTime || "").localeCompare(String(a.clockInTime || ""))
+  )[0];
+}
 function resolveAttendanceWorkflowType(userId, userRole, userRoleTitle) {
   const uid = String(userId || "").toLowerCase();
   const role = String(userRole || "").toLowerCase();
@@ -6078,6 +6156,13 @@ function ensureAttendanceSystemInitialized(draft) {
     }
     if (!Array.isArray(draft.attendanceSystem.records)) {
       draft.attendanceSystem.records = [];
+    } else {
+      for (const rec of draft.attendanceSystem.records) {
+        if (!rec || typeof rec !== "object") continue;
+        if (rec.clockOutTime !== void 0 && !normalizeValidClockIso(rec.clockOutTime)) {
+          delete rec.clockOutTime;
+        }
+      }
     }
     if (!Array.isArray(draft.attendanceSystem.flextimeAssignments)) {
       draft.attendanceSystem.flextimeAssignments = [];
@@ -13922,8 +14007,7 @@ async function startServer() {
   function isDirectorAuthorized(user) {
     return user.role === "director" || user.role === "admin";
   }
-  app.get("/api/attendance-system", (req, res) => {
-    const currentUser = getCurrentUser(req);
+  function buildAttendanceBundleForUser(currentUser) {
     let bundle = db.getData().attendanceSystem;
     if (!bundle) {
       db.update((draft) => {
@@ -13950,21 +14034,24 @@ async function startServer() {
       const redactedLeaves = (bundle.leaveRequests || []).map(
         (lv) => lv.userId === currentUser.id ? lv : {
           ...lv,
-          reason: void 0,
+          reason: "",
           hrNotes: void 0,
           directorNotes: void 0,
           returnReason: void 0
         }
       );
-      res.json({
+      return {
         ...bundle,
         records: redactedRecords,
         leaveRequests: redactedLeaves,
         auditTrail: bundle.auditTrail.filter((a) => a.actorId === currentUser.id)
-      });
-      return;
+      };
     }
-    res.json(bundle);
+    return bundle;
+  }
+  app.get("/api/attendance-system", (req, res) => {
+    const currentUser = getCurrentUser(req);
+    res.json(buildAttendanceBundleForUser(currentUser));
   });
   app.post("/api/attendance-system/clock-in", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -13976,6 +14063,18 @@ async function startServer() {
       allowOutsideWithHrApproval,
       workItems
     } = req.body || {};
+    const currentSysSnapshot = ensureAttendanceSystemInitialized(db.getData());
+    const existingActiveSession = findActiveClockSessionForUser(
+      currentSysSnapshot.records,
+      currentUser.id
+    );
+    if (existingActiveSession) {
+      return res.json({
+        record: existingActiveSession,
+        bundle: buildAttendanceBundleForUser(currentUser),
+        alreadyActive: true
+      });
+    }
     const targetDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
@@ -13987,9 +14086,23 @@ async function startServer() {
       return res.status(400).json({ error: "Pilih minimal satu jenis pekerjaan untuk Timesheet Harian saat Clock In." });
     }
     let createdOrUpdated = null;
+    let alreadyActiveInTx = false;
     let errMsg = null;
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
+      const activeInDraft = findActiveClockSessionForUser(sys.records, currentUser.id);
+      if (activeInDraft) {
+        createdOrUpdated = activeInDraft;
+        alreadyActiveInTx = true;
+        return;
+      }
+      const existingIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && r.date === targetDate
+      );
+      if (existingIdx !== -1 && Boolean(sys.records[existingIdx].clockInTime) && Boolean(sys.records[existingIdx].clockOutTime)) {
+        errMsg = "Anda sudah menyelesaikan sesi Clock In dan Clock Out pada tanggal ini.";
+        return;
+      }
       const activeWfa = sys.wfaRequests.find((w) => {
         const sDate = w.startDate || w.date;
         const eDate = w.endDate || sDate;
@@ -14022,16 +14135,13 @@ async function startServer() {
         shortDescription: String(w.shortDescription || w.category).trim(),
         createdAt: nowIso
       }));
-      const existingIdx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
-      );
       const clockInLoc = {
         latitude: lat,
         longitude: lon,
         distanceMeters,
         isOutsideWorkLocation: isOutside,
         locationLabel: isOutside ? `Outside Work Location (${lat.toFixed(4)}, ${lon.toFixed(4)} \u2022 ${distanceMeters}m)` : `${sys.locationConfig.officeName} (${distanceMeters}m)`,
-        outsideReason: isOutside ? String(outsideReason).trim() : void 0
+        outsideReason: isOutside ? String(outsideReason || "").trim() : void 0
       };
       if (existingIdx !== -1) {
         const prev = sys.records[existingIdx];
@@ -14040,8 +14150,11 @@ async function startServer() {
           recordType: "ATTENDANCE",
           clockInTime: prev.clockInTime || nowIso,
           clockInLocation: prev.clockInLocation || clockInLoc,
+          clockOutTime: void 0,
+          clockOutLocation: void 0,
+          totalWorkHours: 0,
           isOutsideWorkLocation: prev.isOutsideWorkLocation || isOutside,
-          outsideLocationReason: isOutside ? String(outsideReason).trim() : prev.outsideLocationReason,
+          outsideLocationReason: isOutside ? String(outsideReason || "").trim() : prev.outsideLocationReason,
           outsideReviewStatus: prev.isOutsideWorkLocation || isOutside ? "PENDING_HR_REVIEW" : "NOT_REQUIRED",
           isFlextimeApplied: Boolean(activeFlex),
           flextimeRuleLabel: activeFlex?.scheduleArrangement,
@@ -14063,7 +14176,7 @@ async function startServer() {
           clockInLocation: clockInLoc,
           totalWorkHours: 0,
           isOutsideWorkLocation: isOutside,
-          outsideLocationReason: isOutside ? String(outsideReason).trim() : void 0,
+          outsideLocationReason: isOutside ? String(outsideReason || "").trim() : void 0,
           outsideReviewStatus: isOutside ? "PENDING_HR_REVIEW" : "NOT_REQUIRED",
           isFlextimeApplied: Boolean(activeFlex),
           flextimeRuleLabel: activeFlex?.scheduleArrangement,
@@ -14086,7 +14199,11 @@ async function startServer() {
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
-    res.json({ record: createdOrUpdated, bundle: db.getData().attendanceSystem });
+    res.json({
+      record: createdOrUpdated,
+      bundle: buildAttendanceBundleForUser(currentUser),
+      alreadyActive: alreadyActiveInTx
+    });
   });
   app.post("/api/attendance-system/reset-today", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -14094,6 +14211,21 @@ async function startServer() {
     const targetDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
       return res.status(400).json({ error: "Format tanggal presensi tidak valid." });
+    }
+    const currentSys = ensureAttendanceSystemInitialized(db.getData());
+    const activeSession = findActiveClockSessionForUser(currentSys.records, currentUser.id);
+    if (activeSession) {
+      return res.status(409).json({
+        error: "Sesi Clock In Anda sedang aktif dan tidak dapat direset, dihapus, atau dihentikan selain melalui aksi Clock Out secara eksplisit."
+      });
+    }
+    const existingClockedRecord = currentSys.records.find(
+      (r) => r.userId === currentUser.id && r.date === targetDate && Boolean(r.clockInTime)
+    );
+    if (existingClockedRecord) {
+      return res.status(409).json({
+        error: "Catatan presensi yang sudah memiliki Clock In tidak dapat dihapus atau direset."
+      });
     }
     const targetTime = (/* @__PURE__ */ new Date(`${targetDate}T00:00:00Z`)).getTime();
     const nowUtcStart = (/* @__PURE__ */ new Date(`${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}T00:00:00Z`)).getTime();
@@ -14103,7 +14235,6 @@ async function startServer() {
       });
     }
     const periodPrefix = targetDate.slice(0, 7);
-    const currentSys = db.getData().attendanceSystem;
     const isPeriodVerified = Object.values(currentSys?.workRecapVerifications || {}).some(
       (v) => v?.userId === currentUser.id && v?.periodId?.includes(periodPrefix) && (v.financeVerified || v.directorVerified)
     );
@@ -14114,23 +14245,23 @@ async function startServer() {
     }
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const hadRecord = sys.records.some(
-        (r) => r.userId === currentUser.id && r.date === targetDate
+      const hadDraftRecord = sys.records.some(
+        (r) => r.userId === currentUser.id && r.date === targetDate && !r.clockInTime
       );
       sys.records = sys.records.filter(
-        (r) => !(r.userId === currentUser.id && r.date === targetDate)
+        (r) => !(r.userId === currentUser.id && r.date === targetDate && !r.clockInTime)
       );
-      if (hadRecord) {
+      if (hadDraftRecord) {
         appendAttendanceAudit(
           draft,
           currentUser,
           "CLOCK_IN_OUT",
-          "Reset Presensi Hari Berjalan",
-          `${currentUser.name} (${currentUser.roleTitle}) melakukan reset presensi hari berjalan (${targetDate}) untuk mengulang deteksi lokasi & Clock-In.`
+          "Reset Draft Presensi Hari Berjalan",
+          `${currentUser.name} (${currentUser.roleTitle}) mereset draft presensi pra-Clock-In (${targetDate}).`
         );
       }
     });
-    res.json({ bundle: db.getData().attendanceSystem });
+    res.json({ bundle: buildAttendanceBundleForUser(currentUser) });
   });
   app.post("/api/attendance-system/timesheet", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -14138,7 +14269,7 @@ async function startServer() {
       date,
       timesheetItems
     } = req.body || {};
-    const targetDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const requestedDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     if (!Array.isArray(timesheetItems) || timesheetItems.length === 0) {
       return res.status(400).json({ error: "Timesheet harian harus memuat minimal 1 jenis pekerjaan." });
     }
@@ -14146,9 +14277,14 @@ async function startServer() {
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const existingIdx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
+      const activeIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && isActiveAttendanceClockSession(r)
       );
+      const dateIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && r.date === requestedDate
+      );
+      const existingIdx = activeIdx !== -1 ? activeIdx : dateIdx;
+      const targetDate = existingIdx !== -1 ? sys.records[existingIdx].date : requestedDate;
       const normalizedItems = timesheetItems.slice(0, 2).map((item, idx) => ({
         id: item.id || `ts-${Date.now()}-${idx}`,
         category: item.category,
@@ -14164,11 +14300,17 @@ async function startServer() {
       });
       if (existingIdx !== -1) {
         const prev = sys.records[existingIdx];
+        const hasClockSession = Boolean(prev.clockInTime);
         const nextRec = {
           ...prev,
-          recordType: approvedWfa ? "WFA" : prev.recordType,
-          totalWorkHours: approvedWfa ? sys.locationConfig.standardDailyHours : prev.totalWorkHours,
-          wfaRequestId: approvedWfa?.id || prev.wfaRequestId,
+          // JANGAN PERNAH menimpa sesi Clock In menjadi WFA atau mengubah clockInTime / clockOutTime
+          recordType: hasClockSession ? "ATTENDANCE" : approvedWfa ? "WFA" : prev.recordType,
+          clockInTime: prev.clockInTime,
+          clockInLocation: prev.clockInLocation,
+          clockOutTime: prev.clockOutTime,
+          clockOutLocation: prev.clockOutLocation,
+          totalWorkHours: hasClockSession ? prev.totalWorkHours : approvedWfa ? sys.locationConfig.standardDailyHours : prev.totalWorkHours,
+          wfaRequestId: hasClockSession ? prev.wfaRequestId : approvedWfa?.id || prev.wfaRequestId,
           timesheetItems: normalizedItems,
           updatedAt: nowIso
         };
@@ -14204,15 +14346,17 @@ async function startServer() {
         currentUser.name
       );
     });
-    res.json({ record: updatedRecord, bundle: db.getData().attendanceSystem });
+    res.json({ record: updatedRecord, bundle: buildAttendanceBundleForUser(currentUser) });
   });
   app.post("/api/attendance-system/clock-out", (req, res) => {
     const currentUser = getCurrentUser(req);
     const {
+      recordId,
       date,
       latitude,
       longitude,
-      outsideReason
+      outsideReason,
+      workItems
     } = req.body || {};
     const targetDate = date && String(date).trim() ? String(date).trim() : (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     const lat = Number(latitude);
@@ -14221,15 +14365,46 @@ async function startServer() {
     if (isNaN(lat) || isNaN(lon)) {
       return res.status(400).json({ error: "Koordinat lokasi Clock Out tidak valid." });
     }
+    if (recordId && String(recordId).trim()) {
+      const snap = ensureAttendanceSystemInitialized(db.getData());
+      const byId = snap.records.find((r) => r.id === String(recordId).trim());
+      if (byId && byId.userId !== currentUser.id) {
+        return res.status(403).json({
+          error: "Sesi Clock In aktif hanya dapat diakhiri oleh pengguna terautentikasi yang bersangkutan."
+        });
+      }
+    }
     let updatedRecord = null;
+    let alreadyClockedOut = false;
     let errMsg = null;
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const idx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
-      );
-      if (idx === -1 || !sys.records[idx].clockInTime) {
-        errMsg = "Anda belum melakukan Clock In pada tanggal ini.";
+      let idx = -1;
+      if (recordId && String(recordId).trim()) {
+        idx = sys.records.findIndex(
+          (r) => r.id === String(recordId).trim() && r.userId === currentUser.id && isActiveAttendanceClockSession(r)
+        );
+      }
+      if (idx === -1) {
+        idx = sys.records.findIndex(
+          (r) => r.userId === currentUser.id && r.date === targetDate && isActiveAttendanceClockSession(r)
+        );
+      }
+      if (idx === -1) {
+        idx = sys.records.findIndex(
+          (r) => r.userId === currentUser.id && isActiveAttendanceClockSession(r)
+        );
+      }
+      if (idx === -1) {
+        const closedMatch = sys.records.find(
+          (r) => r.userId === currentUser.id && (recordId && r.id === String(recordId).trim() || r.date === targetDate) && Boolean(r.clockInTime) && Boolean(r.clockOutTime)
+        );
+        if (closedMatch) {
+          updatedRecord = closedMatch;
+          alreadyClockedOut = true;
+          return;
+        }
+        errMsg = "Anda belum melakukan Clock In atau tidak memiliki sesi Clock In yang sedang aktif.";
         return;
       }
       const prev = sys.records[idx];
@@ -14250,6 +14425,13 @@ async function startServer() {
         0.1,
         calculateWorkHoursBetween(prev.clockInTime, nowIso)
       );
+      const finalTimesheetItems = Array.isArray(workItems) && workItems.length > 0 ? workItems.slice(0, 2).map((item, itemIdx) => ({
+        id: item.id || prev.timesheetItems?.[itemIdx]?.id || `ts-${Date.now()}-${itemIdx}`,
+        category: item.category,
+        shortDescription: String(item.shortDescription || item.category).trim(),
+        createdAt: prev.timesheetItems?.[itemIdx]?.createdAt || nowIso,
+        updatedAt: nowIso
+      })) : prev.timesheetItems;
       const clockOutLoc = {
         latitude: lat,
         longitude: lon,
@@ -14265,9 +14447,13 @@ async function startServer() {
       ].filter(Boolean).join(" | ");
       const nextRec = {
         ...prev,
+        // Pertahankan clockInTime & clockInLocation secara mutlak
+        clockInTime: prev.clockInTime,
+        clockInLocation: prev.clockInLocation,
         clockOutTime: nowIso,
         clockOutLocation: clockOutLoc,
         totalWorkHours: computedHours,
+        timesheetItems: finalTimesheetItems,
         isOutsideWorkLocation: combinedOutside,
         outsideLocationReason: combinedReason || prev.outsideLocationReason,
         outsideReviewStatus: combinedOutside ? prev.outsideReviewStatus === "NOT_REQUIRED" ? "PENDING_HR_REVIEW" : prev.outsideReviewStatus : "NOT_REQUIRED",
@@ -14280,14 +14466,18 @@ async function startServer() {
         currentUser,
         isOutside ? "OUTSIDE_LOCATION" : "CLOCK_IN_OUT",
         isOutside ? "Clock Out (Outside Work Location)" : "Clock Out Harian",
-        `${currentUser.name} melakukan Clock Out pada ${targetDate}. Total jam kerja: ${computedHours} jam (${clockOutLoc.locationLabel}).`,
+        `${currentUser.name} melakukan Clock Out pada sesi tanggal ${prev.date}. Total jam kerja: ${computedHours} jam (${clockOutLoc.locationLabel}).`,
         currentUser.name
       );
     });
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
-    res.json({ record: updatedRecord, bundle: db.getData().attendanceSystem });
+    res.json({
+      record: updatedRecord,
+      bundle: buildAttendanceBundleForUser(currentUser),
+      alreadyClockedOut
+    });
   });
   app.post("/api/attendance-system/outside-location-review", (req, res) => {
     const currentUser = getCurrentUser(req);
@@ -14320,6 +14510,8 @@ async function startServer() {
         if (wf === "DIRECTOR_TO_FINANCE_NOTIFY") {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: "ACKNOWLEDGED_BY_FINANCE",
             hrReviewByName: currentUser.name,
@@ -14330,6 +14522,8 @@ async function startServer() {
         } else if (decision === "return") {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: "RETURNED_BY_FINANCE",
             hrReviewByName: currentUser.name,
@@ -14341,6 +14535,8 @@ async function startServer() {
         } else {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: "HR_REVIEWED",
             hrReviewByName: currentUser.name,
@@ -14352,6 +14548,8 @@ async function startServer() {
       } else {
         sys.records[idx] = {
           ...prev,
+          clockInTime: prev.clockInTime,
+          clockOutTime: prev.clockOutTime,
           workflowType: wf,
           outsideReviewStatus: wf === "FINANCE_TO_DIRECTOR_REVIEW" ? "REVIEWED_BY_DIRECTOR" : "DIRECTOR_ACKNOWLEDGED",
           directorAckByName: currentUser.name,

@@ -15,6 +15,7 @@ import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
 import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
 import { useOrganizationSettings } from '../../lib/organizationSettings.js';
 import { Download, ExternalLink, FileText, Edit3 } from 'lucide-react';
+import { formatTorTeamSummary } from '../tor/torTeamFormatter.js';
 
 interface OfficialDocumentPreviewPaneProps {
   item: ApprovalHubItem;
@@ -278,11 +279,10 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
               </tr>
               <tr>
                 <td className="border border-black px-2.5 py-1 font-bold align-top">
-                  Organizer &amp; Person in Charge
+                  Tim Pelaksana
                 </td>
                 <td className="border border-black px-2.5 py-1 align-top whitespace-pre-wrap">
-                  {effectiveTor?.organizerPersonInCharge ||
-                    `Penyelenggara: Yayasan WIJNA (${item.programName})\nPIC Utama Kegiatan: ${item.responsibleUserName}`}
+                  {formatTorTeamSummary(effectiveTor, '-')}
                 </td>
               </tr>
               <tr>

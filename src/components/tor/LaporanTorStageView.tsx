@@ -27,6 +27,7 @@ import { formatIndonesianDate } from '../../lib/dateUtils.js';
 import { formatRupiah } from '../../lib/terbilang.js';
 import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
 import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
+import { formatTorTeamSummary } from './torTeamFormatter.js';
 
 interface LaporanTorStageViewProps {
   tor: Tor;
@@ -380,29 +381,10 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
     return [];
   }, [tor]);
 
-  const complementaryOrganizerInfo = useMemo(() => {
-    const hasForeign = /PIPKA|GKMI|air purifier/i.test(tor.organizerPersonInCharge || '');
-    if (tor.organizerPersonInCharge && tor.organizerPersonInCharge.trim() && !hasForeign) {
-      return tor.organizerPersonInCharge;
-    }
-    const lines: string[] = [
-      `Penyelenggara: Yayasan WIJNA (${tor.programName || 'Program Lapangan WIJNA'})`,
-      `PIC Utama Kegiatan: ${tor.picName || 'Budi Santoso'}`,
-      `Pembuat Dokumen TOR: ${tor.createdByName || tor.picName || 'Budi Santoso'} (${tor.createdByRole || 'Staff'})`,
-    ];
-    if (tor.implementingTeam && tor.implementingTeam.length > 0) {
-      lines.push(`Tim Pelaksana: ${tor.implementingTeam.join(', ')}`);
-    }
-    if (tor.rolesResponsibilities && tor.rolesResponsibilities.length > 0) {
-      lines.push('Pembagian Peran Tim:');
-      tor.rolesResponsibilities.forEach((r, idx) => {
-        const personLabel =
-          r.nameInstitution || (r.institution ? `${r.picName} — ${r.institution}` : r.picName);
-        lines.push(`  ${idx + 1}. ${personLabel} (${r.role})`);
-      });
-    }
-    return lines.join('\n');
-  }, [tor]);
+  const complementaryOrganizerInfo = useMemo(
+    () => formatTorTeamSummary(tor, '-'),
+    [tor]
+  );
 
   const participantRowsData =
     tor.participantRows && tor.participantRows.length > 0 ? tor.participantRows : [];
@@ -910,7 +892,7 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                   </tr>
                   <tr>
                     <td className="border border-black px-2.5 py-1 font-bold align-top">
-                      Organizer &amp; Person in Charge
+                      Tim Pelaksana
                     </td>
                     <td className="border border-black px-2.5 py-1 align-top whitespace-pre-wrap leading-[1.38]">
                       {complementaryOrganizerInfo}

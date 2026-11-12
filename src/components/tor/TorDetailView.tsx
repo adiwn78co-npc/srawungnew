@@ -27,6 +27,7 @@ import {
   getProgramAgreedCustomPeriods,
   matchPeriodForDate,
 } from '../../lib/programBudgetStorage.js';
+import { formatTorTeamSummary } from './torTeamFormatter.js';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -231,31 +232,11 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
     return [];
   }, [tor]);
 
-  // Complementary Organizer & Person in Charge text for the Project Information Table
+  // Daftar Tim Pelaksana langsung pada Project Information Table
   const complementaryOrganizerInfo = useMemo(() => {
-    if (!tor) return '';
-    const hasForeign = /PIPKA|GKMI|air purifier/i.test(tor.organizerPersonInCharge || '');
-    if (tor.organizerPersonInCharge && tor.organizerPersonInCharge.trim() && !hasForeign) {
-      return tor.organizerPersonInCharge;
-    }
-    const lines: string[] = [
-      `Penyelenggara: Yayasan WIJNA (${resolvedProgram?.name || tor.programName || 'Program Lapangan WIJNA'})`,
-      `PIC Utama Kegiatan: ${tor.picName || 'Budi Santoso'}`,
-      `Pembuat Dokumen TOR: ${tor.createdByName || tor.picName || 'Budi Santoso'} (${tor.createdByRole || 'Staff'})`,
-    ];
-    if (tor.implementingTeam && tor.implementingTeam.length > 0) {
-      lines.push(`Tim Pelaksana: ${tor.implementingTeam.join(', ')}`);
-    }
-    if (tor.rolesResponsibilities && tor.rolesResponsibilities.length > 0) {
-      lines.push('Pembagian Peran Tim:');
-      tor.rolesResponsibilities.forEach((r, idx) => {
-        const personLabel =
-          r.nameInstitution || (r.institution ? `${r.picName} — ${r.institution}` : r.picName);
-        lines.push(`  ${idx + 1}. ${personLabel} (${r.role})`);
-      });
-    }
-    return lines.join('\n');
-  }, [tor, resolvedProgram]);
+    if (!tor) return '-';
+    return formatTorTeamSummary(tor, '-');
+  }, [tor]);
 
   // Cash Advance & Output RACI State for this TOR
   const [torCashAdvances, setTorCashAdvances] = useState<CashAdvanceRecord[]>([]);
@@ -1272,7 +1253,7 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                         </tr>
                         <tr>
                           <td className="border border-black px-2.5 py-1 font-bold align-top">
-                            Organizer &amp; Person in Charge
+                            Tim Pelaksana
                           </td>
                           <td className="border border-black px-2.5 py-1 align-top whitespace-pre-wrap leading-[1.38]">
                             {complementaryOrganizerInfo}

@@ -4,6 +4,7 @@ import { checkTorCompletion, WORKFLOW_STAGES } from '../../lib/workflowStages.js
 import { formatIndonesianDate, formatPeriodRange } from '../../lib/dateUtils.js';
 import { DocumentWorkflowStages } from './DocumentWorkflowStages.js';
 import { DocumentStageModal } from './DocumentStageModal.js';
+import { formatTorTeamSummary } from './torTeamFormatter.js';
 import {
   ChevronDown,
   ChevronRight,
@@ -609,16 +610,11 @@ export const CompletedArchiveView: React.FC<CompletedArchiveViewProps> = ({
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 bg-white p-3 rounded border border-[#EDECE8]">
                                           <div>
                                             <span className="text-[#737373] text-[11px] block">
-                                              Penanggung Jawab (PIC):
+                                              Tim Pelaksana:
                                             </span>
-                                            <span className="font-semibold text-[#171717]">
-                                              {tor.picName}
+                                            <span className="font-medium text-[#171717] whitespace-pre-line text-[11px]">
+                                              {formatTorTeamSummary(tor, '-')}
                                             </span>
-                                            {tor.implementingTeam && tor.implementingTeam.length > 0 && (
-                                              <span className="text-[#737373] text-[10.5px] block truncate">
-                                                Tim: {tor.implementingTeam.join(', ')}
-                                              </span>
-                                            )}
                                           </div>
 
                                           <div>

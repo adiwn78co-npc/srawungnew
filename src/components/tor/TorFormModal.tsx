@@ -39,6 +39,7 @@ import {
   hydrateProgramBudgetDatasetsFromServer,
   ProgramBudgetPeriod,
 } from '../../lib/programBudgetStorage.js';
+import { formatTorTeamSummary } from './torTeamFormatter.js';
 
 const PROVINSI_INDONESIA = [
   'Aceh',
@@ -723,17 +724,12 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     editingTor,
   ]);
 
-  // PIC
-  const [picId, setPicId] = useState<string>(() => {
+  // PIC internal otomatis mengikuti pembuat / data existing untuk routing workflow
+  const resolvedPicId = useMemo(() => {
     if (editingTor?.picId) return editingTor.picId;
     if (currentUser?.id) return currentUser.id;
     return users[0]?.id || '';
-  });
-
-  const selectedPicUser = useMemo(
-    () => users.find((u) => u.id === picId),
-    [users, picId]
-  );
+  }, [editingTor?.picId, currentUser?.id, users]);
 
   // Lokasi Pelaksanaan Kegiatan
   const [locations, setLocations] = useState<TorLocationItem[]>(() => {
@@ -1638,28 +1634,11 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     editingTor ? editingTor.additionalNotes || '' : EXAMPLE_ADDITIONAL_NOTES
   );
 
-  // Dynamic Organizer & Person in Charge text complementary to current inputs
-  const dynamicOrganizerSummary = useMemo(() => {
-    const picDisplay = selectedPicUser
-      ? `${selectedPicUser.name} (${selectedPicUser.roleTitle || selectedPicUser.role})`
-      : editingTor?.picName || currentUser?.name || 'Budi Santoso';
-    const roleLines =
-      rolesResponsibilities.length > 0
-        ? rolesResponsibilities
-            .map(
-              (r, i) =>
-                `  ${i + 1}. ${r.nameInstitution || r.picName} — ${r.role}`
-            )
-            .join('\n')
-        : '  (Belum ada rincian tim pelaksana)';
-
-    return [
-      `Penyelenggara: Yayasan WIJNA (${currentProgram?.name || 'Program Lapangan WIJNA'})`,
-      `Penanggung Jawab Utama (PIC): ${picDisplay}`,
-      `Tim Pelaksana & Peran:`,
-      roleLines,
-    ].join('\n');
-  }, [selectedPicUser, editingTor, currentUser, rolesResponsibilities, currentProgram]);
+  // Ringkasan Tim Pelaksana langsung untuk Tabel Informasi TOR
+  const dynamicOrganizerSummary = useMemo(
+    () => formatTorTeamSummary({ rolesResponsibilities }, '-'),
+    [rolesResponsibilities]
+  );
 
   // ==========================================
   // CLEAR SEMUA CONTOH / ISI CONTOH HANDLERS
@@ -1779,9 +1758,6 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     if (!activityId) {
       return 'Pilih Activity (Kegiatan) terkait.';
     }
-    if (!picId) {
-      return 'Pilih Organizer / PIC yang bertanggung jawab.';
-    }
     const hasValidLocation = locations.some(
       (loc) => loc.villageCity.trim() && loc.province.trim()
     );
@@ -1865,7 +1841,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         outputId,
         activityId,
         activityCode: currentActivity?.code || torNumberPreview.hierarchyCode,
-        picId,
+        picId: resolvedPicId,
         background: background.trim(),
         rationale: '',
         generalObjective: generalObjective.trim(),
@@ -2267,24 +2243,6 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                           </option>
                         ))
                       )}
-                    </select>
-                  </div>
-
-                  {/* Organizer / PIC */}
-                  <div>
-                    <label className="block text-stone-700 font-medium mb-1">
-                      Penanggung Jawab Utama (PIC) <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={picId}
-                      onChange={(e) => setPicId(e.target.value)}
-                      className="w-full h-8 px-2.5 bg-white hover:bg-stone-50/50 focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 transition-colors focus:outline-none"
-                    >
-                      {users.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.name} — {u.role.toUpperCase()}
-                        </option>
-                      ))}
                     </select>
                   </div>
 
@@ -2814,7 +2772,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     </tr>
                     <tr>
                       <td className="w-44 sm:w-56 p-2.5 font-semibold text-stone-700 border-r border-stone-200 align-top bg-stone-50/50">
-                        Organizer & Person in Charge
+                        Tim Pelaksana
                       </td>
                       <td className="p-2.5 text-stone-800 whitespace-pre-line leading-relaxed">
                         {dynamicOrganizerSummary}
