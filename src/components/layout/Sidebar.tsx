@@ -90,9 +90,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const [attendanceBundle, setAttendanceBundle] = useState<AttendanceSystemBundle | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
-  const lockedTodayDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const lockedTodayDate = new Date(nowMs).toISOString().slice(0, 10);
 
-  // Real-time 1-second ticker connected to Your Contribution
+  // Real-time 1-second ticker connected to Your Contribution (display-only; never auto-clocks out)
   useEffect(() => {
     const timer = setInterval(() => {
       setNowMs(Date.now());
@@ -100,17 +100,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Load initial attendance state & listen for real-time updates from Your Contribution
+  // Load authoritative attendance state from backend & keep synced across navigation/focus/events
   useEffect(() => {
     let mounted = true;
-    api
-      .getAttendanceSystem()
-      .then((data) => {
-        if (mounted && data) setAttendanceBundle(data);
-      })
-      .catch(() => {
-        // ignore silent background fetch error
-      });
+    const fetchLatestBundle = () => {
+      api
+        .getAttendanceSystem()
+        .then((data) => {
+          if (mounted && data) setAttendanceBundle(data);
+        })
+        .catch(() => {
+          // ignore silent background fetch error
+        });
+    };
+
+    fetchLatestBundle();
 
     const handleBundleUpdate = (e: Event) => {
       const customEvt = e as CustomEvent<AttendanceSystemBundle>;
@@ -119,21 +123,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
       }
     };
 
+    const handleVisibilityOrOnline = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchLatestBundle();
+      }
+    };
+
     window.addEventListener('wijna-attendance-bundle-updated', handleBundleUpdate);
+    window.addEventListener('online', handleVisibilityOrOnline);
+    document.addEventListener('visibilitychange', handleVisibilityOrOnline);
     return () => {
       mounted = false;
       window.removeEventListener('wijna-attendance-bundle-updated', handleBundleUpdate);
+      window.removeEventListener('online', handleVisibilityOrOnline);
+      document.removeEventListener('visibilitychange', handleVisibilityOrOnline);
     };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, activeTab]);
+
+  // Prioritaskan sesi Clock In yang masih AKTIF (belum Clock Out) lintas tanggal/midnight
+  const myActiveClockSession = useMemo(() => {
+    if (!attendanceBundle || !Array.isArray(attendanceBundle.records) || !currentUser) {
+      return undefined;
+    }
+    const openSessions = attendanceBundle.records.filter(
+      (r) =>
+        r &&
+        r.userId === currentUser.id &&
+        Boolean(r.clockInTime) &&
+        !String(r.clockInTime).startsWith('0000-00-00') &&
+        (!r.clockOutTime || String(r.clockOutTime).startsWith('0000-00-00'))
+    );
+    if (openSessions.length === 0) return undefined;
+    return [...openSessions].sort((a, b) =>
+      String(b.clockInTime || '').localeCompare(String(a.clockInTime || ''))
+    )[0];
+  }, [attendanceBundle, currentUser]);
 
   const myTodayRecord = useMemo(() => {
+    if (myActiveClockSession) return myActiveClockSession;
     if (!attendanceBundle || !Array.isArray(attendanceBundle.records) || !currentUser) {
       return undefined;
     }
     return attendanceBundle.records.find(
       (r) => r.userId === currentUser.id && r.date === lockedTodayDate
     );
-  }, [attendanceBundle, currentUser, lockedTodayDate]);
+  }, [myActiveClockSession, attendanceBundle, currentUser, lockedTodayDate]);
 
   const hasClockedIn = Boolean(myTodayRecord?.clockInTime);
   const hasClockedOut = Boolean(myTodayRecord?.clockOutTime);

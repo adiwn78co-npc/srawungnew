@@ -1,9 +1,49 @@
 import type {
   AttendanceSystemBundle,
   AttendanceWorkflowType,
+  DailyAttendanceTimesheetRecord,
   WijnaLocationConfig,
   LeaveCategoryPolicy,
 } from '../types/index.ts';
+
+function normalizeValidClockIso(val: unknown): string | undefined {
+  if (typeof val !== 'string') return undefined;
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.startsWith('0000-00-00')) return undefined;
+  return trimmed;
+}
+
+/**
+ * Menentukan secara otoritatif apakah sebuah record presensi merupakan sesi Clock In yang sedang AKTIF
+ * (sudah memiliki clockInTime yang valid dan BELUM memiliki clockOutTime).
+ */
+export function isActiveAttendanceClockSession(
+  record: DailyAttendanceTimesheetRecord | null | undefined
+): boolean {
+  if (!record) return false;
+  const hasClockIn = Boolean(normalizeValidClockIso(record.clockInTime));
+  const hasClockOut = Boolean(normalizeValidClockIso(record.clockOutTime));
+  return hasClockIn && !hasClockOut;
+}
+
+/**
+ * Mencari sesi Clock In aktif milik seorang user lintas tanggal (termasuk melewati pergantian hari/UTC)
+ * sehingga refresh, navigasi, maupun pergantian tanggal tidak pernah memutus sesi yang sedang berjalan.
+ */
+export function findActiveClockSessionForUser(
+  records: DailyAttendanceTimesheetRecord[] | null | undefined,
+  userId: string
+): DailyAttendanceTimesheetRecord | undefined {
+  if (!Array.isArray(records) || !userId) return undefined;
+  const activeMatches = records.filter(
+    (r) => r && r.userId === userId && isActiveAttendanceClockSession(r)
+  );
+  if (activeMatches.length === 0) return undefined;
+  if (activeMatches.length === 1) return activeMatches[0];
+  return [...activeMatches].sort((a, b) =>
+    String(b.clockInTime || '').localeCompare(String(a.clockInTime || ''))
+  )[0];
+}
 
 /**
  * Menentukan alur kerja kehadiran (WFA, Cuti, Izin, Flextime, Kehadiran) berdasarkan peran pengguna:
@@ -284,6 +324,14 @@ export function ensureAttendanceSystemInitialized(draft: {
     }
     if (!Array.isArray(draft.attendanceSystem.records)) {
       draft.attendanceSystem.records = [];
+    } else {
+      // Pastikan nilai kosong/'0000-00-00' pada clockOutTime ternormalisasi sebagai undefined tanpa pernah mengubah clockInTime/clockOutTime yang sah
+      for (const rec of draft.attendanceSystem.records) {
+        if (!rec || typeof rec !== 'object') continue;
+        if (rec.clockOutTime !== undefined && !normalizeValidClockIso(rec.clockOutTime)) {
+          delete rec.clockOutTime;
+        }
+      }
     }
     if (!Array.isArray(draft.attendanceSystem.flextimeAssignments)) {
       draft.attendanceSystem.flextimeAssignments = [];

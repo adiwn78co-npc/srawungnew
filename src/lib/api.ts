@@ -747,13 +747,14 @@ export const api = {
     allowOutsideWithHrApproval?: boolean;
     workItems: { category: WijnaWorkCategory; shortDescription: string }[];
   }) =>
-    request<{ record: DailyAttendanceTimesheetRecord; bundle: AttendanceSystemBundle }>(
-      '/api/attendance-system/clock-in',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
+    request<{
+      record: DailyAttendanceTimesheetRecord;
+      bundle: AttendanceSystemBundle;
+      alreadyActive?: boolean;
+    }>('/api/attendance-system/clock-in', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   resetTodayAttendance: (payload?: { date?: string }) =>
     request<{ bundle: AttendanceSystemBundle }>(
       '/api/attendance-system/reset-today',
@@ -774,19 +775,22 @@ export const api = {
       }
     ),
   clockOutAttendance: (payload: {
+    recordId?: string;
     date?: string;
     latitude: number;
     longitude: number;
     gpsAccuracy?: number;
     outsideReason?: string;
+    workItems?: { id?: string; category: WijnaWorkCategory; shortDescription: string }[];
   }) =>
-    request<{ record: DailyAttendanceTimesheetRecord; bundle: AttendanceSystemBundle }>(
-      '/api/attendance-system/clock-out',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
+    request<{
+      record: DailyAttendanceTimesheetRecord;
+      bundle: AttendanceSystemBundle;
+      alreadyClockedOut?: boolean;
+    }>('/api/attendance-system/clock-out', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   reviewOutsideLocation: (payload: {
     recordId: string;
     stage?: 'hr' | 'director';

@@ -753,26 +753,37 @@ export async function loadDatabaseFromMysql(
     createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
-  const hydratedAttendanceRecords = parseAndHydrateRows<any>(attendanceRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    date: r?.record_date || raw.date || '',
-    userId: r?.user_id || raw.userId || '',
-    userName: r?.user_name || raw.userName || '',
-    recordType: r?.record_type || raw.recordType || 'ATTENDANCE',
-    clockInTime: r?.clock_in_time ?? raw.clockInTime,
-    clockOutTime: r?.clock_out_time ?? raw.clockOutTime,
-    totalWorkHours:
-      r?.total_work_hours !== undefined && r?.total_work_hours !== null
-        ? Number(r.total_work_hours)
-        : Number(raw.totalWorkHours ?? 0),
-    isOutsideWorkLocation:
-      r?.is_outside_work_location !== undefined && r?.is_outside_work_location !== null
-        ? Boolean(Number(r.is_outside_work_location))
-        : Boolean(raw.isOutsideWorkLocation),
-    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
-  })).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const hydratedAttendanceRecords = parseAndHydrateRows<any>(attendanceRows, (r, raw) => {
+    const rawHasActiveUnclosedClock =
+      Boolean(raw && typeof raw.clockInTime === 'string' && raw.clockInTime.trim() && !raw.clockInTime.startsWith('0000-00-00')) &&
+      (!raw.clockOutTime || String(raw.clockOutTime).trim() === '' || String(raw.clockOutTime).startsWith('0000-00-00'));
+    const normalizedClockIn = normalizeHydratedAttendanceTimestamp(r?.clock_in_time, raw?.clockInTime, false);
+    const normalizedClockOut = normalizeHydratedAttendanceTimestamp(
+      r?.clock_out_time,
+      raw?.clockOutTime,
+      rawHasActiveUnclosedClock
+    );
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      date: toMysqlDateOnlyString(raw.date || r?.record_date) || String(r?.record_date || raw.date || ''),
+      userId: r?.user_id || raw.userId || '',
+      userName: r?.user_name || raw.userName || '',
+      recordType: normalizedClockIn ? 'ATTENDANCE' : r?.record_type || raw.recordType || 'ATTENDANCE',
+      clockInTime: normalizedClockIn,
+      clockOutTime: normalizedClockOut,
+      totalWorkHours:
+        r?.total_work_hours !== undefined && r?.total_work_hours !== null
+          ? Number(r.total_work_hours)
+          : Number(raw.totalWorkHours ?? 0),
+      isOutsideWorkLocation:
+        r?.is_outside_work_location !== undefined && r?.is_outside_work_location !== null
+          ? Boolean(Number(r.is_outside_work_location))
+          : Boolean(raw.isOutsideWorkLocation),
+      createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+    };
+  }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
 
   const auditLogs = parseAndHydrateRows<any>(auditRows, (r, raw) => ({
     ...raw,
@@ -809,8 +820,32 @@ export async function loadDatabaseFromMysql(
     auditTrail: [],
   };
 
-  if (hydratedAttendanceRecords.length > 0 || !Array.isArray(attendanceSystem.records)) {
-    attendanceSystem.records = hydratedAttendanceRecords;
+  const kvAttendanceRecords = Array.isArray(attendanceSystem.records)
+    ? attendanceSystem.records
+    : [];
+  if (hydratedAttendanceRecords.length > 0) {
+    const mergedById = new Map<string, any>();
+    for (const rec of hydratedAttendanceRecords) {
+      if (rec && rec.id) {
+        mergedById.set(String(rec.id), rec);
+      }
+    }
+    for (const kvRec of kvAttendanceRecords) {
+      if (!kvRec || !kvRec.id) continue;
+      const recId = String(kvRec.id);
+      const isKvActiveClock =
+        Boolean(kvRec.clockInTime) &&
+        !String(kvRec.clockInTime).startsWith('0000-00-00') &&
+        (!kvRec.clockOutTime || String(kvRec.clockOutTime).startsWith('0000-00-00'));
+      if (!mergedById.has(recId) && isKvActiveClock) {
+        mergedById.set(recId, { ...kvRec, clockOutTime: undefined });
+      }
+    }
+    attendanceSystem.records = Array.from(mergedById.values()).sort((a, b) =>
+      String(b.date || '').localeCompare(String(a.date || ''))
+    );
+  } else {
+    attendanceSystem.records = kvAttendanceRecords;
   }
 
   return {
@@ -918,6 +953,30 @@ function toMysqlDateOnlyString(val: any): string | null {
   return null;
 }
 
+function normalizeHydratedAttendanceTimestamp(
+  colVal: any,
+  rawVal: any,
+  isExplicitlyActiveInRawJson = false
+): string | undefined {
+  const cleanIsoOrTime = (v: any): string | undefined => {
+    if (v === null || v === undefined) return undefined;
+    if (v instanceof Date) {
+      return Number.isNaN(v.getTime()) ? undefined : v.toISOString();
+    }
+    const s = String(v).trim();
+    if (!s || s.startsWith('0000-00-00')) return undefined;
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s)) {
+      return `${s.replace(' ', 'T')}Z`;
+    }
+    return s;
+  };
+
+  const fromRaw = cleanIsoOrTime(rawVal);
+  if (fromRaw) return fromRaw;
+  if (isExplicitlyActiveInRawJson) return undefined;
+  return cleanIsoOrTime(colVal);
+}
+
 function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
   const typeLower = (colMeta.type || '').toLowerCase();
   const colNameLower = (colMeta.name || '').toLowerCase();
@@ -941,6 +1000,9 @@ function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
       return 0;
     }
     if (typeLower.startsWith('datetime') || typeLower.startsWith('timestamp')) {
+      if (colNameLower === 'clock_out_time') {
+        return '0000-00-00 00:00:00';
+      }
       return new Date().toISOString().slice(0, 19).replace('T', ' ');
     }
     if (typeLower === 'date') {
@@ -1489,19 +1551,31 @@ function buildParticipantCandidateRow(pt: any, nowIso: string): Record<string, a
 }
 
 function buildAttendanceRecordCandidateRow(att: any, nowIso: string): Record<string, any> {
+  const cleanClockIn =
+    typeof att.clockInTime === 'string' && att.clockInTime.trim() && !att.clockInTime.startsWith('0000-00-00')
+      ? truncStr(att.clockInTime, 64)
+      : null;
+  const cleanClockOut =
+    typeof att.clockOutTime === 'string' && att.clockOutTime.trim() && !att.clockOutTime.startsWith('0000-00-00')
+      ? truncStr(att.clockOutTime, 64)
+      : null;
   return {
     id: String(att.id).slice(0, 128),
     record_date: truncStr(att.date, 32) || '',
     user_id: truncStr(att.userId, 128) || '',
     user_name: truncStr(att.userName, 255),
-    record_type: truncStr(att.recordType || 'ATTENDANCE', 64),
-    clock_in_time: truncStr(att.clockInTime, 64),
-    clock_out_time: truncStr(att.clockOutTime, 64),
+    record_type: truncStr(cleanClockIn ? 'ATTENDANCE' : att.recordType || 'ATTENDANCE', 64),
+    clock_in_time: cleanClockIn,
+    clock_out_time: cleanClockOut,
     total_work_hours: safeFiniteNumber(att.totalWorkHours, 0),
     is_outside_work_location: att.isOutsideWorkLocation ? 1 : 0,
     created_at: att.createdAt || nowIso,
     updated_at: att.updatedAt || nowIso,
-    raw_json: JSON.stringify(att),
+    raw_json: JSON.stringify({
+      ...att,
+      clockInTime: cleanClockIn ?? undefined,
+      clockOutTime: cleanClockOut ?? undefined,
+    }),
   };
 }
 

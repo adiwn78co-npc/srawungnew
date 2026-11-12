@@ -422,10 +422,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const [toast, setToast] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Tanggal kerja hari ini TERKUNCI otomatis (tidak bisa diubah-ubah)
-  const lockedTodayDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
-
-  // Live timer (1 detik) untuk menghitung durasi otomatis Jam : Menit : Detik
+  // Live timer (1 detik) hanya untuk tampilan durasi Jam : Menit : Detik (TIDAK PERNAH memicu auto Clock Out)
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => {
@@ -433,6 +430,9 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Tanggal kerja hari berjalan TERKUNCI otomatis (sementara sesi Clock In yang masih aktif tetap diprioritaskan lintas tanggal)
+  const lockedTodayDate = new Date(nowMs).toISOString().slice(0, 10);
 
   // Otomatis berada dalam radius 5 meter area WIJNA kecuali staf menandai sedang dinas di luar area
   const [isWorkingOutsideArea, setIsWorkingOutsideArea] = useState<boolean>(false);
@@ -446,6 +446,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     },
   ]);
   const [submittingAction, setSubmittingAction] = useState<boolean>(false);
+  const clockActionLockRef = useRef<boolean>(false);
 
   // Filter untuk Daftar Detail Harian (Khusus Finance/HR & Director)
   const [filterStaffId, setFilterStaffId] = useState<string>('ALL');
@@ -642,9 +643,43 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     }
   }, []);
 
+  const syncAttendanceFromServerSilently = useCallback(async () => {
+    try {
+      const latest = await api.getAttendanceSystem();
+      if (latest && typeof latest === 'object') {
+        setBundle(latest);
+      }
+    } catch {
+      // Abaikan gangguan jaringan sementara; sesi aktif di server tetap aman
+    }
+  }, []);
+
   useEffect(() => {
     loadAttendanceBundle();
   }, [loadAttendanceBundle]);
+
+  // Sinkronkan ulang dari sumber kebenaran backend saat tab kembali aktif, koneksi pulih, atau berpindah sub-tab
+  useEffect(() => {
+    const handleResume = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        syncAttendanceFromServerSilently();
+      }
+    };
+    window.addEventListener('online', handleResume);
+    window.addEventListener('focus', handleResume);
+    document.addEventListener('visibilitychange', handleResume);
+    return () => {
+      window.removeEventListener('online', handleResume);
+      window.removeEventListener('focus', handleResume);
+      document.removeEventListener('visibilitychange', handleResume);
+    };
+  }, [syncAttendanceFromServerSilently]);
+
+  useEffect(() => {
+    if (subTab === 'daily') {
+      syncAttendanceFromServerSilently();
+    }
+  }, [subTab, syncAttendanceFromServerSilently]);
 
   // Opsi Implementasi ToR yang telah diajukan oleh pengguna aktif & memperoleh persetujuan
   const myApprovedTorOptions = useMemo(
@@ -706,13 +741,32 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     }
   }, [allUsers, hrManualWfaUserId]);
 
-  // Catatan kehadiran staf aktif pada tanggal hari ini (terkunci)
+  // CRITICAL CLOCK LOGIC: Prioritaskan sesi Clock In yang masih AKTIF (belum Clock Out) milik user saat ini
+  // lintas tanggal/midnight sehingga refresh, navigasi, maupun pergantian hari tidak pernah memutus sesi aktif.
+  const myActiveClockSession = useMemo(() => {
+    if (!bundle || !Array.isArray(bundle.records) || !currentUser) return undefined;
+    const openSessions = bundle.records.filter(
+      (r) =>
+        r &&
+        r.userId === currentUser.id &&
+        Boolean(r.clockInTime) &&
+        !String(r.clockInTime).startsWith('0000-00-00') &&
+        (!r.clockOutTime || String(r.clockOutTime).startsWith('0000-00-00'))
+    );
+    if (openSessions.length === 0) return undefined;
+    return [...openSessions].sort((a, b) =>
+      String(b.clockInTime || '').localeCompare(String(a.clockInTime || ''))
+    )[0];
+  }, [bundle, currentUser]);
+
+  // Catatan kehadiran efektif staf: utamakan sesi Clock In aktif dari backend, lalu catatan pada tanggal hari ini
   const myTodayRecord = useMemo(() => {
+    if (myActiveClockSession) return myActiveClockSession;
     if (!bundle || !Array.isArray(bundle.records) || !currentUser) return undefined;
     return bundle.records.find(
       (r) => r.userId === currentUser.id && r.date === lockedTodayDate
     );
-  }, [bundle, currentUser, lockedTodayDate]);
+  }, [myActiveClockSession, bundle, currentUser, lockedTodayDate]);
 
   const myActiveWfaToday = useMemo(() => {
     if (!bundle || !Array.isArray(bundle.wfaRequests) || !currentUser) return undefined;
@@ -847,12 +901,12 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     return { lat: officeLat, lon: officeLon };
   }, [bundle?.locationConfig, customCoordTouched, userCoordLat, userCoordLon]);
 
-  // Simpan otomatis saat mengubah kontribusi di tengah jam kerja atau saat WFA
+  // Simpan otomatis saat mengubah kontribusi di tengah jam kerja atau saat WFA (tanpa pernah menyentuh clockInTime/clockOutTime)
   const syncActiveContributions = async (nextList: ContributionDraft[]) => {
     if (!myTodayRecord && !myActiveWfaToday) return;
     try {
       const res = await api.updateDailyTimesheet({
-        date: lockedTodayDate,
+        date: myTodayRecord?.date || lockedTodayDate,
         timesheetItems: nextList.slice(0, 2).map((c) => ({
           id: c.id,
           category: c.category,
@@ -919,24 +973,13 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   );
   const isMatchedWithOffice = hasCheckedLocation && currentDistanceMeters <= allowedRadiusVal;
 
+  // Deteksi koordinat GPS murni hanya membaca posisi browser (DILARANG KERAS mereset/menghentikan sesi Clock In aktif)
   const handleCheckLocationNow = useCallback(
-    async (resetIfClockedIn: boolean = false) => {
+    async () => {
       setErrorMsg(null);
       setGpsStatusNote(null);
       setShowLocationCheckPanel(true);
       setIsCheckingLocation(true);
-
-      if (resetIfClockedIn && Boolean(myTodayRecord?.clockInTime)) {
-        try {
-          const resetRes = await api.resetTodayAttendance({ date: lockedTodayDate });
-          setBundle(resetRes.bundle);
-          window.dispatchEvent(
-            new CustomEvent('wijna-attendance-bundle-updated', { detail: resetRes.bundle })
-          );
-        } catch {
-          // ignore
-        }
-      }
 
       const finalizeGpsCheck = (lat: number, lon: number, accuracyMeters: number = 0, note?: string) => {
         const rawDist = calculateClientDistanceMeters(officeLatVal, officeLonVal, lat, lon);
@@ -1064,22 +1107,28 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     [
       allowedRadiusVal,
       calculateClientDistanceMeters,
-      lockedTodayDate,
-      myTodayRecord?.clockInTime,
       officeLatVal,
       officeLonVal,
     ]
   );
 
-  // Deteksi lokasi otomatis saat halaman presensi dimuat
+  // Deteksi lokasi otomatis saat halaman presensi dimuat (tanpa pernah mengganggu sesi Clock In aktif)
   useEffect(() => {
     if (bundle?.locationConfig && !hasCheckedLocation && !isCheckingLocation) {
-      handleCheckLocationNow(false);
+      handleCheckLocationNow();
     }
   }, [bundle?.locationConfig, hasCheckedLocation, isCheckingLocation, handleCheckLocationNow]);
 
-  // TOMBOL 1: CLOCK IN (DETEKSI KANTOR DULU; JIKA SESUAI TITIK KOORDINAT -> CLOCK IN DIBUKA; JIKA TIDAK -> SATU PILIHAN TETAP CLOCK IN DENGAN IZIN HR)
+  // TOMBOL 1: CLOCK IN (Menciptakan sesi aktif berkelanjutan di backend/MySQL; tahan klik ganda)
   const handleClockIn = async () => {
+    if (
+      clockActionLockRef.current ||
+      submittingAction ||
+      Boolean(myTodayRecord?.clockInTime)
+    ) {
+      return;
+    }
+
     setErrorMsg(null);
 
     if (contributions.length === 0) {
@@ -1106,6 +1155,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     const targetLat = resolvedCoords.lat;
     const targetLon = resolvedCoords.lon;
 
+    clockActionLockRef.current = true;
     setSubmittingAction(true);
     try {
       const res = await api.clockInAttendance({
@@ -1127,7 +1177,9 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       window.dispatchEvent(
         new CustomEvent('wijna-attendance-bundle-updated', { detail: res.bundle })
       );
-      if (isMatchedWithOffice) {
+      if (res.alreadyActive) {
+        showToast('Sesi Clock In aktif Anda tetap berjalan tanpa perubahan.');
+      } else if (isMatchedWithOffice) {
         showToast('Clock In berhasil dan SAH! Lokasi sesuai titik koordinat Kantor WIJNA.');
       } else {
         showToast(
@@ -1137,13 +1189,24 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     } catch (err: any) {
       const failMsg = err.message || 'Gagal melakukan Clock In.';
       setErrorMsg(failMsg);
+      syncAttendanceFromServerSilently();
     } finally {
+      clockActionLockRef.current = false;
       setSubmittingAction(false);
     }
   };
 
-  // TOMBOL 2: CLOCK OUT (Menyimpan kontribusi + mencatat waktu selesai & total jam kerja)
+  // TOMBOL 2: CLOCK OUT (Satu-satunya cara mengakhiri sesi Clock In aktif oleh user terautentikasi yang sama)
   const handleClockOut = async () => {
+    if (
+      clockActionLockRef.current ||
+      submittingAction ||
+      !myTodayRecord?.clockInTime ||
+      Boolean(myTodayRecord?.clockOutTime)
+    ) {
+      return;
+    }
+
     setErrorMsg(null);
     if (
       isWorkingOutsideArea &&
@@ -1155,28 +1218,34 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       );
       return;
     }
+
+    clockActionLockRef.current = true;
     setSubmittingAction(true);
     try {
-      await api.updateDailyTimesheet({
-        date: lockedTodayDate,
-        timesheetItems: contributions.slice(0, 2).map((c) => ({
+      const res = await api.clockOutAttendance({
+        recordId: myTodayRecord.id,
+        date: myTodayRecord.date || lockedTodayDate,
+        latitude: resolvedCoords.lat,
+        longitude: resolvedCoords.lon,
+        gpsAccuracy: userCoordAccuracy,
+        outsideReason: isWorkingOutsideArea ? outsideReasonInput.trim() : undefined,
+        workItems: contributions.slice(0, 2).map((c) => ({
           id: c.id,
           category: c.category,
           shortDescription: c.shortDescription.trim() || c.category,
         })),
       });
-      const res = await api.clockOutAttendance({
-        date: lockedTodayDate,
-        latitude: resolvedCoords.lat,
-        longitude: resolvedCoords.lon,
-        gpsAccuracy: userCoordAccuracy,
-        outsideReason: isWorkingOutsideArea ? outsideReasonInput.trim() : undefined,
-      });
       setBundle(res.bundle);
-      showToast('Clock Out berhasil! Kontribusi & durasi kerja hari ini telah tersimpan.');
+      setNowMs(Date.now());
+      window.dispatchEvent(
+        new CustomEvent('wijna-attendance-bundle-updated', { detail: res.bundle })
+      );
+      showToast('Clock Out berhasil! Kontribusi & durasi kerja telah tersimpan.');
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal melakukan Clock Out.');
+      syncAttendanceFromServerSilently();
     } finally {
+      clockActionLockRef.current = false;
       setSubmittingAction(false);
     }
   };
@@ -2142,7 +2211,11 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const officeName = bundle?.locationConfig?.officeName || 'Kantor Pusat Yayasan WIJNA';
   const hasClockedIn = Boolean(myTodayRecord?.clockInTime);
   const hasClockedOut = Boolean(myTodayRecord?.clockOutTime);
-  const isWfaDay = Boolean(myActiveWfaToday || myTodayRecord?.recordType === 'WFA');
+  const hasActiveClockSession = Boolean(myActiveClockSession);
+  // Sesi Clock In yang masih aktif TIDAK BOLEH tertutup oleh banner WFA agar tombol Clock Out selalu tersedia
+  const isWfaDay =
+    !hasActiveClockSession &&
+    Boolean(myActiveWfaToday || myTodayRecord?.recordType === 'WFA');
   const liveDuration = formatDurationHMS(
     myTodayRecord?.clockInTime,
     myTodayRecord?.clockOutTime,
@@ -2653,13 +2726,13 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                         </div>
                       </div>
 
-                      {/* Tombol Besar Deteksi GPS */}
+                      {/* Tombol Besar Deteksi GPS (Murni membaca sensor lokasi, tidak pernah mereset sesi Clock In aktif) */}
                       <button
                         type="button"
                         disabled={isCheckingLocation}
-                        onClick={() => handleCheckLocationNow(true)}
+                        onClick={() => handleCheckLocationNow()}
                         className="h-11 sm:h-12 px-5 rounded-xl bg-[#1F7A63] hover:bg-[#17614E] text-white text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer whitespace-nowrap"
-                        title="Deteksi otomatis koordinat GPS dan pilih indikator lokasi secara otomatis"
+                        title="Deteksi otomatis koordinat GPS tanpa mengubah sesi Clock In aktif"
                       >
                         <MapPin className="w-4 h-4 shrink-0" />
                         <span>{isCheckingLocation ? 'Mendeteksi GPS...' : 'Deteksi GPS'}</span>
@@ -2824,6 +2897,26 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                     )}
                   </div>
                 )}
+
+                {hasClockedIn &&
+                  !hasClockedOut &&
+                  isWorkingOutsideArea &&
+                  !myTodayRecord?.outsideLocationReason && (
+                    <div className="rounded-xl border border-[#EAE8E1] bg-[#FAF9F6] p-3 text-xs">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 bg-white p-2.5 rounded-xl border border-[#E6E5E0]">
+                        <span className="text-[11px] font-semibold text-[#334155] shrink-0">
+                          Keterangan Clock Out di Luar Kantor:
+                        </span>
+                        <input
+                          type="text"
+                          value={outsideReasonInput}
+                          onChange={(e) => setOutsideReasonInput(e.target.value)}
+                          placeholder="Isi keterangan singkat apabila Anda akan Clock Out dari luar titik koordinat kantor..."
+                          className="flex-1 h-8 px-2.5 text-xs bg-[#FAF9F6] border border-[#E2E0D8] rounded-lg focus:outline-none focus:border-[#1F7A63]"
+                        />
+                      </div>
+                    </div>
+                  )}
 
                 {hasClockedIn && myTodayRecord?.isOutsideWorkLocation && (
                   <div

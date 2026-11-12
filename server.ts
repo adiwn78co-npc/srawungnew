@@ -36,6 +36,7 @@ import type {
   WijnaWorkCategory,
   TimesheetWorkItem,
   DailyAttendanceTimesheetRecord,
+  AttendanceSystemBundle,
   FlextimeAssignment,
   LeaveCategoryPolicy,
   LeaveCategoryGroup,
@@ -67,6 +68,8 @@ import {
   calculateWorkingDaysBetween,
   resolveAttendanceWorkflowType,
   isAttendanceArrangementActiveOnCalendar,
+  isActiveAttendanceClockSession,
+  findActiveClockSessionForUser,
 } from './src/server/attendanceService.ts';
 import {
   buildHierarchyImportPlan,
@@ -8618,8 +8621,7 @@ async function startServer() {
     return user.role === 'director' || user.role === 'admin';
   }
 
-  app.get('/api/attendance-system', (req: Request, res: Response) => {
-    const currentUser = getCurrentUser(req);
+  function buildAttendanceBundleForUser(currentUser: User): AttendanceSystemBundle {
     let bundle = db.getData().attendanceSystem;
     if (!bundle) {
       db.update((draft) => {
@@ -8648,30 +8650,38 @@ async function startServer() {
               directorReviewNotes: undefined,
             }
       );
-      const redactedLeaves = (bundle.leaveRequests || []).map((lv) =>
+      const redactedLeaves: LeaveRequestRecord[] = (bundle.leaveRequests || []).map((lv) =>
         lv.userId === currentUser.id
           ? lv
           : {
               ...lv,
-              reason: undefined,
+              reason: '',
               hrNotes: undefined,
               directorNotes: undefined,
               returnReason: undefined,
             }
       );
-      res.json({
+      return {
         ...bundle,
         records: redactedRecords,
         leaveRequests: redactedLeaves,
         auditTrail: bundle.auditTrail.filter((a) => a.actorId === currentUser.id),
-      });
-      return;
+      };
     }
 
-    res.json(bundle);
+    return bundle!;
+  }
+
+  app.get('/api/attendance-system', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    res.json(buildAttendanceBundleForUser(currentUser));
   });
 
   // 1. CLOCK IN + OTOMATIS MEMBUAT TIMESHEET HARIAN
+  // CRITICAL CLOCK LOGIC:
+  // - Begitu Clock In berhasil, sesi aktif disimpan di backend/MySQL sebagai satu-satunya sumber kebenaran.
+  // - Klik ganda / request duplikat / tab lain TIDAK BOLEH mereset, menghapus, atau memodifikasi sesi aktif (idempoten).
+  // - Tidak pernah ada automatic Clock Out dalam kondisi apa pun.
   app.post('/api/attendance-system/clock-in', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const {
@@ -8691,6 +8701,21 @@ async function startServer() {
       workItems: { category: WijnaWorkCategory; shortDescription: string }[];
     } = req.body || {};
 
+    // Periksa terlebih dahulu apakah user SUDAH memiliki sesi Clock In aktif (lintas tanggal/midnight sekalipun).
+    // Jika sudah ada sesi aktif, kembalikan sesi tersebut secara idempoten TANPA menyentuh clockInTime atau data sesi.
+    const currentSysSnapshot = ensureAttendanceSystemInitialized(db.getData());
+    const existingActiveSession = findActiveClockSessionForUser(
+      currentSysSnapshot.records,
+      currentUser.id
+    );
+    if (existingActiveSession) {
+      return res.json({
+        record: existingActiveSession,
+        bundle: buildAttendanceBundleForUser(currentUser),
+        alreadyActive: true,
+      });
+    }
+
     const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
@@ -8703,10 +8728,31 @@ async function startServer() {
     }
 
     let createdOrUpdated: DailyAttendanceTimesheetRecord | null = null;
+    let alreadyActiveInTx = false;
     let errMsg: string | null = null;
 
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
+
+      // Guard kedua di dalam transaksi atomik terhadap race condition klik simultan
+      const activeInDraft = findActiveClockSessionForUser(sys.records, currentUser.id);
+      if (activeInDraft) {
+        createdOrUpdated = activeInDraft;
+        alreadyActiveInTx = true;
+        return;
+      }
+
+      const existingIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && r.date === targetDate
+      );
+      if (
+        existingIdx !== -1 &&
+        Boolean(sys.records[existingIdx].clockInTime) &&
+        Boolean(sys.records[existingIdx].clockOutTime)
+      ) {
+        errMsg = 'Anda sudah menyelesaikan sesi Clock In dan Clock Out pada tanggal ini.';
+        return;
+      }
 
       // Cek apakah hari ini adalah hari WFA aktif (mendukung single-day, multi-day, & staf yang diajak kolaborasi WFA)
       const activeWfa = sys.wfaRequests.find((w) => {
@@ -8757,10 +8803,6 @@ async function startServer() {
         createdAt: nowIso,
       }));
 
-      const existingIdx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
-      );
-
       const clockInLoc = {
         latitude: lat,
         longitude: lon,
@@ -8769,7 +8811,7 @@ async function startServer() {
         locationLabel: isOutside
           ? `Outside Work Location (${lat.toFixed(4)}, ${lon.toFixed(4)} • ${distanceMeters}m)`
           : `${sys.locationConfig.officeName} (${distanceMeters}m)`,
-        outsideReason: isOutside ? String(outsideReason).trim() : undefined,
+        outsideReason: isOutside ? String(outsideReason || '').trim() : undefined,
       };
 
       if (existingIdx !== -1) {
@@ -8779,9 +8821,12 @@ async function startServer() {
           recordType: 'ATTENDANCE',
           clockInTime: prev.clockInTime || nowIso,
           clockInLocation: prev.clockInLocation || clockInLoc,
+          clockOutTime: undefined,
+          clockOutLocation: undefined,
+          totalWorkHours: 0,
           isOutsideWorkLocation: prev.isOutsideWorkLocation || isOutside,
           outsideLocationReason: isOutside
-            ? String(outsideReason).trim()
+            ? String(outsideReason || '').trim()
             : prev.outsideLocationReason,
           outsideReviewStatus:
             prev.isOutsideWorkLocation || isOutside ? 'PENDING_HR_REVIEW' : 'NOT_REQUIRED',
@@ -8805,7 +8850,7 @@ async function startServer() {
           clockInLocation: clockInLoc,
           totalWorkHours: 0,
           isOutsideWorkLocation: isOutside,
-          outsideLocationReason: isOutside ? String(outsideReason).trim() : undefined,
+          outsideLocationReason: isOutside ? String(outsideReason || '').trim() : undefined,
           outsideReviewStatus: isOutside ? 'PENDING_HR_REVIEW' : 'NOT_REQUIRED',
           isFlextimeApplied: Boolean(activeFlex),
           flextimeRuleLabel: activeFlex?.scheduleArrangement,
@@ -8832,10 +8877,16 @@ async function startServer() {
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
-    res.json({ record: createdOrUpdated, bundle: db.getData().attendanceSystem });
+    res.json({
+      record: createdOrUpdated,
+      bundle: buildAttendanceBundleForUser(currentUser),
+      alreadyActive: alreadyActiveInTx,
+    });
   });
 
-  // 1B. RESET PRESENSI HARI INI (Agar dapat melakukan Deteksi Kantor & Clock In ulang secara aman)
+  // 1B. RESET PRESENSI HARI INI
+  // CRITICAL CLOCK LOGIC: DILARANG KERAS mereset, menghapus, atau menghentikan sesi Clock In yang sedang aktif
+  // (maupun sesi kehadiran yang sudah memiliki clockInTime). Sesi aktif HANYA dapat diakhiri oleh Clock Out eksplisit.
   app.post('/api/attendance-system/reset-today', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const { date }: { date?: string } = req.body || {};
@@ -8848,6 +8899,25 @@ async function startServer() {
       return res.status(400).json({ error: 'Format tanggal presensi tidak valid.' });
     }
 
+    const currentSys = ensureAttendanceSystemInitialized(db.getData());
+    const activeSession = findActiveClockSessionForUser(currentSys.records, currentUser.id);
+    if (activeSession) {
+      return res.status(409).json({
+        error:
+          'Sesi Clock In Anda sedang aktif dan tidak dapat direset, dihapus, atau dihentikan selain melalui aksi Clock Out secara eksplisit.',
+      });
+    }
+
+    const existingClockedRecord = currentSys.records.find(
+      (r) => r.userId === currentUser.id && r.date === targetDate && Boolean(r.clockInTime)
+    );
+    if (existingClockedRecord) {
+      return res.status(409).json({
+        error:
+          'Catatan presensi yang sudah memiliki Clock In tidak dapat dihapus atau direset.',
+      });
+    }
+
     // Batasi reset mandiri hanya untuk tanggal hari ini (toleransi ±1 hari untuk zona waktu WIB/WITA/WIT)
     const targetTime = new Date(`${targetDate}T00:00:00Z`).getTime();
     const nowUtcStart = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime();
@@ -8858,7 +8928,6 @@ async function startServer() {
     }
 
     const periodPrefix = targetDate.slice(0, 7);
-    const currentSys = db.getData().attendanceSystem;
     const isPeriodVerified = Object.values(currentSys?.workRecapVerifications || {}).some(
       (v) =>
         v?.userId === currentUser.id &&
@@ -8873,27 +8942,29 @@ async function startServer() {
 
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const hadRecord = sys.records.some(
-        (r) => r.userId === currentUser.id && r.date === targetDate
+      const hadDraftRecord = sys.records.some(
+        (r) => r.userId === currentUser.id && r.date === targetDate && !r.clockInTime
       );
+      // Hanya hapus draft yang BELUM pernah Clock In
       sys.records = sys.records.filter(
-        (r) => !(r.userId === currentUser.id && r.date === targetDate)
+        (r) => !(r.userId === currentUser.id && r.date === targetDate && !r.clockInTime)
       );
-      if (hadRecord) {
+      if (hadDraftRecord) {
         appendAttendanceAudit(
           draft,
           currentUser,
           'CLOCK_IN_OUT',
-          'Reset Presensi Hari Berjalan',
-          `${currentUser.name} (${currentUser.roleTitle}) melakukan reset presensi hari berjalan (${targetDate}) untuk mengulang deteksi lokasi & Clock-In.`
+          'Reset Draft Presensi Hari Berjalan',
+          `${currentUser.name} (${currentUser.roleTitle}) mereset draft presensi pra-Clock-In (${targetDate}).`
         );
       }
     });
 
-    res.json({ bundle: db.getData().attendanceSystem });
+    res.json({ bundle: buildAttendanceBundleForUser(currentUser) });
   });
 
   // 3. UPDATE / TAMBAH PEKERJAAN DI TIMESHEET HARIAN (TERMASUK HARI WFA)
+  // CRITICAL CLOCK LOGIC: Pembaruan fokus pekerjaan TIDAK PERNAH mengubah clockInTime, clockOutTime, atau recordType sesi aktif.
   app.post('/api/attendance-system/timesheet', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const {
@@ -8904,7 +8975,7 @@ async function startServer() {
       timesheetItems: { id?: string; category: WijnaWorkCategory; shortDescription: string }[];
     } = req.body || {};
 
-    const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
+    const requestedDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
     if (!Array.isArray(timesheetItems) || timesheetItems.length === 0) {
       return res.status(400).json({ error: 'Timesheet harian harus memuat minimal 1 jenis pekerjaan.' });
     }
@@ -8914,9 +8985,16 @@ async function startServer() {
 
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const existingIdx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
+      // Apabila staf sedang memiliki sesi Clock In aktif (termasuk jika melewati tengah malam), prioritaskan sesi aktif tersebut
+      const activeIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && isActiveAttendanceClockSession(r)
       );
+      const dateIdx = sys.records.findIndex(
+        (r) => r.userId === currentUser.id && r.date === requestedDate
+      );
+      const existingIdx = activeIdx !== -1 ? activeIdx : dateIdx;
+      const targetDate =
+        existingIdx !== -1 ? sys.records[existingIdx].date : requestedDate;
 
       const normalizedItems: TimesheetWorkItem[] = timesheetItems.slice(0, 2).map((item, idx) => ({
         id: item.id || `ts-${Date.now()}-${idx}`,
@@ -8943,20 +9021,32 @@ async function startServer() {
 
       if (existingIdx !== -1) {
         const prev = sys.records[existingIdx];
+        const hasClockSession = Boolean(prev.clockInTime);
         const nextRec: DailyAttendanceTimesheetRecord = {
           ...prev,
-          recordType: approvedWfa ? 'WFA' : prev.recordType,
-          totalWorkHours: approvedWfa
+          // JANGAN PERNAH menimpa sesi Clock In menjadi WFA atau mengubah clockInTime / clockOutTime
+          recordType: hasClockSession
+            ? 'ATTENDANCE'
+            : approvedWfa
+            ? 'WFA'
+            : prev.recordType,
+          clockInTime: prev.clockInTime,
+          clockInLocation: prev.clockInLocation,
+          clockOutTime: prev.clockOutTime,
+          clockOutLocation: prev.clockOutLocation,
+          totalWorkHours: hasClockSession
+            ? prev.totalWorkHours
+            : approvedWfa
             ? sys.locationConfig.standardDailyHours
             : prev.totalWorkHours,
-          wfaRequestId: approvedWfa?.id || prev.wfaRequestId,
+          wfaRequestId: hasClockSession ? prev.wfaRequestId : approvedWfa?.id || prev.wfaRequestId,
           timesheetItems: normalizedItems,
           updatedAt: nowIso,
         };
         sys.records[existingIdx] = nextRec;
         updatedRecord = nextRec;
       } else {
-        // Jika belum ada record (misalnya pada hari WFA), buat record WFA atau draft harian
+        // Jika belum ada record (misalnya pada hari WFA), buat record WFA atau draft harian (tanpa clockInTime)
         const fresh: DailyAttendanceTimesheetRecord = {
           id: `att-${targetDate}-${currentUser.id}`,
           date: targetDate,
@@ -8990,22 +9080,30 @@ async function startServer() {
       );
     });
 
-    res.json({ record: updatedRecord, bundle: db.getData().attendanceSystem });
+    res.json({ record: updatedRecord, bundle: buildAttendanceBundleForUser(currentUser) });
   });
 
   // 4. CLOCK OUT & HITUNG OTOMATIS TOTAL JAM KERJA HARIAN
+  // CRITICAL CLOCK LOGIC:
+  // - Sesi aktif HANYA dapat diakhiri melalui aksi CLOCK OUT eksplisit oleh user terautentikasi yang sama (currentUser.id).
+  // - Mendukung penutupan sesi aktif lintas pergantian hari/zona waktu (midnight rollover).
+  // - Idempoten apabila terjadi klik ganda pada tombol Clock Out (tidak menimpa clockOutTime yang sudah tercatat).
   app.post('/api/attendance-system/clock-out', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const {
+      recordId,
       date,
       latitude,
       longitude,
       outsideReason,
+      workItems,
     }: {
+      recordId?: string;
       date?: string;
       latitude: number;
       longitude: number;
       outsideReason?: string;
+      workItems?: { id?: string; category: WijnaWorkCategory; shortDescription: string }[];
     } = req.body || {};
 
     const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
@@ -9016,16 +9114,63 @@ async function startServer() {
       return res.status(400).json({ error: 'Koordinat lokasi Clock Out tidak valid.' });
     }
 
+    // Tolak keras apabila ada upaya mengakhiri sesi milik user lain menggunakan recordId
+    if (recordId && String(recordId).trim()) {
+      const snap = ensureAttendanceSystemInitialized(db.getData());
+      const byId = snap.records.find((r) => r.id === String(recordId).trim());
+      if (byId && byId.userId !== currentUser.id) {
+        return res.status(403).json({
+          error: 'Sesi Clock In aktif hanya dapat diakhiri oleh pengguna terautentikasi yang bersangkutan.',
+        });
+      }
+    }
+
     let updatedRecord: DailyAttendanceTimesheetRecord | null = null;
+    let alreadyClockedOut = false;
     let errMsg: string | null = null;
 
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
-      const idx = sys.records.findIndex(
-        (r) => r.userId === currentUser.id && r.date === targetDate
-      );
-      if (idx === -1 || !sys.records[idx].clockInTime) {
-        errMsg = 'Anda belum melakukan Clock In pada tanggal ini.';
+
+      // Cari sesi Clock In AKTIF milik currentUser (prioritas: recordId milik sendiri -> tanggal sesuai -> sesi terbuka lintas tanggal)
+      let idx = -1;
+      if (recordId && String(recordId).trim()) {
+        idx = sys.records.findIndex(
+          (r) =>
+            r.id === String(recordId).trim() &&
+            r.userId === currentUser.id &&
+            isActiveAttendanceClockSession(r)
+        );
+      }
+      if (idx === -1) {
+        idx = sys.records.findIndex(
+          (r) =>
+            r.userId === currentUser.id &&
+            r.date === targetDate &&
+            isActiveAttendanceClockSession(r)
+        );
+      }
+      if (idx === -1) {
+        idx = sys.records.findIndex(
+          (r) => r.userId === currentUser.id && isActiveAttendanceClockSession(r)
+        );
+      }
+
+      if (idx === -1) {
+        // Cek apakah sesi baru saja selesai di-Clock Out (klik ganda / retry jaringan) -> kembalikan secara idempoten tanpa mengubah clockOutTime
+        const closedMatch = sys.records.find(
+          (r) =>
+            r.userId === currentUser.id &&
+            ((recordId && r.id === String(recordId).trim()) || r.date === targetDate) &&
+            Boolean(r.clockInTime) &&
+            Boolean(r.clockOutTime)
+        );
+        if (closedMatch) {
+          updatedRecord = closedMatch;
+          alreadyClockedOut = true;
+          return;
+        }
+        errMsg = 'Anda belum melakukan Clock In atau tidak memiliki sesi Clock In yang sedang aktif.';
         return;
       }
 
@@ -9049,6 +9194,17 @@ async function startServer() {
         calculateWorkHoursBetween(prev.clockInTime!, nowIso)
       );
 
+      const finalTimesheetItems: TimesheetWorkItem[] =
+        Array.isArray(workItems) && workItems.length > 0
+          ? workItems.slice(0, 2).map((item, itemIdx) => ({
+              id: item.id || prev.timesheetItems?.[itemIdx]?.id || `ts-${Date.now()}-${itemIdx}`,
+              category: item.category,
+              shortDescription: String(item.shortDescription || item.category).trim(),
+              createdAt: prev.timesheetItems?.[itemIdx]?.createdAt || nowIso,
+              updatedAt: nowIso,
+            }))
+          : prev.timesheetItems;
+
       const clockOutLoc = {
         latitude: lat,
         longitude: lon,
@@ -9070,9 +9226,13 @@ async function startServer() {
 
       const nextRec: DailyAttendanceTimesheetRecord = {
         ...prev,
+        // Pertahankan clockInTime & clockInLocation secara mutlak
+        clockInTime: prev.clockInTime,
+        clockInLocation: prev.clockInLocation,
         clockOutTime: nowIso,
         clockOutLocation: clockOutLoc,
         totalWorkHours: computedHours,
+        timesheetItems: finalTimesheetItems,
         isOutsideWorkLocation: combinedOutside,
         outsideLocationReason: combinedReason || prev.outsideLocationReason,
         outsideReviewStatus: combinedOutside
@@ -9091,7 +9251,7 @@ async function startServer() {
         currentUser,
         isOutside ? 'OUTSIDE_LOCATION' : 'CLOCK_IN_OUT',
         isOutside ? 'Clock Out (Outside Work Location)' : 'Clock Out Harian',
-        `${currentUser.name} melakukan Clock Out pada ${targetDate}. Total jam kerja: ${computedHours} jam (${clockOutLoc.locationLabel}).`,
+        `${currentUser.name} melakukan Clock Out pada sesi tanggal ${prev.date}. Total jam kerja: ${computedHours} jam (${clockOutLoc.locationLabel}).`,
         currentUser.name
       );
     });
@@ -9099,7 +9259,11 @@ async function startServer() {
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
-    res.json({ record: updatedRecord, bundle: db.getData().attendanceSystem });
+    res.json({
+      record: updatedRecord,
+      bundle: buildAttendanceBundleForUser(currentUser),
+      alreadyClockedOut,
+    });
   });
 
   // 2. OUTSIDE WORK LOCATION WORKFLOW BERDASARKAN PERAN (EMPLOYEE->FINANCE, FINANCE->DIRECTOR, DIRECTOR->FINANCE)
@@ -9146,6 +9310,8 @@ async function startServer() {
         if (wf === 'DIRECTOR_TO_FINANCE_NOTIFY') {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: 'ACKNOWLEDGED_BY_FINANCE',
             hrReviewByName: currentUser.name,
@@ -9158,6 +9324,8 @@ async function startServer() {
         } else if (decision === 'return') {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: 'RETURNED_BY_FINANCE',
             hrReviewByName: currentUser.name,
@@ -9169,6 +9337,8 @@ async function startServer() {
         } else {
           sys.records[idx] = {
             ...prev,
+            clockInTime: prev.clockInTime,
+            clockOutTime: prev.clockOutTime,
             workflowType: wf,
             outsideReviewStatus: 'HR_REVIEWED',
             hrReviewByName: currentUser.name,
@@ -9180,6 +9350,8 @@ async function startServer() {
       } else {
         sys.records[idx] = {
           ...prev,
+          clockInTime: prev.clockInTime,
+          clockOutTime: prev.clockOutTime,
           workflowType: wf,
           outsideReviewStatus:
             wf === 'FINANCE_TO_DIRECTOR_REVIEW' ? 'REVIEWED_BY_DIRECTOR' : 'DIRECTOR_ACKNOWLEDGED',
