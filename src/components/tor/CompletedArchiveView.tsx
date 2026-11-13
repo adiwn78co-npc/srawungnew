@@ -309,7 +309,7 @@ export const CompletedArchiveView: React.FC<CompletedArchiveViewProps> = ({
               <option value="all">Semua Outcome</option>
               {outcomes.map((oc) => (
                 <option key={oc.id} value={oc.id}>
-                  {oc.name.length > 32 ? `${oc.name.slice(0, 32)}...` : oc.name}
+                  {(oc.name || '').length > 32 ? `${(oc.name || '').slice(0, 32)}...` : oc.name || '-'}
                 </option>
               ))}
             </select>
@@ -323,7 +323,7 @@ export const CompletedArchiveView: React.FC<CompletedArchiveViewProps> = ({
               <option value="all">Semua Output</option>
               {availableOutputs.map((op) => (
                 <option key={op.id} value={op.id}>
-                  {op.name.length > 32 ? `${op.name.slice(0, 32)}...` : op.name}
+                  {(op.name || '').length > 32 ? `${(op.name || '').slice(0, 32)}...` : op.name || '-'}
                 </option>
               ))}
             </select>
@@ -436,7 +436,10 @@ export const CompletedArchiveView: React.FC<CompletedArchiveViewProps> = ({
         <div className="space-y-4">
           {hierarchyTree.map(({ outcome, outputs: outcomeOutputs }) => {
             const isOcExpanded = expandedOutcomeIds.has(outcome.id);
-            const totalTorsInOutcome = outcomeOutputs.reduce((acc, op) => acc + op.tors.length, 0);
+            const totalTorsInOutcome = outcomeOutputs.reduce(
+              (acc, op) => acc + (op.tors || []).length,
+              0
+            );
 
             return (
               <div

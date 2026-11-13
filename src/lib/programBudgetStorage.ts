@@ -458,6 +458,27 @@ export function createInitialDatasetForProgram(
   };
 }
 
+function normalizeProgramBudgetDataset(ds: any): ProgramBudgetDataset {
+  const fy = Number(ds?.fiscalYear) || new Date().getFullYear();
+  return {
+    ...ds,
+    fiscalYear: fy,
+    quarterlyPeriods: Array.isArray(ds?.quarterlyPeriods)
+      ? ds.quarterlyPeriods
+      : buildDefaultQuarterlyPeriods(fy, 0),
+    semesterPeriods: Array.isArray(ds?.semesterPeriods)
+      ? ds.semesterPeriods
+      : buildDefaultSemesterPeriods(fy, 0),
+    customPeriods: Array.isArray(ds?.customPeriods)
+      ? ds.customPeriods
+      : buildDefaultCustomPeriods(fy, 0),
+    masterBudgetCodes: Array.isArray(ds?.masterBudgetCodes) ? ds.masterBudgetCodes : [],
+    transactions: Array.isArray(ds?.transactions) ? ds.transactions : [],
+    revisions: Array.isArray(ds?.revisions) ? ds.revisions : [],
+    syncLogs: Array.isArray(ds?.syncLogs) ? ds.syncLogs : [],
+  };
+}
+
 export function loadAllProgramBudgetDatasets(): Record<string, ProgramBudgetDataset> {
   if (typeof window === 'undefined') return {};
   try {
@@ -465,7 +486,13 @@ export function loadAllProgramBudgetDatasets(): Record<string, ProgramBudgetData
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
-      return parsed;
+      const normalized: Record<string, ProgramBudgetDataset> = {};
+      for (const [k, ds] of Object.entries(parsed)) {
+        if (ds && typeof ds === 'object' && (ds as any).programId) {
+          normalized[k] = normalizeProgramBudgetDataset(ds);
+        }
+      }
+      return normalized;
     }
     return {};
   } catch {
@@ -500,7 +527,7 @@ export function hydrateProgramBudgetDatasetsFromServer(
   const authoritative: Record<string, ProgramBudgetDataset> = {};
   for (const [k, ds] of Object.entries(remoteDatasets)) {
     if (ds && typeof ds === 'object' && ds.programId) {
-      authoritative[k] = ds;
+      authoritative[k] = normalizeProgramBudgetDataset(ds);
     }
   }
   saveAllProgramBudgetDatasets(authoritative);

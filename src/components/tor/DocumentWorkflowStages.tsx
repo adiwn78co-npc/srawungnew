@@ -58,9 +58,10 @@ export const DocumentWorkflowStages: React.FC<DocumentWorkflowStagesProps> = ({
             statusText = 'Selesai';
             isComplete = true;
           } else if (stg.stageNumber === 1) {
-            statusText = tor.submissionStatus;
-            isPending = tor.submissionStatus.includes('Menunggu');
-            isDraft = tor.submissionStatus === 'Draft' || tor.submissionStatus === 'Perlu Perbaikan';
+            const subStatus = tor.submissionStatus || 'Draft';
+            statusText = subStatus;
+            isPending = subStatus.includes('Menunggu');
+            isDraft = subStatus === 'Draft' || subStatus === 'Perlu Perbaikan';
           }
 
           return (

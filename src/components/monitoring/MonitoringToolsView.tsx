@@ -716,9 +716,10 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   const getActivityMonitoring = useCallback(
     (activity: Activity): ActivityMonitoringRecord => {
       const existing = activityMonMap[activity.id];
-      if (existing && existing.tools && existing.tools.length > 0) {
+      if (existing && Array.isArray(existing.tools) && existing.tools.length > 0) {
         return {
           ...existing,
+          tools: existing.tools,
           status: 'Sudah Ada Monitoring',
         };
       }

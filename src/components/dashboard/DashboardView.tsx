@@ -205,7 +205,7 @@ function formatRupiahCompact(amount?: number | null): string {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
-  tors,
+  tors = [],
   stats,
   loading,
   onSelectTor,

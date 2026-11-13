@@ -1569,7 +1569,7 @@ export function ApprovalCenterView({
         const programStats = computeStatsFromUniqueItems(allProgramItems);
         const totalActivitiesCount = outcomeNodes.reduce(
           (sum, ocn) =>
-            sum + ocn.outputs.reduce((s2, opn) => s2 + opn.activities.length, 0),
+            sum + ocn.outputs.reduce((s2, opn) => s2 + (opn.activities || []).length, 0),
           0
         );
 
@@ -3484,7 +3484,7 @@ export function ApprovalCenterView({
                 </div>
               )}
 
-              {accessProfile && accessProfile.activeApprovalRoles.length > 0 && (
+              {accessProfile && Array.isArray(accessProfile.activeApprovalRoles) && accessProfile.activeApprovalRoles.length > 0 && (
                 <span
                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium bg-[#FAF9F6] border border-[#E3E2E0] text-[#57564F] whitespace-nowrap truncate max-w-[260px]"
                   title={accessProfile.activeApprovalRoles.join(' · ')}

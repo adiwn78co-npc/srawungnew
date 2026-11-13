@@ -1324,17 +1324,19 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleConfirmMasterCodeUpdate = async () => {
     setErrorMessage(null);
     const nowIso = new Date().toISOString();
-    const codePreviewList = dataset.masterBudgetCodes
+    const safeMasterCodes = dataset.masterBudgetCodes || [];
+    const codePreviewList = safeMasterCodes
       .slice(0, 5)
       .map((c) => `${c.code} (${c.budgetCategory})`)
       .join(', ');
     const moreSuffix =
-      dataset.masterBudgetCodes.length > 5
-        ? ` +${dataset.masterBudgetCodes.length - 5} kode lainnya`
+      safeMasterCodes.length > 5
+        ? ` +${safeMasterCodes.length - 5} kode lainnya`
         : '';
 
     const updated: ProgramBudgetDataset = {
       ...dataset,
+      masterBudgetCodes: safeMasterCodes,
       masterCodeUpdateStatus: 'Master Kode Terkonfirmasi',
       masterCodeConfirmedByName: currentUser?.name || 'Ratna Kusuma, S.E.',
       masterCodeConfirmedByRole: currentUser?.roleTitle || 'Finance & Compliance',
@@ -1351,7 +1353,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           previousAnnualBudget: dataset.annualApprovedBudget,
           newAnnualBudget: dataset.annualApprovedBudget,
           periodStructureType: dataset.periodStructureType,
-          summary: `Konfirmasi Update Master Budget Code berhasil disahkan (${dataset.masterBudgetCodes.length} Master Kode Aktif: ${codePreviewList}${moreSuffix}).`,
+          summary: `Konfirmasi Update Master Budget Code berhasil disahkan (${safeMasterCodes.length} Master Kode Aktif: ${codePreviewList}${moreSuffix}).`,
         },
         ...(dataset.revisions || []),
       ],
@@ -1359,7 +1361,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
-      `Konfirmasi Update Master Kode (${dataset.masterBudgetCodes.length} kode aktif) berhasil disahkan dan tercatat di Track Audit.`
+      `Konfirmasi Update Master Kode (${safeMasterCodes.length} kode aktif) berhasil disahkan dan tercatat di Track Audit.`
     );
   };
 
@@ -2177,7 +2179,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                 </span>
                                 <span aria-hidden="true">·</span>
                                 <span className="font-mono tabular-nums text-[#1D4ED8] font-medium">
-                                  {finSummary.dataset.masterBudgetCodes.length} Budget Code
+                                  {(finSummary.dataset.masterBudgetCodes || []).length} Budget Code
                                 </span>
                               </>
                             )}
@@ -2609,7 +2611,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                         }`}
                       >
                         <Wallet className="w-3.5 h-3.5" />
-                        <span>Finance ({dataset.masterBudgetCodes.length} Kode)</span>
+                        <span>Finance ({(dataset.masterBudgetCodes || []).length} Kode)</span>
                       </button>
                     )}
                   </div>
@@ -3328,7 +3330,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           2. Master Budget Code
                         </span>
                         <span className="px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] border border-blue-200 text-[10px] font-mono font-semibold whitespace-nowrap shrink-0">
-                          {dataset.masterBudgetCodes.length} Kode Aktif
+                          {(dataset.masterBudgetCodes || []).length} Kode Aktif
                         </span>
                       </div>
 
@@ -3337,7 +3339,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           Tabel 2 Kolom (Code | Category)
                         </span>
                         <span className="font-mono font-semibold text-[#1D4ED8] whitespace-nowrap shrink-0">
-                          Terdaftar: {dataset.masterBudgetCodes.length}
+                          Terdaftar: {(dataset.masterBudgetCodes || []).length}
                         </span>
                       </div>
                     </button>
@@ -3961,7 +3963,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                               />
                             </div>
                             <span className="text-[11px] font-mono text-[#5F5E5B] shrink-0">
-                              <strong>{dataset.masterBudgetCodes.length}</strong> Master Kode Aktif (Dikelola Finance)
+                              <strong>{(dataset.masterBudgetCodes || []).length}</strong> Master Kode Aktif (Dikelola Finance)
                             </span>
                           </div>
                           <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#5F5E5B]">
@@ -3982,7 +3984,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-[#EAEAEA]">
-                              {dataset.masterBudgetCodes
+                              {(dataset.masterBudgetCodes || [])
                                 .filter((item) => {
                                   const q = codeSearch.trim().toLowerCase();
                                   return (
@@ -4021,7 +4023,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                     </td>
                                   </tr>
                                 ))}
-                              {dataset.masterBudgetCodes.length === 0 && (
+                              {(dataset.masterBudgetCodes || []).length === 0 && (
                                 <tr>
                                   <td colSpan={2} className="py-6 text-center text-xs text-[#787774]">
                                     Belum ada Budget Code pada Program ini. Gunakan tombol{' '}
@@ -4339,7 +4341,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                 const relatedTors = tors.filter(
                                                   (t) =>
                                                     t.activityId === act.id ||
-                                                    t.activityId.startsWith(`${act.id}-`)
+                                                    (t.activityId || '').startsWith(`${act.id}-`)
                                                 );
                                                 const isActExpanded =
                                                   expandedActivities[act.id] ?? true;
@@ -5063,8 +5065,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {(editingOutcomeDraft.indicators.length > 0
-                      ? editingOutcomeDraft.indicators
+                    {((editingOutcomeDraft.indicators || []).length > 0
+                      ? editingOutcomeDraft.indicators || []
                       : [
                           {
                             id: 'empty-oc-ind',
@@ -5176,7 +5178,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between px-0.5">
                       <span className="text-[11px] font-bold text-[#0F172A]">
-                        Daftar Progress Indicator ({editingOutcomeDraft.indicators.length})
+                        Daftar Progress Indicator ({(editingOutcomeDraft.indicators || []).length})
                       </span>
                       <button
                         type="button"
@@ -5184,7 +5186,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           setEditingOutcomeDraft({
                             ...editingOutcomeDraft,
                             indicators: [
-                              ...editingOutcomeDraft.indicators,
+                              ...(editingOutcomeDraft.indicators || []),
                               {
                                 id: `ind-oc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
                                 name: '',
@@ -5209,7 +5211,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                       </button>
                     </div>
 
-                    {editingOutcomeDraft.indicators.map((ind, idx) => {
+                    {(editingOutcomeDraft.indicators || []).map((ind, idx) => {
                       const updateInd = (field: keyof Indicator, val: string) => {
                         const nextList = editingOutcomeDraft.indicators.map((item, i) =>
                           i === idx
@@ -5540,8 +5542,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {(editingOutputDraft.indicators.length > 0
-                      ? editingOutputDraft.indicators
+                    {((editingOutputDraft.indicators || []).length > 0
+                      ? editingOutputDraft.indicators || []
                       : [
                           {
                             id: 'empty-op-ind',
@@ -5653,7 +5655,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between px-0.5">
                       <span className="text-[11px] font-bold text-[#0F172A]">
-                        Daftar Progress Indicator ({editingOutputDraft.indicators.length})
+                        Daftar Progress Indicator ({(editingOutputDraft.indicators || []).length})
                       </span>
                       <button
                         type="button"
@@ -5661,7 +5663,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           setEditingOutputDraft({
                             ...editingOutputDraft,
                             indicators: [
-                              ...editingOutputDraft.indicators,
+                              ...(editingOutputDraft.indicators || []),
                               {
                                 id: `ind-op-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
                                 name: '',

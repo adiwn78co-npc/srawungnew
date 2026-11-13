@@ -332,7 +332,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           if (recordManualSync) {
             setStatusBanner({
               type: 'success',
-              message: `Data terintegrasi berhasil disinkronkan dari database: ${syncResult.updatedDataset.transactions.length} rekaman Cash Advance / Final Financial Report terhubung.`,
+              message: `Data terintegrasi berhasil disinkronkan dari database: ${(syncResult.updatedDataset.transactions || []).length} rekaman Cash Advance / Final Financial Report terhubung.`,
             });
           }
         }
@@ -1327,7 +1327,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       label: 'Master Budget Code',
       desc: '2 Kolom (Code | Budget Category) & Import Excel (.xlsx)',
       icon: FileSpreadsheet,
-      badgeCount: dataset.masterBudgetCodes.length,
+      badgeCount: (dataset.masterBudgetCodes || []).length,
     },
     {
       id: 'master-tor',
@@ -2967,11 +2967,11 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5">
               {[
-                { id: 'all', label: `Semua (${dataset.transactions.length})` },
+                { id: 'all', label: `Semua (${(dataset.transactions || []).length})` },
                 {
                   id: 'pending',
                   label: `Menunggu Verifikasi/Approve (${
-                    dataset.transactions.filter(
+                    (dataset.transactions || []).filter(
                       (t) => t.reconciliationStatus === 'Pending Verification'
                     ).length
                   })`,
@@ -2979,7 +2979,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                 {
                   id: 'outstanding',
                   label: `Dicairkan / Outstanding (${
-                    dataset.transactions.filter(
+                    (dataset.transactions || []).filter(
                       (t) => t.reconciliationStatus === 'Outstanding Advance'
                     ).length
                   })`,
@@ -3419,12 +3419,12 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             </p>
           </div>
           <div className="divide-y divide-[#EAEAEA]">
-            {dataset.revisions.length === 0 ? (
+            {(dataset.revisions || []).length === 0 ? (
               <div className="p-8 text-center text-xs text-[#787774]">
                 Belum ada riwayat revisi konfigurasi anggaran untuk program ini pada FY {selectedFiscalYear}.
               </div>
             ) : (
-              dataset.revisions.map((rev) => (
+              (dataset.revisions || []).map((rev) => (
                 <div
                   key={rev.id}
                   className="p-3.5 hover:bg-[#FAFAF9] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs"

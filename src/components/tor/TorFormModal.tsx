@@ -375,10 +375,10 @@ const EXAMPLE_ADDITIONAL_NOTES =
 
 export const TorFormModal: React.FC<TorFormModalProps> = ({
   programs = [],
-  outcomes,
-  outputs,
-  activities,
-  users,
+  outcomes = [],
+  outputs = [],
+  activities = [],
+  users = [],
   isOpen,
   onClose,
   onSuccess,
@@ -394,7 +394,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   // SECTION 1: INFORMASI KEGIATAN & HIERARKI
   // ==========================================
   const [title, setTitle] = useState<string>(() =>
-    editingTor ? editingTor.title : EXAMPLE_TITLE
+    editingTor ? editingTor.title || '' : EXAMPLE_TITLE
   );
   const [budgetRequestedInput, setBudgetRequestedInput] = useState<number | string>(() =>
     editingTor?.budgetApproved != null
@@ -997,7 +997,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   // SECTION 2: LATAR BELAKANG MASALAH
   // ==========================================
   const [background, setBackground] = useState<string>(() =>
-    editingTor ? editingTor.background : EXAMPLE_BACKGROUND
+    editingTor ? editingTor.background || '' : EXAMPLE_BACKGROUND
   );
 
   // ==========================================
@@ -1008,7 +1008,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   );
 
   const [specificObjectives, setSpecificObjectives] = useState<TorSpecificObjectiveItem[]>(() =>
-    editingTor?.specificObjectives && editingTor.specificObjectives.length > 0
+    Array.isArray(editingTor?.specificObjectives) && editingTor.specificObjectives.length > 0
       ? editingTor.specificObjectives
       : EXAMPLE_SPECIFIC_OBJECTIVES
   );
@@ -1045,7 +1045,9 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     setSpecificObjectives(specificObjectives.filter((so) => so.id !== id));
   };
 
-  const [goals] = useState<TorGoalItem[]>(() => editingTor?.goals || []);
+  const [goals] = useState<TorGoalItem[]>(() =>
+    Array.isArray(editingTor?.goals) ? editingTor.goals : []
+  );
 
   // ==========================================
   // IMPLEMENTATION TIMELINE (Period & Activity)
@@ -1872,24 +1874,26 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         specificObjectives: cleanedObjectives,
         timelineItems: cleanedTimelines,
         monitoringItems: cleanedMonitoring,
-        scopeOfActivities: scopeOfActivities.filter((s) => s.trim().length > 0),
-        implementationMechanisms: implementationMechanisms.filter(
-          (m) => m.trim().length > 0
+        scopeOfActivities: (scopeOfActivities || []).filter((s) => (s || '').trim().length > 0),
+        implementationMechanisms: (implementationMechanisms || []).filter(
+          (m) => (m || '').trim().length > 0
         ),
         isRundownVisible,
         indicators: [],
         rolesResponsibilities,
-        rolesNotes: rolesNotes.trim() || undefined,
-        rolesAdditionalNotes: rolesNotes.trim() || undefined,
+        rolesNotes: (rolesNotes || '').trim() || undefined,
+        rolesAdditionalNotes: (rolesNotes || '').trim() || undefined,
         mealItems: [],
         rundown,
-        rundownNotes: rundownNotes.trim() || undefined,
-        rundownAdditionalNotes: rundownNotes.trim() || undefined,
+        rundownNotes: (rundownNotes || '').trim() || undefined,
+        rundownAdditionalNotes: (rundownNotes || '').trim() || undefined,
         challengesMitigations: [],
-        activityDescription: background.trim(),
+        activityDescription: (background || '').trim(),
         expectedResults: '',
         location: locationSummary,
-        locations: locations.filter((l) => l.villageCity.trim() || l.province.trim()),
+        locations: (locations || []).filter(
+          (l) => (l?.villageCity || '').trim() || (l?.province || '').trim()
+        ),
         customPeriodId: selectedCustomPeriod?.id,
         customPeriodCode: selectedCustomPeriod?.code,
         customPeriodLabel: selectedCustomPeriod?.label,
@@ -2858,12 +2862,12 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Uraian Latar Belakang Masalah <span className="text-rose-500">*</span>
                   </label>
                   <span className="text-[11px] text-stone-400">
-                    {background.length} karakter
+                    {(background || '').length} karakter
                   </span>
                 </div>
                 <textarea
                   rows={5}
-                  value={background}
+                  value={background || ''}
                   onChange={(e) => setBackground(e.target.value)}
                   placeholder="Ketik latar belakang masalah yang melandasi kegiatan ini..."
                   className="w-full p-2.5 bg-white hover:bg-stone-50/50 focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-xs sm:text-sm text-stone-800 leading-relaxed placeholder:text-stone-300 transition-colors focus:outline-none"

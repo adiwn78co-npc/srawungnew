@@ -82,7 +82,7 @@ function formatRupiah(amount?: number | null): string {
 
 export const TorDetailView: React.FC<TorDetailViewProps> = ({
   tor,
-  approvalRecords,
+  approvalRecords = [],
   initialStage = 1,
   targetEntityId,
   focusedSourceMode = false,
@@ -97,7 +97,7 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
   users = [],
 }) => {
   const { currentUser, isDirector, isFinance, allUsers } = useAuth();
-  const effectiveUsers = users.length > 0 ? users : allUsers;
+  const effectiveUsers = Array.isArray(users) && users.length > 0 ? users : allUsers || [];
 
   // Active stage tab (default stage 1: TOR, or initialStage if provided)
   const [activeWorkflowStage, setActiveWorkflowStage] = useState<number>(initialStage || 1);

@@ -471,7 +471,12 @@ function normalizeSchema(
 
       return {
         ...t,
+        title: typeof t.title === 'string' ? t.title : '',
         torNumber: typeof t.torNumber === 'string' ? t.torNumber : '',
+        background: typeof t.background === 'string' ? t.background : '',
+        rationale: typeof t.rationale === 'string' ? t.rationale : '',
+        generalObjective: typeof t.generalObjective === 'string' ? t.generalObjective : '',
+        objectives: typeof t.objectives === 'string' ? t.objectives : '',
         programId: resolvedProgramId,
         programName: t.programName || linkedProg?.name || linkedOutc?.programName || '',
         outcomeId: resolvedOutcomeId,
@@ -486,6 +491,30 @@ function normalizeSchema(
         createdByName: t.createdByName || t.picName || '',
         submissionStatus: resolvedSubmissionStatus,
         activityStatus: resolvedActivityStatus,
+        implementingTeam: Array.isArray(t.implementingTeam) ? t.implementingTeam : [],
+        specificObjectives: Array.isArray(t.specificObjectives) ? t.specificObjectives : [],
+        timelineItems: Array.isArray(t.timelineItems) ? t.timelineItems : [],
+        monitoringItems: Array.isArray(t.monitoringItems) ? t.monitoringItems : [],
+        scopeOfActivities: Array.isArray(t.scopeOfActivities) ? t.scopeOfActivities : [],
+        implementationMechanisms: Array.isArray(t.implementationMechanisms)
+          ? t.implementationMechanisms
+          : [],
+        participantRows: Array.isArray(t.participantRows) ? t.participantRows : [],
+        participantCustomColumns: Array.isArray(t.participantCustomColumns)
+          ? t.participantCustomColumns
+          : [],
+        rolesResponsibilities: Array.isArray(t.rolesResponsibilities)
+          ? t.rolesResponsibilities
+          : [],
+        rundown: Array.isArray(t.rundown) ? t.rundown : [],
+        locations: Array.isArray(t.locations) ? t.locations : [],
+        goals: Array.isArray(t.goals) ? t.goals : [],
+        indicators: Array.isArray(t.indicators) ? t.indicators : [],
+        mealItems: Array.isArray(t.mealItems) ? t.mealItems : [],
+        challengesMitigations: Array.isArray(t.challengesMitigations)
+          ? t.challengesMitigations
+          : [],
+        budgetAuditLogs: Array.isArray(t.budgetAuditLogs) ? t.budgetAuditLogs : [],
         budgetRequested:
           approvedCas.length > 0 ? computedRequested : (t.budgetRequested ?? 0),
         budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
@@ -516,6 +545,16 @@ function normalizeSchema(
         items: Array.isArray(ca?.items) ? ca.items : [],
       };
     });
+  }
+
+  if (Array.isArray(parsed.meetingMinutes)) {
+    parsed.meetingMinutes = parsed.meetingMinutes.map((m: any) => ({
+      ...m,
+      participants: Array.isArray(m?.participants) ? m.participants : [],
+      discussions: Array.isArray(m?.discussions) ? m.discussions : [],
+      decisions: Array.isArray(m?.decisions) ? m.decisions : [],
+      actionPoints: Array.isArray(m?.actionPoints) ? m.actionPoints : [],
+    }));
   }
 
   if (!Array.isArray(parsed.meetingMinutes)) {

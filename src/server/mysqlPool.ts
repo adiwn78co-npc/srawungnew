@@ -677,7 +677,10 @@ export async function loadDatabaseFromMysql(
     description: r?.description ?? raw.description ?? '',
     indicators: Array.isArray(raw.indicators)
       ? raw.indicators
-      : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+      : (() => {
+          const parsedInd = safeJsonParse(r?.indicators_json ?? r?.indicators, []);
+          return Array.isArray(parsedInd) ? parsedInd : [];
+        })(),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
@@ -700,7 +703,10 @@ export async function loadDatabaseFromMysql(
     description: r?.description ?? raw.description ?? '',
     indicators: Array.isArray(raw.indicators)
       ? raw.indicators
-      : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
+      : (() => {
+          const parsedInd = safeJsonParse(r?.indicators_json ?? r?.indicators, []);
+          return Array.isArray(parsedInd) ? parsedInd : [];
+        })(),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
@@ -783,7 +789,34 @@ export async function loadDatabaseFromMysql(
       status: r?.status || resolvedSubmissionStatus,
       submissionStatus: resolvedSubmissionStatus,
       activityStatus: resolvedActivityStatus,
+      background: typeof raw.background === 'string' ? raw.background : '',
+      rationale: typeof raw.rationale === 'string' ? raw.rationale : '',
+      generalObjective: typeof raw.generalObjective === 'string' ? raw.generalObjective : '',
+      objectives: typeof raw.objectives === 'string' ? raw.objectives : '',
       implementingTeam: Array.isArray(raw.implementingTeam) ? raw.implementingTeam : [],
+      specificObjectives: Array.isArray(raw.specificObjectives) ? raw.specificObjectives : [],
+      timelineItems: Array.isArray(raw.timelineItems) ? raw.timelineItems : [],
+      monitoringItems: Array.isArray(raw.monitoringItems) ? raw.monitoringItems : [],
+      scopeOfActivities: Array.isArray(raw.scopeOfActivities) ? raw.scopeOfActivities : [],
+      implementationMechanisms: Array.isArray(raw.implementationMechanisms)
+        ? raw.implementationMechanisms
+        : [],
+      participantRows: Array.isArray(raw.participantRows) ? raw.participantRows : [],
+      participantCustomColumns: Array.isArray(raw.participantCustomColumns)
+        ? raw.participantCustomColumns
+        : [],
+      rolesResponsibilities: Array.isArray(raw.rolesResponsibilities)
+        ? raw.rolesResponsibilities
+        : [],
+      rundown: Array.isArray(raw.rundown) ? raw.rundown : [],
+      locations: Array.isArray(raw.locations) ? raw.locations : [],
+      goals: Array.isArray(raw.goals) ? raw.goals : [],
+      indicators: Array.isArray(raw.indicators) ? raw.indicators : [],
+      mealItems: Array.isArray(raw.mealItems) ? raw.mealItems : [],
+      challengesMitigations: Array.isArray(raw.challengesMitigations)
+        ? raw.challengesMitigations
+        : [],
+      budgetAuditLogs: Array.isArray(raw.budgetAuditLogs) ? raw.budgetAuditLogs : [],
       currentWorkflowStage:
         r?.current_stage !== undefined && r?.current_stage !== null
           ? Number(r.current_stage)
@@ -869,6 +902,10 @@ export async function loadDatabaseFromMysql(
     meetingLocation: raw.meetingLocation || r?.location || raw.location || '',
     createdById: raw.createdById || r?.created_by_user_id || '',
     status: r?.status || raw.status || 'Draft',
+    participants: Array.isArray(raw.participants) ? raw.participants : [],
+    discussions: Array.isArray(raw.discussions) ? raw.discussions : [],
+    decisions: Array.isArray(raw.decisions) ? raw.decisions : [],
+    actionPoints: Array.isArray(raw.actionPoints) ? raw.actionPoints : [],
     createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 

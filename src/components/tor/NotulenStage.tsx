@@ -672,7 +672,10 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
       ...record,
       implementationProject: validStage,
       title: cleanTitle,
-      actionPoints: (record.actionPoints || []).map((ap) => ({
+      participants: Array.isArray(record.participants) ? record.participants : [],
+      discussions: Array.isArray(record.discussions) ? record.discussions : [],
+      decisions: Array.isArray(record.decisions) ? record.decisions : [],
+      actionPoints: (Array.isArray(record.actionPoints) ? record.actionPoints : []).map((ap) => ({
         ...ap,
         status: resolveActionPointStatus(ap),
       })),
@@ -700,7 +703,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
     setFeedback(null);
     setSaving(true);
     try {
-      const normalizedActions = formData.actionPoints.map((ap) => ({
+      const normalizedActions = (formData.actionPoints || []).map((ap) => ({
         ...ap,
         status: resolveActionPointStatus(ap),
       }));
@@ -719,6 +722,9 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
         torNumber: tor.torNumber,
         implementationProject: effectiveStage,
         title: effectiveTitle,
+        participants: Array.isArray(formData.participants) ? formData.participants : [],
+        discussions: Array.isArray(formData.discussions) ? formData.discussions : [],
+        decisions: Array.isArray(formData.decisions) ? formData.decisions : [],
         actionPoints: normalizedActions,
       };
 
@@ -729,7 +735,13 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
         savedRecord = await api.createMeetingMinutes(payload);
       }
 
-      setFormData(savedRecord);
+      setFormData({
+        ...savedRecord,
+        participants: Array.isArray(savedRecord?.participants) ? savedRecord.participants : [],
+        discussions: Array.isArray(savedRecord?.discussions) ? savedRecord.discussions : [],
+        decisions: Array.isArray(savedRecord?.decisions) ? savedRecord.decisions : [],
+        actionPoints: Array.isArray(savedRecord?.actionPoints) ? savedRecord.actionPoints : [],
+      });
       await loadMinutesList();
       setFeedback({
         type: 'success',
@@ -1505,14 +1517,14 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-stone-100 text-stone-700">
-                          {formData.participants.length === 0 ? (
+                          {(formData.participants || []).length === 0 ? (
                             <tr>
                               <td colSpan={5} className="py-4 text-center text-stone-400 italic">
                                 Belum ada baris peserta. Klik &quot;+ Baris Peserta&quot; di atas.
                               </td>
                             </tr>
                           ) : (
-                            formData.participants.map((part, idx) => (
+                            (formData.participants || []).map((part, idx) => (
                               <tr key={part.id} className="hover:bg-stone-50/50">
                                 <td className="py-1.5 px-2.5 text-center text-stone-400 font-mono text-[11px]">
                                   {idx + 1}
@@ -1593,7 +1605,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                   </button>
                 </div>
 
-                {formData.discussions.length === 0 ? (
+                {(formData.discussions || []).length === 0 ? (
                   <div className="py-4 border border-dashed border-stone-200 rounded text-center space-y-1.5 bg-stone-50/20 text-xs">
                     <p className="text-stone-500">Belum ada pembahasan rapat.</p>
                     <button
@@ -1606,7 +1618,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                   </div>
                 ) : (
                   <div className="space-y-4 text-xs">
-                    {formData.discussions.map((disc, idx) => (
+                    {(formData.discussions || []).map((disc, idx) => (
                       <div
                         key={disc.id}
                         className="p-3 bg-stone-50/40 rounded border border-stone-200 space-y-3"
@@ -1752,14 +1764,14 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-100 text-stone-700">
-                      {formData.decisions.length === 0 ? (
+                      {(formData.decisions || []).length === 0 ? (
                         <tr>
                           <td colSpan={6} className="py-4 text-center text-stone-400 italic">
                             Belum ada keputusan rapat. Klik &quot;Add Key Decision&quot; di atas.
                           </td>
                         </tr>
                       ) : (
-                        formData.decisions.map((dec, idx) => (
+                        (formData.decisions || []).map((dec, idx) => (
                           <tr key={dec.id} className="hover:bg-stone-50/50">
                             <td className="py-1.5 px-2.5 text-center text-stone-400 font-mono text-[11px]">
                               {idx + 1}
@@ -1870,14 +1882,14 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-100 text-stone-700">
-                      {formData.actionPoints.length === 0 ? (
+                      {(formData.actionPoints || []).length === 0 ? (
                         <tr>
                           <td colSpan={6} className="py-4 text-center text-stone-400 italic">
                             Belum ada tindak lanjut. Klik &quot;Add Action Point&quot; di atas.
                           </td>
                         </tr>
                       ) : (
-                        formData.actionPoints.map((ap, idx) => {
+                        (formData.actionPoints || []).map((ap, idx) => {
                           const effectiveStatus = resolveActionPointStatus(ap);
                           return (
                             <tr key={ap.id} className="hover:bg-stone-50/50">
@@ -2261,9 +2273,9 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {formData.participants.filter((p) => p.name.trim()).length > 0 ? (
-                      formData.participants
-                        .filter((p) => p.name.trim())
+                    {(formData.participants || []).filter((p) => (p?.name || '').trim()).length > 0 ? (
+                      (formData.participants || [])
+                        .filter((p) => (p?.name || '').trim())
                         .map((p, i) => (
                           <tr key={p.id || i}>
                             <td className="border border-black px-2 py-1 text-center">{i + 1}</td>
@@ -2295,7 +2307,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                 2. Meeting Agenda &amp; Discussion
               </div>
               <div className="space-y-3">
-                {formData.discussions.map((d, idx) => (
+                {(formData.discussions || []).map((d, idx) => (
                   <table
                     key={d.id || idx}
                     className="w-full border-collapse border border-black text-[14px] text-black"
@@ -2378,7 +2390,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {formData.decisions.map((dec, idx) => (
+                  {(formData.decisions || []).map((dec, idx) => (
                     <tr key={dec.id || idx}>
                       <td className="border border-black px-2 py-1 text-center align-top">
                         {idx + 1}
@@ -2430,7 +2442,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {formData.actionPoints.map((ap, idx) => {
+                  {(formData.actionPoints || []).map((ap, idx) => {
                     const st = resolveActionPointStatus(ap);
                     return (
                       <tr key={ap.id || idx}>
