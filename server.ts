@@ -4111,11 +4111,11 @@ async function startServer() {
         req.body.customPeriodAllocatedAmount !== undefined
           ? Number(req.body.customPeriodAllocatedAmount)
           : undefined,
-      startDate: startDate || new Date().toISOString().slice(0, 10),
-      endDate: endDate || new Date().toISOString().slice(0, 10),
+      startDate: startDate || '',
+      endDate: endDate || '',
       reportingPeriodType: reportingPeriodType || 'Sekali / Akhir Kegiatan',
       reportingFrequency: reportingFrequency || '1 kali di akhir kegiatan',
-      reportingDeadline: reportingDeadline || endDate || new Date().toISOString().slice(0, 10),
+      reportingDeadline: reportingDeadline || endDate || '',
       additionalNotes: additionalNotes || '',
       specificObjectives: req.body.specificObjectives || [],
       timelineItems: req.body.timelineItems || [],
@@ -4126,33 +4126,34 @@ async function startServer() {
       organizerPersonInCharge: req.body.organizerPersonInCharge || undefined,
       activityStatus: 'Belum Dimulai',
       submissionStatus: initialStatus,
-      budgetRequested: req.body.budgetRequested !== undefined ? Number(req.body.budgetRequested) : null,
-      budgetApproved: req.body.budgetApproved !== undefined ? Number(req.body.budgetApproved) : null,
-      budgetActualSpent: req.body.budgetActualSpent !== undefined ? Number(req.body.budgetActualSpent) : null,
+      budgetRequested:
+        req.body.budgetRequested !== undefined &&
+        req.body.budgetRequested !== null &&
+        req.body.budgetRequested !== ''
+          ? Number(req.body.budgetRequested)
+          : null,
+      budgetApproved:
+        req.body.budgetApproved !== undefined &&
+        req.body.budgetApproved !== null &&
+        req.body.budgetApproved !== ''
+          ? Number(req.body.budgetApproved)
+          : null,
+      budgetActualSpent:
+        req.body.budgetActualSpent !== undefined &&
+        req.body.budgetActualSpent !== null &&
+        req.body.budgetActualSpent !== ''
+          ? Number(req.body.budgetActualSpent)
+          : null,
       budgetCurrency: req.body.budgetCurrency || 'IDR',
       budgetNotes: req.body.budgetNotes || '',
-      budgetApprovalStatus: req.body.budgetApprovalStatus || 'Menunggu ACC Direktur',
-      budgetDeterminedByFinanceName:
-        req.body.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
-      budgetDeterminedByFinanceAt:
-        req.body.budgetDeterminedByFinanceAt || new Date().toISOString(),
+      budgetApprovalStatus: req.body.budgetApprovalStatus || 'Menunggu Penentuan Finance',
+      budgetDeterminedByFinanceName: req.body.budgetDeterminedByFinanceName || undefined,
+      budgetDeterminedByFinanceAt: req.body.budgetDeterminedByFinanceAt || undefined,
       budgetUpdatedByA2Name: req.body.budgetUpdatedByA2Name || undefined,
       budgetUpdatedByA2At: req.body.budgetUpdatedByA2At || undefined,
       budgetApprovedByDirectorName: req.body.budgetApprovedByDirectorName || undefined,
       budgetApprovedByDirectorAt: req.body.budgetApprovedByDirectorAt || undefined,
-      budgetAuditLogs: Array.isArray(req.body.budgetAuditLogs)
-        ? req.body.budgetAuditLogs
-        : [
-            {
-              id: `bgt-log-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              actorName: req.body.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
-              actorRole: 'Finance / A2',
-              actionLabel: 'Penentuan Estimasi Budget Awal ToR oleh Finance',
-              amount: req.body.budgetRequested !== undefined ? Number(req.body.budgetRequested) : 0,
-              status: req.body.budgetApprovalStatus || 'Menunggu ACC Direktur',
-            },
-          ],
+      budgetAuditLogs: Array.isArray(req.body.budgetAuditLogs) ? req.body.budgetAuditLogs : [],
       createdById: currentUser.id,
       createdByName: currentUser.name,
       createdByRole: currentUser.role,

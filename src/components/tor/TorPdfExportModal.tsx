@@ -10,7 +10,7 @@ import {
   TorMonitoringItem,
 } from '../../types/index.js';
 import { Download, X, FileText, Sliders, Check } from 'lucide-react';
-import { formatIndonesianDate, formatPeriodRange } from '../../lib/dateUtils.js';
+import { formatIndonesianDate } from '../../lib/dateUtils.js';
 import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
 import { formatTorTeamSummary } from './torTeamFormatter.js';
 
@@ -25,7 +25,7 @@ interface TorPdfExportModalProps {
 }
 
 function formatRupiahCompact(amount?: number | null): string {
-  if (amount == null || isNaN(Number(amount))) return 'Rp15.000.000';
+  if (amount == null || isNaN(Number(amount))) return '—';
   return `Rp${Number(amount).toLocaleString('id-ID')}`;
 }
 
@@ -38,14 +38,14 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
   output,
   activity,
 }) => {
-  const resolvedProgramName =
-    program?.name || tor.programName || 'Program Air Lestari & Kesehatan Lingkungan 2026';
+  const resolvedProgramName = program?.name || tor.programName || '';
   const resolvedOutcomeName = outcome?.name || tor.outcomeName || '';
   const resolvedOutputName = output?.name || tor.outputName || '';
   const resolvedActivityName = activity?.name || tor.activityName || tor.title;
 
   const activityCodeDisplay = useMemo(() => {
-    const codeStr = tor.activityCode || tor.hierarchyCode || '1.1.1';
+    const codeStr = tor.activityCode || tor.hierarchyCode || '';
+    if (!codeStr) return '—';
     const firstNum = codeStr.split('.')[0] || '1';
     return `Outcome ${firstNum} ; Activity ${codeStr}`;
   }, [tor.activityCode, tor.hierarchyCode]);
@@ -66,35 +66,11 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
       return tor.goals.map((g, i) => ({
         id: g.id || `so-${i + 1}`,
         objective: g.goal,
-        expectedResult:
-          g.indicator || g.mov || 'Target capaian kegiatan terpenuhi sesuai indikator.',
-        expectedChange: `Peningkatan kapasitas dan keberlanjutan program pada ${
-          tor.location || 'lokasi sasaran'
-        }.`,
+        expectedResult: g.indicator || g.mov || '',
+        expectedChange: '',
       }));
     }
-    return [
-      {
-        id: 'so-1',
-        objective: `Meningkatkan kapasitas teknis dan pemahaman peserta melalui pelaksanaan ${tor.title}.`,
-        expectedResult: `Seluruh peserta sasaran (${
-          tor.participantsCount || 25
-        } orang) mengikuti rangkaian kegiatan secara tuntas dan mencapai target indikator.`,
-        expectedChange: `Penerapan langsung hasil kegiatan oleh masyarakat/pengurus lokal di ${
-          tor.location || 'wilayah binaan'
-        }.`,
-      },
-      {
-        id: 'so-2',
-        objective: `Memperkuat tata kelola administrasi, dokumentasi, dan koordinasi pelaksanaan kegiatan bersama pemangku kepentingan di ${
-          tor.location || 'lokasi kegiatan'
-        }.`,
-        expectedResult:
-          'Tersusunnya dokumen kesepakatan tindak lanjut, daftar hadir, berita acara, dan laporan kegiatan tepat waktu.',
-        expectedChange:
-          'Terbangun mekanisme kerja sama dan pemantauan berkelanjutan antara Yayasan WIJNA dan pengurus lokal.',
-      },
-    ];
+    return [];
   }, [tor]);
 
   const complementaryTimeline: TorTimelineItem[] = useMemo(() => {
@@ -104,28 +80,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
     if (tor.timelineItems && tor.timelineItems.length > 0 && !hasForeign) {
       return tor.timelineItems;
     }
-    return [
-      {
-        id: 'tl-1',
-        period: `Pra-${formatIndonesianDate(tor.startDate)}`,
-        activity: `Koordinasi teknis tim pelaksana (${
-          tor.picName || 'PIC'
-        }), penyiapan materi/logistik, dan konfirmasi peserta di ${
-          tor.location || 'lokasi kegiatan'
-        }`,
-      },
-      {
-        id: 'tl-2',
-        period: formatPeriodRange(tor.startDate, tor.endDate),
-        activity: `Pelaksanaan utama: ${tor.title} di ${tor.location || 'lokasi kegiatan'}`,
-      },
-      {
-        id: 'tl-3',
-        period: `Maks. ${formatIndonesianDate(tor.reportingDeadline)}`,
-        activity:
-          'Penyusunan laporan akhir pelaksanaan kegiatan, dokumentasi, dan pertanggungjawaban keuangan ke Yayasan WIJNA',
-      },
-    ];
+    return [];
   }, [tor]);
 
   const complementaryMonitoring: TorMonitoringItem[] = useMemo(() => {
@@ -135,50 +90,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
     if (tor.monitoringItems && tor.monitoringItems.length > 0 && !hasForeign) {
       return tor.monitoringItems;
     }
-    const defaultPic = tor.picName || 'PIC Kegiatan';
-    return [
-      {
-        id: 'me-1',
-        aspect: 'Implementation process',
-        method: `Pemantauan langsung keterlaksanaan agenda ${tor.title} sesuai jadwal dan kurikulum`,
-        frequency: `Selama kegiatan (${formatPeriodRange(tor.startDate, tor.endDate)})`,
-        pic: defaultPic,
-      },
-      {
-        id: 'me-2',
-        aspect: 'Participant attendance',
-        method:
-          'Pencatatan daftar hadir harian peserta serta verifikasi keterwakilan kelompok sasaran',
-        frequency: 'Setiap sesi kegiatan',
-        pic: tor.implementingTeam?.[0] || defaultPic,
-      },
-      {
-        id: 'me-3',
-        aspect: 'Quality of materials/output',
-        method:
-          'Evaluasi ketercapaian materi, uji pemahaman/praktik peserta, dan kelengkapan kelayakan sarana',
-        frequency: 'Awal dan akhir kegiatan',
-        pic: defaultPic,
-      },
-      {
-        id: 'me-4',
-        aspect: 'Documentation & Administration',
-        method:
-          'Pengumpulan foto kegiatan, daftar hadir resmi, berita acara, dan bukti pengeluaran riil',
-        frequency: `Setelah kegiatan; laporan paling lambat ${formatIndonesianDate(
-          tor.reportingDeadline
-        )}`,
-        pic: `${defaultPic}; WIJNA`,
-      },
-      {
-        id: 'me-5',
-        aspect: 'Anticipated field challenges',
-        method:
-          'Koordinasi cepat bersama perangkat desa/mitra lokal untuk mitigasi kendala teknis maupun cuaca di lapangan',
-        frequency: 'Sepanjang kegiatan',
-        pic: defaultPic,
-      },
-    ];
+    return [];
   }, [tor]);
 
   const complementaryScope: string[] = useMemo(() => {
@@ -188,21 +100,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
     if (tor.scopeOfActivities && tor.scopeOfActivities.length > 0 && !hasForeign) {
       return tor.scopeOfActivities;
     }
-    return [
-      `Persiapan teknis, koordinasi pemangku kepentingan lokal, dan penyiapan materi untuk ${tor.title}.`,
-      `Pelaksanaan rangkaian kegiatan di ${tor.location || 'lokasi sasaran'} pada periode ${formatPeriodRange(
-        tor.startDate,
-        tor.endDate
-      )}.`,
-      `Pendampingan peserta sasaran (${
-        tor.participantsTarget || 'Masyarakat & Pengurus Lokal'
-      }) oleh tim pelaksana yang dipimpin ${tor.picName || 'PIC Kegiatan'}.`,
-      `Dokumentasi, daftar hadir peserta, berita acara, dan laporan singkat ke WIJNA.`,
-      `Waktu pelaksanaan ${formatPeriodRange(
-        tor.startDate,
-        tor.endDate
-      )}; laporan paling lambat ${formatIndonesianDate(tor.reportingDeadline)}.`,
-    ];
+    return [];
   }, [tor]);
 
   const complementaryMechanisms: string[] = useMemo(() => {
@@ -212,23 +110,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
     if (tor.implementationMechanisms && tor.implementationMechanisms.length > 0 && !hasForeign) {
       return tor.implementationMechanisms;
     }
-    return [
-      `Pencairan dana. Dana kegiatan sebesar ${formatRupiahCompact(
-        tor.budgetRequested
-      )} diajukan dan dicairkan melalui mekanisme Cash Advance WIJNA oleh ${
-        tor.picName || 'PIC Kegiatan'
-      } setelah dokumen TOR disetujui.`,
-      `Koordinasi dan persiapan. Tim pelaksana berkoordinasi dengan pengurus setempat di ${
-        tor.location || 'lokasi kegiatan'
-      } untuk memastikan kesiapan tempat, peralatan, dan undangan peserta.`,
-      `Pelaksanaan kegiatan. Kegiatan dilaksanakan secara partisipatif pada ${formatPeriodRange(
-        tor.startDate,
-        tor.endDate
-      )} sesuai pembagian peran tim pelaksana.`,
-      `Pelaporan. Tim pelaksana mengirimkan daftar hadir, berita acara, nota pengeluaran, dan dokumentasi foto kepada WIJNA paling lambat ${formatIndonesianDate(
-        tor.reportingDeadline
-      )}.`,
-    ];
+    return [];
   }, [tor]);
 
   const sheetRef = useRef<HTMLDivElement | null>(null);
@@ -602,7 +484,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
                     Location
                   </td>
                   <td className="border border-black px-2.5 py-1 align-top">
-                    {tor.location || 'Balai Desa Cibuluh, Kec. Tanjung Sari, Kab. Sumedang'}
+                    {tor.location || '—'}
                   </td>
                 </tr>
                 <tr>
@@ -627,16 +509,15 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
             </div>
 
             <div className="space-y-2.5 text-black">
-              {(
-                tor.background ||
-                'Desa Cibuluh kerap mengalami kendala sarana air macet karena pengurus belum terlatih mengganti paking seal pompa dan iuran warga tidak tercatat teratur.'
-              )
-                .split(/\n\s*\n/)
-                .map((para, idx) => (
+              {tor.background && tor.background.trim() ? (
+                tor.background.split(/\n\s*\n/).map((para, idx) => (
                   <p key={idx} className="whitespace-pre-line leading-[1.38]">
                     {para.trim()}
                   </p>
-                ))}
+                ))
+              ) : (
+                <p className="text-stone-500 italic">—</p>
+              )}
 
               {tor.rationale && (
                 <p className="whitespace-pre-line leading-[1.38]">{tor.rationale.trim()}</p>
@@ -647,96 +528,102 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
             <div className="mt-3">
               <div className="font-bold text-black">Tujuan Umum</div>
               <p className="text-black leading-[1.38] whitespace-pre-line">
-                {tor.generalObjective ||
-                  tor.objectives ||
-                  'Meningkatkan kapasitas tata kelola teknis pemeliharaan sarana air bersih dan akuntabilitas pembukuan keuangan iuran warga secara mandiri dan berkelanjutan.'}
+                {tor.generalObjective || tor.objectives || '—'}
               </p>
             </div>
 
             {/* Tujuan Khusus */}
             <div className="mt-2.5">
               <div className="font-bold text-black">Tujuan Khusus</div>
-              <ol className="list-decimal pl-8 space-y-1 text-black leading-[1.38] mt-0.5">
-                {complementaryObjectives.map((so, idx) => (
-                  <li key={so.id || idx} className="pl-1">
-                    {so.objective}
-                  </li>
-                ))}
-              </ol>
-
-              {/* 3-Column Table: Hanya ditampilkan jika mode 'full' */}
-              {objectiveDisplayMode === 'full' && (
-                <table className="w-full border-collapse border border-black text-[14px] text-black mt-3">
-                  <thead>
-                    <tr>
-                      <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
-                        Tujuan Khusus
-                      </th>
-                      <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
-                        Hasil yang Diharapkan
-                      </th>
-                      <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
-                        Perubahan yang Diharapkan
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
+              {complementaryObjectives.length === 0 ? (
+                <p className="text-stone-500 italic mt-0.5">—</p>
+              ) : (
+                <>
+                  <ol className="list-decimal pl-8 space-y-1 text-black leading-[1.38] mt-0.5">
                     {complementaryObjectives.map((so, idx) => (
-                      <tr key={so.id || idx}>
-                        <td className="border border-black px-2.5 py-1 align-top leading-[1.38]">
-                          {idx + 1}. {so.objective}
-                        </td>
-                        <td className="border border-black px-2.5 py-1 align-top leading-[1.38] whitespace-pre-line">
-                          {so.expectedResult || '—'}
-                        </td>
-                        <td className="border border-black px-2.5 py-1 align-top leading-[1.38] whitespace-pre-line">
-                          {so.expectedChange || '—'}
-                        </td>
-                      </tr>
+                      <li key={so.id || idx} className="pl-1">
+                        {so.objective}
+                      </li>
                     ))}
-                  </tbody>
-                </table>
+                  </ol>
+
+                  {/* 3-Column Table: Hanya ditampilkan jika mode 'full' */}
+                  {objectiveDisplayMode === 'full' && (
+                    <table className="w-full border-collapse border border-black text-[14px] text-black mt-3">
+                      <thead>
+                        <tr>
+                          <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
+                            Tujuan Khusus
+                          </th>
+                          <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
+                            Hasil yang Diharapkan
+                          </th>
+                          <th className="w-1/3 border border-black px-2.5 py-1 text-left font-bold">
+                            Perubahan yang Diharapkan
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {complementaryObjectives.map((so, idx) => (
+                          <tr key={so.id || idx}>
+                            <td className="border border-black px-2.5 py-1 align-top leading-[1.38]">
+                              {idx + 1}. {so.objective}
+                            </td>
+                            <td className="border border-black px-2.5 py-1 align-top leading-[1.38] whitespace-pre-line">
+                              {so.expectedResult || '—'}
+                            </td>
+                            <td className="border border-black px-2.5 py-1 align-top leading-[1.38] whitespace-pre-line">
+                              {so.expectedChange || '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </>
               )}
             </div>
           </div>
 
           {/* ================= IMPLEMENTATION TIMELINE ================= */}
-          <div className="mb-5">
-            <div
-              className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2.5 text-[14px]"
-              style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
-            >
-              Implementation Timeline
-            </div>
+          {displayedTimeline.length > 0 && (
+            <div className="mb-5">
+              <div
+                className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2.5 text-[14px]"
+                style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+              >
+                Implementation Timeline
+              </div>
 
-            <table className="w-full border-collapse border border-black text-[14px] text-black">
-              <thead>
-                <tr>
-                  <th className="w-[28%] border border-black px-2.5 py-1 text-left font-bold">
-                    Period
-                  </th>
-                  <th className="w-[72%] border border-black px-2.5 py-1 text-left font-bold">
-                    Activity
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {displayedTimeline.map((item, idx) => (
-                  <tr key={item.id || idx}>
-                    <td className="border border-black px-2.5 py-1 align-top">
-                      {item.period}
-                    </td>
-                    <td className="border border-black px-2.5 py-1 align-top leading-[1.38]">
-                      {item.activity}
-                    </td>
+              <table className="w-full border-collapse border border-black text-[14px] text-black">
+                <thead>
+                  <tr>
+                    <th className="w-[28%] border border-black px-2.5 py-1 text-left font-bold">
+                      Period
+                    </th>
+                    <th className="w-[72%] border border-black px-2.5 py-1 text-left font-bold">
+                      Activity
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {displayedTimeline.map((item, idx) => (
+                    <tr key={item.id || idx}>
+                      <td className="border border-black px-2.5 py-1 align-top">
+                        {item.period}
+                      </td>
+                      <td className="border border-black px-2.5 py-1 align-top leading-[1.38]">
+                        {item.activity}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {/* ================= MONITORING MECHANISM (OPSIONAL) ================= */}
-          {showMonitoringMechanism && (
+          {showMonitoringMechanism && complementaryMonitoring.length > 0 && (
             <div className="mb-5">
               <div
                 className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2.5 text-[14px]"
@@ -785,54 +672,58 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
           )}
 
           {/* ================= SCOPE OF ACTIVITIES ================= */}
-          <div className="mb-5">
-            <div
-              className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2 text-[14px]"
-              style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
-            >
-              Scope of Activities
-            </div>
+          {complementaryScope.length > 0 && (
+            <div className="mb-5">
+              <div
+                className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2 text-[14px]"
+                style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+              >
+                Scope of Activities
+              </div>
 
-            <ul className="list-disc pl-8 space-y-1 text-black leading-[1.38]">
-              {complementaryScope.map((point, idx) => (
-                <li key={idx} className="pl-1">
-                  {point}
-                </li>
-              ))}
-            </ul>
-          </div>
+              <ul className="list-disc pl-8 space-y-1 text-black leading-[1.38]">
+                {complementaryScope.map((point, idx) => (
+                  <li key={idx} className="pl-1">
+                    {point}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* ================= MEKANISME PELAKSANAAN ================= */}
-          <div className="mb-5">
-            <div
-              className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2 text-[14px]"
-              style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
-            >
-              Mekanisme Pelaksanaan
+          {complementaryMechanisms.length > 0 && (
+            <div className="mb-5">
+              <div
+                className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2 text-[14px]"
+                style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
+              >
+                Mekanisme Pelaksanaan
+              </div>
+
+              <ul className="list-disc pl-8 space-y-1 text-black leading-[1.38]">
+                {complementaryMechanisms.map((mech, idx) => {
+                  const periodIdx = mech.indexOf('.');
+                  const hasBoldPrefix = periodIdx > 0 && periodIdx < 45;
+                  const prefix = hasBoldPrefix ? mech.substring(0, periodIdx + 1) : '';
+                  const body = hasBoldPrefix ? mech.substring(periodIdx + 1) : mech;
+
+                  return (
+                    <li key={idx} className="pl-1">
+                      {hasBoldPrefix ? (
+                        <>
+                          <strong className="font-bold text-black">{prefix}</strong>
+                          {body}
+                        </>
+                      ) : (
+                        mech
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
-
-            <ul className="list-disc pl-8 space-y-1 text-black leading-[1.38]">
-              {complementaryMechanisms.map((mech, idx) => {
-                const periodIdx = mech.indexOf('.');
-                const hasBoldPrefix = periodIdx > 0 && periodIdx < 45;
-                const prefix = hasBoldPrefix ? mech.substring(0, periodIdx + 1) : '';
-                const body = hasBoldPrefix ? mech.substring(periodIdx + 1) : mech;
-
-                return (
-                  <li key={idx} className="pl-1">
-                    {hasBoldPrefix ? (
-                      <>
-                        <strong className="font-bold text-black">{prefix}</strong>
-                        {body}
-                      </>
-                    ) : (
-                      mech
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
+          )}
 
           {/* ================= PESERTA KEGIATAN ================= */}
           {tor.participantRows && tor.participantRows.length > 0 && (
@@ -1011,7 +902,7 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
           )}
 
           {/* ================= RUNDOWN KEGIATAN (SESUAI IMPLEMENTATION TIMELINE TERPILIH) ================= */}
-          {showRundownSection && displayedTimeline.length > 0 && (
+          {showRundownSection && tor.rundown && tor.rundown.length > 0 && (
             <div className="mb-5">
               <div
                 className="bg-[#CCCCCC] text-black font-bold px-2 py-1 mb-2.5 text-[14px]"
@@ -1057,7 +948,6 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
                       ? matchedTl.id || `tl-${matchedTlIdx}`
                       : rd.timelineId || `group-${idx}`;
 
-                    // Apabila mode 'selected' aktif, hanya masukkan rundown yang sesuai dengan Implementation Timeline terpilih
                     if (
                       timelineDisplayMode === 'selected' &&
                       matchedTl &&
@@ -1082,38 +972,6 @@ export const TorPdfExportModal: React.FC<TorPdfExportModalProps> = ({
                         key: resolvedKey,
                         timelineLabel: resolvedLabel,
                         items: [{ rd, originalIdx: idx }],
-                      });
-                    }
-                  });
-
-                  // Jika tahapan Implementation Timeline yang dipilih belum memiliki baris rundown di rawRundown,
-                  // buat grup rundown otomatis sesuai tahapan Implementation Timeline yang dipilih agar konsisten
-                  displayedTimeline.forEach((tl, tlIdx) => {
-                    const tlKey =
-                      tl.id ||
-                      `tl-${complementaryTimeline.findIndex((ct) => ct === tl)}`;
-                    const alreadyInGroups = groups.some((g) => g.key === tlKey);
-                    if (!alreadyInGroups && (timelineDisplayMode === 'selected' || groups.length === 0)) {
-                      groups.push({
-                        key: tlKey,
-                        timelineLabel: `${tl.period} — ${tl.activity}`,
-                        items: [
-                          {
-                            rd: {
-                              id: `auto-rd-${tlKey}`,
-                              date: tl.period,
-                              time: '08:30 – 16:00 WIB',
-                              agenda: tl.activity,
-                              targetParticipants:
-                                tor.participantsTarget || 'Seluruh Peserta & Tim Pelaksana',
-                              location:
-                                tor.location ||
-                                'Lokasi Pelaksanaan Kegiatan',
-                              picName: tor.picName || 'PIC Kegiatan',
-                            },
-                            originalIdx: tlIdx,
-                          },
-                        ],
                       });
                     }
                   });

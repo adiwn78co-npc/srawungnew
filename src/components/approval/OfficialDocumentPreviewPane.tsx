@@ -982,7 +982,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                   <span>
                     {rec?.partnerInstitution ||
                       rec?.partnerOrganization ||
-                      'POKMAIR / Mitra Desa Sasaran'}
+                      '—'}
                   </span>
                 </div>
               </div>
@@ -994,12 +994,12 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <div>
                   <span className="font-bold">Nama :</span>{' '}
                   <span className="font-bold underline">
-                    {rec?.partnerRepName || 'H. Asep Sunandar'}
+                    {rec?.partnerRepName || '—'}
                   </span>
                 </div>
                 <div>
                   <span className="font-bold">Jabatan :</span>{' '}
-                  <span>{rec?.partnerRepTitle || 'Ketua POKMAIR'}</span>
+                  <span>{rec?.partnerRepTitle || '—'}</span>
                 </div>
               </div>
             </div>

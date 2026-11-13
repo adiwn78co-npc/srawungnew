@@ -28,8 +28,8 @@ import {
   AlertCircle,
   Plus,
   Trash2,
-  RotateCcw,
-  Eraser,
+  HelpCircle,
+  BookOpen,
   Calendar,
   Users,
   Search,
@@ -377,6 +377,83 @@ const EXAMPLE_RUNDOWN_NOTES =
 const EXAMPLE_ADDITIONAL_NOTES =
   'Membutuhkan alat peraga mesin pompa submersible percontohan, kunci pipa lengkap, dan papan tulis flipchart di Balai Desa Cibuluh.';
 
+const DEFAULT_PARTICIPANT_COLUMNS: TorParticipantCustomColumn[] = EXAMPLE_PARTICIPANT_COLUMNS;
+
+const FieldExampleToggleButton: React.FC<{
+  isOpen: boolean;
+  onToggle: () => void;
+  label?: string;
+}> = ({ isOpen, onToggle, label = 'Lihat Contoh' }) => (
+  <button
+    type="button"
+    onClick={onToggle}
+    className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+      isOpen
+        ? 'bg-stone-800 text-white border-stone-800'
+        : 'bg-stone-100/80 hover:bg-stone-200/70 text-stone-600 hover:text-stone-900 border-stone-200'
+    }`}
+    title="Tampilkan referensi contoh pengisian (tidak otomatis tersimpan)"
+  >
+    <HelpCircle className="w-3 h-3 shrink-0" />
+    <span>{isOpen ? 'Tutup Contoh' : label}</span>
+  </button>
+);
+
+const FieldExampleReferenceBox: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  guide?: string;
+  onUseAsDraft?: () => void;
+  useLabel?: string;
+  children: React.ReactNode;
+}> = ({
+  isOpen,
+  onClose,
+  title,
+  guide,
+  onUseAsDraft,
+  useLabel = 'Gunakan sebagai Draf Input',
+  children,
+}) => {
+  if (!isOpen) return null;
+  return (
+    <div className="mt-1.5 mb-2 rounded-md border border-stone-200 bg-stone-50/90 p-3 text-xs text-stone-700 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-stone-200/80">
+        <div className="flex items-center gap-1.5 flex-wrap font-semibold text-stone-800">
+          <BookOpen className="w-3.5 h-3.5 text-stone-600 shrink-0" />
+          <span>Contoh Referensi: {title}</span>
+          <span className="px-1.5 py-0.5 rounded bg-stone-200/70 text-[10px] font-normal text-stone-600">
+            Referensi Saja · Tidak Otomatis Tersimpan
+          </span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {onUseAsDraft && (
+            <button
+              type="button"
+              onClick={onUseAsDraft}
+              className="px-2 py-0.5 rounded border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-medium text-stone-700 hover:text-stone-900 transition-colors cursor-pointer"
+            >
+              {useLabel}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[11px] text-stone-500 hover:text-stone-900 px-1 cursor-pointer"
+          >
+            Tutup
+          </button>
+        </div>
+      </div>
+      {guide && <p className="text-[11px] text-stone-500 leading-relaxed">{guide}</p>}
+      <div className="bg-white border border-stone-200/80 rounded p-2.5 text-[11.5px] text-stone-700 leading-relaxed space-y-1.5">
+        {children}
+      </div>
+    </div>
+  );
+};
+
 export const TorFormModal: React.FC<TorFormModalProps> = ({
   programs = [],
   outcomes = [],
@@ -395,27 +472,36 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
   const isEditMode = Boolean(editingTor);
 
+  // State toggle per-field untuk tombol kecil "Lihat Contoh" / "Bantuan Pengisian"
+  const [openExamples, setOpenExamples] = useState<Record<string, boolean>>({});
+  const toggleExample = (key: string) => {
+    setOpenExamples((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+  const closeExample = (key: string) => {
+    setOpenExamples((prev) => ({ ...prev, [key]: false }));
+  };
+
   // ==========================================
   // SECTION 1: INFORMASI KEGIATAN & HIERARKI
   // ==========================================
   const [title, setTitle] = useState<string>(() =>
-    editingTor ? editingTor.title || '' : EXAMPLE_TITLE
+    editingTor ? editingTor.title || '' : ''
   );
   const [budgetRequestedInput, setBudgetRequestedInput] = useState<number | string>(() =>
     editingTor?.budgetApproved != null
       ? editingTor.budgetApproved
       : editingTor?.budgetRequested != null
       ? editingTor.budgetRequested
-      : EXAMPLE_BUDGET
+      : ''
   );
   const [budgetApprovalStatus, setBudgetApprovalStatus] = useState<
     'Menunggu Penentuan Finance' | 'Menunggu ACC Direktur' | 'Disetujui Direktur'
-  >(() => editingTor?.budgetApprovalStatus || 'Menunggu ACC Direktur');
+  >(() => editingTor?.budgetApprovalStatus || 'Menunggu Penentuan Finance');
   const [budgetDeterminedByFinanceName, setBudgetDeterminedByFinanceName] = useState<string>(
-    () => editingTor?.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.'
+    () => editingTor?.budgetDeterminedByFinanceName || ''
   );
   const [budgetDeterminedByFinanceAt, setBudgetDeterminedByFinanceAt] = useState<string>(
-    () => editingTor?.budgetDeterminedByFinanceAt || new Date().toISOString()
+    () => editingTor?.budgetDeterminedByFinanceAt || ''
   );
   const [budgetUpdatedByA2Name, setBudgetUpdatedByA2Name] = useState<string>(
     () => editingTor?.budgetUpdatedByA2Name || ''
@@ -442,21 +528,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   >(() =>
     editingTor?.budgetAuditLogs && editingTor.budgetAuditLogs.length > 0
       ? editingTor.budgetAuditLogs
-      : [
-          {
-            id: 'bgt-init-1',
-            timestamp: editingTor?.createdAt || new Date().toISOString(),
-            actorName: editingTor?.budgetDeterminedByFinanceName || 'Ratna Kusuma, S.E.',
-            actorRole: 'Finance / A2',
-            actionLabel: 'Penentuan Estimasi Budget Awal ToR oleh Finance',
-            amount: Number(editingTor?.budgetRequested ?? EXAMPLE_BUDGET),
-            status: editingTor?.budgetApprovalStatus || 'Menunggu ACC Direktur',
-          },
-        ]
+      : []
   );
   const [budgetStatusNotice, setBudgetStatusNotice] = useState<string | null>(null);
   const [showBudgetAuditInModal, setShowBudgetAuditInModal] = useState<boolean>(false);
-  const [isExampleCleared, setIsExampleCleared] = useState<boolean>(false);
 
   // RACI Records per Output (Loaded from MEAL Connect)
   const [outputRaciMap, setOutputRaciMap] = useState<Record<string, OutputRaciRecord>>({});
@@ -766,12 +841,19 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         {
           id: 'loc-1',
           villageCity: editingTor.location,
-          province: 'Jawa Barat',
+          province: '',
           country: 'Indonesia',
         },
       ];
     }
-    return EXAMPLE_LOCATIONS;
+    return [
+      {
+        id: 'loc-1',
+        villageCity: '',
+        province: '',
+        country: 'Indonesia',
+      },
+    ];
   });
 
   const handleAddLocation = () => {
@@ -826,12 +908,12 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
       .join('; ');
   }, [locations]);
 
-  // Tanggal Mulai & Tanggal Selesai
+  // Tanggal Mulai & Tanggal Selesai (Kosong saat buat baru hingga diisi user)
   const [startDate, setStartDate] = useState<string>(() =>
-    editingTor?.startDate || '2026-10-10'
+    editingTor?.startDate || ''
   );
   const [endDate, setEndDate] = useState<string>(() =>
-    editingTor?.endDate || '2026-10-12'
+    editingTor?.endDate || ''
   );
 
   // Perhitungan Durasi Hari
@@ -1022,20 +1104,20 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   // SECTION 2: LATAR BELAKANG MASALAH
   // ==========================================
   const [background, setBackground] = useState<string>(() =>
-    editingTor ? editingTor.background || '' : EXAMPLE_BACKGROUND
+    editingTor ? editingTor.background || '' : ''
   );
 
   // ==========================================
   // SECTION 3: TUJUAN UMUM & TUJUAN KHUSUS
   // ==========================================
   const [generalObjective, setGeneralObjective] = useState<string>(() =>
-    editingTor ? editingTor.generalObjective || editingTor.objectives || '' : EXAMPLE_GENERAL_OBJECTIVE
+    editingTor ? editingTor.generalObjective || editingTor.objectives || '' : ''
   );
 
   const [specificObjectives, setSpecificObjectives] = useState<TorSpecificObjectiveItem[]>(() =>
     Array.isArray(editingTor?.specificObjectives) && editingTor.specificObjectives.length > 0
       ? editingTor.specificObjectives
-      : EXAMPLE_SPECIFIC_OBJECTIVES
+      : []
   );
 
   const handleAddSpecificObjectivePoint = () => {
@@ -1080,7 +1162,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [timelineItems, setTimelineItems] = useState<TorTimelineItem[]>(() =>
     editingTor?.timelineItems && editingTor.timelineItems.length > 0
       ? editingTor.timelineItems
-      : EXAMPLE_TIMELINE_ITEMS
+      : []
   );
 
   const handleAddTimelineRow = () => {
@@ -1109,18 +1191,15 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [monitoringItems, setMonitoringItems] = useState<TorMonitoringItem[]>(() =>
     editingTor?.monitoringItems && editingTor.monitoringItems.length > 0
       ? editingTor.monitoringItems
-      : EXAMPLE_MONITORING_ITEMS
+      : []
   );
 
   const handleAddMonitoringRow = () => {
-    const defaultFreq = selectedCustomPeriod
-      ? `Selama ${selectedCustomPeriod.code} — ${selectedCustomPeriod.label} (${formatTanggalIndo(selectedCustomPeriod.startDate)} s/d ${formatTanggalIndo(selectedCustomPeriod.endDate)})`
-      : '';
     const newItem: TorMonitoringItem = {
       id: `me-${Date.now()}`,
       aspect: '',
       method: '',
-      frequency: defaultFreq,
+      frequency: '',
       pic: '',
     };
     setMonitoringItems([...monitoringItems, newItem]);
@@ -1140,76 +1219,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     setMonitoringItems(monitoringItems.filter((item) => item.id !== id));
   };
 
-  // Sinkronisasi seluruh komponen TOR agar mengikuti Custom Period yang dipilih
-  const syncAllTorComponentsToCustomPeriod = (
-    period: ProgramBudgetPeriod,
-    forceOverwriteDates = false
-  ) => {
-    const pStart = period.startDate;
-    const pEnd = period.endDate;
-
-    // 1. Tanggal Pelaksanaan Kegiatan mengikuti rentang Custom Period
-    let nextStart = startDate;
-    let nextEnd = endDate;
-    if (forceOverwriteDates || !nextStart || nextStart < pStart || nextStart > pEnd) {
-      nextStart = pStart;
-    }
-    if (forceOverwriteDates || !nextEnd || nextEnd > pEnd || nextEnd < nextStart) {
-      nextEnd = pEnd;
-    }
-    setStartDate(nextStart);
-    setEndDate(nextEnd);
-
-    // 2. Implementation Timeline mengikuti kode depan Custom Period (mis. P1)
-    setTimelineItems((prev) => {
-      if (!prev || prev.length === 0) {
-        return [
-          {
-            id: `tl-${Date.now()}-1`,
-            period: period.code,
-            activity: 'Persiapan Teknis, Koordinasi Lapangan & Mobilisasi Peserta',
-          },
-          {
-            id: `tl-${Date.now()}-2`,
-            period: period.code,
-            activity: 'Pelaksanaan Kegiatan Utama sesuai Tujuan Khusus TOR',
-          },
-          {
-            id: `tl-${Date.now()}-3`,
-            period: period.code,
-            activity: 'Evaluasi Capaian, Post-Test & Penyusunan Laporan Kegiatan',
-          },
-        ];
-      }
-      return prev.map((tl, idx) => {
-        const cleanAct = tl.activity || `Pelaksanaan Kegiatan ${idx + 1}`;
-        return {
-          ...tl,
-          period: period.code,
-          activity: cleanAct,
-        };
-      });
-    });
-
-    // 3. Monitoring Mechanism (M&E) mengikuti Custom Period
-    setMonitoringItems((prev) =>
-      prev.map((m) => ({
-        ...m,
-        frequency: `Selama ${period.code}`,
-      }))
-    );
-
-    // 4. Rundown Kegiatan mengikuti Custom Period
-    setRundown((prev) =>
-      prev.map((rd) => ({
-        ...rd,
-        date: period.code,
-        timelineLabel: `${period.code} — ${rd.agenda || 'Pelaksanaan Kegiatan'}`,
-      }))
-    );
-  };
-
-  // Saat programCustomPeriods pertama kali tersedia atau berubah program, otomatis ikuti Custom Period yang ditentukan Finance
+  // Saat programCustomPeriods tersedia atau berubah program, perbarui referensi Custom Period tanpa mengisi data dummy otomatis
   useEffect(() => {
     if (programCustomPeriods.length === 0) return;
     const targetPeriod =
@@ -1223,13 +1233,11 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
     if (targetPeriod && targetPeriod.id !== customPeriodId) {
       setCustomPeriodId(targetPeriod.id);
-      if (!editingTor) {
-        syncAllTorComponentsToCustomPeriod(targetPeriod, true);
-      } else {
-        if (startDate < targetPeriod.startDate || startDate > targetPeriod.endDate) {
+      if (editingTor) {
+        if (startDate && (startDate < targetPeriod.startDate || startDate > targetPeriod.endDate)) {
           setStartDate(targetPeriod.startDate);
         }
-        if (endDate > targetPeriod.endDate || endDate < targetPeriod.startDate) {
+        if (endDate && (endDate > targetPeriod.endDate || endDate < targetPeriod.startDate)) {
           setEndDate(targetPeriod.endDate);
         }
       }
@@ -1242,7 +1250,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [scopeOfActivities, setScopeOfActivities] = useState<string[]>(() =>
     editingTor?.scopeOfActivities && editingTor.scopeOfActivities.length > 0
       ? editingTor.scopeOfActivities
-      : EXAMPLE_SCOPE_OF_ACTIVITIES
+      : []
   );
 
   const handleAddScopePoint = () => {
@@ -1265,7 +1273,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [implementationMechanisms, setImplementationMechanisms] = useState<string[]>(() =>
     editingTor?.implementationMechanisms && editingTor.implementationMechanisms.length > 0
       ? editingTor.implementationMechanisms
-      : EXAMPLE_IMPLEMENTATION_MECHANISMS
+      : []
   );
 
   const handleAddMechanismPoint = () => {
@@ -1286,27 +1294,25 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   // RUNDOWN KEGIATAN OPSIONAL TOGGLE
   // ==========================================
   const [isRundownVisible, setIsRundownVisible] = useState<boolean>(() =>
-    editingTor ? editingTor.isRundownVisible ?? true : true
+    editingTor
+      ? Boolean(editingTor.isRundownVisible ?? (editingTor.rundown && editingTor.rundown.length > 0))
+      : false
   );
 
   // ==========================================
   // SECTION 4: PESERTA KEGIATAN (TABEL MANDIRI)
   // ==========================================
   const [participantType, setParticipantType] = useState<string>(() =>
-    editingTor
-      ? editingTor.participantType || editingTor.participantsType || ''
-      : 'Pengurus POKMAIR & Perangkat Desa'
+    editingTor ? editingTor.participantType || editingTor.participantsType || '' : ''
   );
   const [participantsTarget, setParticipantsTarget] = useState<string>(() =>
-    editingTor ? editingTor.participantsTarget || '' : 'Pengurus Inti POKMAIR dan Tim Bendahara Iuran'
+    editingTor ? editingTor.participantsTarget || '' : ''
   );
   const [participantsCount, setParticipantsCount] = useState<string | number>(() =>
     editingTor?.participantsCount != null ? editingTor.participantsCount : ''
   );
   const [participantsCriteria, setParticipantsCriteria] = useState<string>(() =>
-    editingTor
-      ? editingTor.participantsCriteria || ''
-      : 'Pengurus aktif POKMAIR berusia 20–55 tahun yang bertugas dalam pemeliharaan operasional harian dan pencatatan keuangan kas.'
+    editingTor ? editingTor.participantsCriteria || '' : ''
   );
 
   const participantTableMode: ParticipantTableMode = 'custom';
@@ -1314,7 +1320,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     useState<TorParticipantCustomColumn[]>(() =>
       editingTor?.participantCustomColumns && editingTor.participantCustomColumns.length > 0
         ? editingTor.participantCustomColumns
-        : EXAMPLE_PARTICIPANT_COLUMNS
+        : DEFAULT_PARTICIPANT_COLUMNS
     );
   const [participantRows, setParticipantRows] = useState<TorParticipantRow[]>(() =>
     editingTor?.participantRows && editingTor.participantRows.length > 0
@@ -1327,7 +1333,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             'col-note': r.note || '',
           },
         }))
-      : EXAMPLE_PARTICIPANT_ROWS
+      : []
   );
   const [newCustomColumnName, setNewCustomColumnName] = useState<string>('');
   const [newCustomColumnType, setNewCustomColumnType] = useState<'text' | 'number'>('text');
@@ -1581,12 +1587,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [rolesResponsibilities, setRolesResponsibilities] = useState<TorRoleItem[]>(() =>
     editingTor?.rolesResponsibilities && editingTor.rolesResponsibilities.length > 0
       ? editingTor.rolesResponsibilities
-      : EXAMPLE_ROLES
+      : []
   );
   const [rolesNotes, setRolesNotes] = useState<string>(() =>
-    editingTor
-      ? editingTor.rolesNotes || editingTor.rolesAdditionalNotes || ''
-      : EXAMPLE_ROLES_NOTES
+    editingTor ? editingTor.rolesNotes || editingTor.rolesAdditionalNotes || '' : ''
   );
   const [showAddRoleRow, setShowAddRoleRow] = useState<boolean>(false);
   const [newRoleTitle, setNewRoleTitle] = useState<string>('');
@@ -1628,12 +1632,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [rundown, setRundown] = useState<TorRundownItem[]>(() =>
     editingTor?.rundown && editingTor.rundown.length > 0
       ? editingTor.rundown
-      : EXAMPLE_RUNDOWN
+      : []
   );
   const [rundownNotes, setRundownNotes] = useState<string>(() =>
-    editingTor
-      ? editingTor.rundownNotes || editingTor.rundownAdditionalNotes || ''
-      : EXAMPLE_RUNDOWN_NOTES
+    editingTor ? editingTor.rundownNotes || editingTor.rundownAdditionalNotes || '' : ''
   );
   const [activeAddSectionKey, setActiveAddSectionKey] = useState<string | null>(null);
   const [newRdTimelineId, setNewRdTimelineId] = useState<string>('');
@@ -1816,7 +1818,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
   // Catatan Tambahan (Opsional)
   const [additionalNotes, setAdditionalNotes] = useState<string>(() =>
-    editingTor ? editingTor.additionalNotes || '' : EXAMPLE_ADDITIONAL_NOTES
+    editingTor ? editingTor.additionalNotes || '' : ''
   );
 
   // Ringkasan Tim Pelaksana langsung untuk Tabel Informasi TOR
@@ -1824,99 +1826,6 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     () => formatTorTeamSummary({ rolesResponsibilities }, '-'),
     [rolesResponsibilities]
   );
-
-  // ==========================================
-  // CLEAR SEMUA CONTOH / ISI CONTOH HANDLERS
-  // ==========================================
-  const handleClearAllExamples = () => {
-    setTitle('');
-    setLocations([
-      {
-        id: 'loc-1',
-        villageCity: '',
-        province: '',
-        country: 'Indonesia',
-      },
-    ]);
-    setBudgetRequestedInput('');
-    setBackground('');
-    setGeneralObjective('');
-    setSpecificObjectives([
-      {
-        id: `so-${Date.now()}`,
-        objective: '',
-        expectedResult: '',
-        expectedChange: '',
-      },
-    ]);
-    setParticipantType('');
-    setParticipantsTarget('');
-    setParticipantsCount('');
-    setParticipantsCriteria('');
-    setParticipantRows([
-      {
-        id: `prow-${Date.now()}`,
-        target: '',
-        customValues: {
-          'col-target': '',
-          'col-male': '',
-          'col-female': '',
-          'col-note': '',
-        },
-      },
-    ]);
-    setRolesResponsibilities([]);
-    setRolesNotes('');
-    setTimelineItems([
-      {
-        id: `tl-${Date.now()}`,
-        period: '',
-        activity: '',
-      },
-    ]);
-    setMonitoringItems(
-      EMPTY_DEFAULT_MONITORING_ITEMS.map((m, idx) => ({
-        ...m,
-        id: `me-${Date.now()}-${idx}`,
-      }))
-    );
-    setScopeOfActivities(['']);
-    setImplementationMechanisms(['']);
-    setRundown([]);
-    setRundownNotes('');
-    setIsRundownVisible(false);
-    setAdditionalNotes('');
-    setErrorMessage(null);
-    setIsExampleCleared(true);
-  };
-
-  const handleRestoreExamples = () => {
-    setTitle(EXAMPLE_TITLE);
-    setLocations(EXAMPLE_LOCATIONS);
-    setBudgetRequestedInput(EXAMPLE_BUDGET);
-    setBackground(EXAMPLE_BACKGROUND);
-    setGeneralObjective(EXAMPLE_GENERAL_OBJECTIVE);
-    setSpecificObjectives(EXAMPLE_SPECIFIC_OBJECTIVES);
-    setParticipantType('Pengurus POKMAIR & Perangkat Desa');
-    setParticipantsTarget('Pengurus Inti POKMAIR dan Tim Bendahara Iuran');
-    setParticipantsCriteria(
-      'Pengurus aktif POKMAIR berusia 20–55 tahun yang bertugas dalam pemeliharaan operasional harian dan pencatatan keuangan kas.'
-    );
-    setParticipantCustomColumns(EXAMPLE_PARTICIPANT_COLUMNS);
-    setParticipantRows(EXAMPLE_PARTICIPANT_ROWS);
-    setRolesResponsibilities(EXAMPLE_ROLES);
-    setRolesNotes(EXAMPLE_ROLES_NOTES);
-    setTimelineItems(EXAMPLE_TIMELINE_ITEMS);
-    setMonitoringItems(EXAMPLE_MONITORING_ITEMS);
-    setScopeOfActivities(EXAMPLE_SCOPE_OF_ACTIVITIES);
-    setImplementationMechanisms(EXAMPLE_IMPLEMENTATION_MECHANISMS);
-    setRundown(EXAMPLE_RUNDOWN);
-    setRundownNotes(EXAMPLE_RUNDOWN_NOTES);
-    setIsRundownVisible(true);
-    setAdditionalNotes(EXAMPLE_ADDITIONAL_NOTES);
-    setErrorMessage(null);
-    setIsExampleCleared(false);
-  };
 
   // Status & Error Handlers
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -1976,7 +1885,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     return null;
   };
 
-  // Submit Handler
+  // Submit Handler (Hanya menyimpan data yang benar-benar diinput / dikonfirmasi user ke MySQL)
   const handleSubmit = async (submitImmediately: boolean) => {
     setErrorMessage(null);
 
@@ -2014,8 +1923,33 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
       const cleanedMonitoring = monitoringItems.filter(
         (m) => m.aspect.trim() || m.method.trim() || m.frequency.trim() || m.pic.trim()
       );
+      const cleanedParticipantRows = participantRows.filter((r) => {
+        const hasTarget = Boolean((r.target || '').trim());
+        const hasCustomVal = Object.values(r.customValues || {}).some((v) =>
+          Boolean(String(v || '').trim())
+        );
+        return hasTarget || hasCustomVal;
+      });
+      const cleanedRoles = rolesResponsibilities.filter(
+        (r) =>
+          (r.role || '').trim() ||
+          (r.picName || '').trim() ||
+          (r.nameInstitution || '').trim() ||
+          (r.responsibilities || '').trim()
+      );
+      const cleanedRundown = isRundownVisible
+        ? rundown.filter(
+            (rd) =>
+              (rd.agenda || '').trim() ||
+              (rd.date || '').trim() ||
+              (rd.time || '').trim() ||
+              (rd.targetParticipants || '').trim() ||
+              (rd.location || '').trim() ||
+              (rd.picName || '').trim()
+          )
+        : [];
 
-      const implementingTeamNames = rolesResponsibilities
+      const implementingTeamNames = cleanedRoles
         .map((r) => r.picName || r.nameInstitution)
         .filter(Boolean) as string[];
 
@@ -2037,8 +1971,8 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         participantsType: participantType.trim(),
         participantsTarget:
           participantsTarget.trim() ||
-          (participantRows.length > 0
-            ? participantRows
+          (cleanedParticipantRows.length > 0
+            ? cleanedParticipantRows
                 .map((r) => r.target || r.customValues?.['col-target'])
                 .filter(Boolean)
                 .join(', ')
@@ -2048,12 +1982,12 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
           participantsCount !== null &&
           !isNaN(Number(participantsCount))
             ? Number(participantsCount)
-            : grandTotalParticipants > 0
+            : cleanedParticipantRows.length > 0 && grandTotalParticipants > 0
             ? grandTotalParticipants
             : null,
         participantsCriteria: participantsCriteria.trim(),
         participantTableMode,
-        participantRows,
+        participantRows: cleanedParticipantRows,
         participantCustomColumns,
         goals,
         specificObjectives: cleanedObjectives,
@@ -2065,13 +1999,15 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         ),
         isRundownVisible,
         indicators: [],
-        rolesResponsibilities,
+        rolesResponsibilities: cleanedRoles,
         rolesNotes: (rolesNotes || '').trim() || undefined,
         rolesAdditionalNotes: (rolesNotes || '').trim() || undefined,
         mealItems: [],
-        rundown,
-        rundownNotes: (rundownNotes || '').trim() || undefined,
-        rundownAdditionalNotes: (rundownNotes || '').trim() || undefined,
+        rundown: cleanedRundown,
+        rundownNotes: isRundownVisible ? (rundownNotes || '').trim() || undefined : undefined,
+        rundownAdditionalNotes: isRundownVisible
+          ? (rundownNotes || '').trim() || undefined
+          : undefined,
         challengesMitigations: [],
         activityDescription: (background || '').trim(),
         expectedResults: '',
@@ -2092,22 +2028,23 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         reportingDeadline: effectiveDeadline,
         additionalNotes: additionalNotes.trim() || undefined,
         implementingTeam: implementingTeamNames,
-        budgetRequested: editingTor?.budgetRequested ?? 0,
+        budgetRequested: editingTor?.budgetRequested ?? null,
         budgetApproved:
           budgetRequestedInput !== '' &&
           budgetRequestedInput != null &&
           !isNaN(Number(budgetRequestedInput))
             ? Number(budgetRequestedInput)
-            : editingTor?.budgetApproved ?? 0,
+            : editingTor?.budgetApproved ?? null,
         budgetApprovalStatus,
-        budgetDeterminedByFinanceName,
-        budgetDeterminedByFinanceAt,
+        budgetDeterminedByFinanceName: budgetDeterminedByFinanceName || undefined,
+        budgetDeterminedByFinanceAt: budgetDeterminedByFinanceAt || undefined,
         budgetUpdatedByA2Name: budgetUpdatedByA2Name || undefined,
         budgetUpdatedByA2At: budgetUpdatedByA2At || undefined,
         budgetApprovedByDirectorName: budgetApprovedByDirectorName || undefined,
         budgetApprovedByDirectorAt: budgetApprovedByDirectorAt || undefined,
         budgetAuditLogs,
-        organizerPersonInCharge: dynamicOrganizerSummary,
+        organizerPersonInCharge:
+          cleanedRoles.length > 0 ? dynamicOrganizerSummary : undefined,
       };
 
       if (editingTor) {
@@ -2145,10 +2082,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
       {/* Main Workspace Frame */}
       <div className="bg-white w-full h-full flex flex-col overflow-hidden max-w-[1200px] my-0 sm:my-2 sm:rounded-lg sm:border sm:border-stone-200/90 sm:shadow-2xl sm:h-[calc(100vh-16px)]">
         {/* ======================================================== */}
-        {/* COMPACT HEADER WITH SINGLE "CLEAR SEMUA CONTOH" BUTTON   */}
+        {/* COMPACT HEADER                                           */}
         {/* ======================================================== */}
         <header className="bg-white border-b border-stone-200 px-4 sm:px-8 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          {/* Left Group: Status & Automatic TOR Number (Tanpa Judul) */}
+          {/* Left Group: Status & Automatic TOR Number */}
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="px-2 py-0.5 text-[11px] font-medium bg-stone-100 text-stone-600 rounded">
               {isEditMode ? editingTor?.submissionStatus : 'Draft'}
@@ -2162,34 +2099,8 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             </div>
           </div>
 
-          {/* Right Group: Action Controls (Including Single Clear Examples Button) */}
+          {/* Right Group: Save & Submit Controls */}
           <div className="flex items-center gap-2 shrink-0">
-            {!isEditMode && (
-              <>
-                {!isExampleCleared ? (
-                  <button
-                    type="button"
-                    onClick={handleClearAllExamples}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded transition-colors cursor-pointer"
-                    title="Kosongkan seluruh contoh isian data dalam 1 klik"
-                  >
-                    <Eraser className="w-3.5 h-3.5" />
-                    <span>Clear Semua Contoh</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleRestoreExamples}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors cursor-pointer"
-                    title="Kembalikan contoh isian data komplementer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Isi Contoh Data</span>
-                  </button>
-                )}
-              </>
-            )}
-
             {/* Simpan Draft / Simpan Perubahan */}
             <button
               type="button"
@@ -2314,9 +2225,27 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
               <div className="space-y-3.5 text-xs">
                 {/* Input Judul / Nama Acara */}
                 <div>
-                  <label className="block text-stone-700 font-medium mb-1">
-                    Nama Acara / Judul Kegiatan TOR <span className="text-rose-500">*</span>
-                  </label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-stone-700 font-medium">
+                      Nama Acara / Judul Kegiatan TOR <span className="text-rose-500">*</span>
+                    </label>
+                    <FieldExampleToggleButton
+                      isOpen={Boolean(openExamples.title)}
+                      onToggle={() => toggleExample('title')}
+                    />
+                  </div>
+                  <FieldExampleReferenceBox
+                    isOpen={Boolean(openExamples.title)}
+                    onClose={() => closeExample('title')}
+                    title="Nama Acara / Judul Kegiatan TOR"
+                    guide="Tuliskan judul kegiatan yang spesifik memuat bentuk kegiatan, topik utama, dan wilayah sasaran."
+                    onUseAsDraft={() => {
+                      setTitle(EXAMPLE_TITLE);
+                      closeExample('title');
+                    }}
+                  >
+                    <div className="font-medium text-stone-900">{EXAMPLE_TITLE}</div>
+                  </FieldExampleReferenceBox>
                   <input
                     type="text"
                     value={title}
@@ -2481,9 +2410,9 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                       const handleA2OrFinanceUpdateBudget = async () => {
                         const nowIso = new Date().toISOString();
                         const actorName =
-                          isFinanceOrA2User && currentUser?.name
-                            ? currentUser.name
-                            : activeOutputRaci?.accountableFinanceUserName || 'Ratna Kusuma, S.E.';
+                          currentUser?.name ||
+                          activeOutputRaci?.accountableFinanceUserName ||
+                          'Finance / A2';
                         const newLog = {
                           id: `bgt-log-${Date.now()}`,
                           timestamp: nowIso,
@@ -2518,10 +2447,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
                       const handleDirectorAccBudget = async () => {
                         const nowIso = new Date().toISOString();
-                        const actorName =
-                          isDirectorUser && currentUser?.name
-                            ? currentUser.name
-                            : 'Dr. Hendra Wijaya';
+                        const actorName = currentUser?.name || 'Executive Director';
                         const newLog = {
                           id: `bgt-log-${Date.now()}`,
                           timestamp: nowIso,
@@ -2595,11 +2521,15 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                                   className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
                                     budgetApprovalStatus === 'Disetujui Direktur'
                                       ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                      : budgetApprovalStatus === 'Menunggu Penentuan Finance'
+                                      ? 'bg-stone-100 border-stone-300 text-stone-700'
                                       : 'bg-amber-50 border-amber-300 text-amber-900'
                                   }`}
                                 >
                                   {budgetApprovalStatus === 'Disetujui Direktur'
                                     ? '✓ Di-ACC Direktur'
+                                    : budgetApprovalStatus === 'Menunggu Penentuan Finance'
+                                    ? 'Menunggu Penentuan Finance'
                                     : 'Menunggu ACC Direktur'}
                                 </span>
                               </div>
@@ -2700,7 +2630,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
                 {/* Lokasi Pelaksanaan Kegiatan */}
                 <div className="space-y-2 pt-1">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div>
                       <label className="text-stone-700 font-medium">
                         Lokasi Pelaksanaan Kegiatan <span className="text-rose-500">*</span>
@@ -2709,14 +2639,42 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                         Dapat menambahkan lebih dari satu lokasi (Desa/Kota, Provinsi, Negara).
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleAddLocation}
-                      className="px-2.5 py-1 text-xs font-medium text-stone-700 hover:text-stone-900 hover:bg-stone-100 border border-stone-200 rounded transition-colors"
-                    >
-                      + Lokasi Lain
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <FieldExampleToggleButton
+                        isOpen={Boolean(openExamples.locations)}
+                        onToggle={() => toggleExample('locations')}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddLocation}
+                        className="px-2.5 py-1 text-xs font-medium text-stone-700 hover:text-stone-900 hover:bg-stone-100 border border-stone-200 rounded transition-colors cursor-pointer"
+                      >
+                        + Lokasi Lain
+                      </button>
+                    </div>
                   </div>
+
+                  <FieldExampleReferenceBox
+                    isOpen={Boolean(openExamples.locations)}
+                    onClose={() => closeExample('locations')}
+                    title="Lokasi Pelaksanaan Kegiatan"
+                    guide="Cantumkan titik tempat acara beserta Desa/Kelurahan, Kecamatan, Kabupaten/Kota, dan Provinsi secara jelas."
+                    onUseAsDraft={() => {
+                      setLocations(
+                        EXAMPLE_LOCATIONS.map((l, i) => ({
+                          ...l,
+                          id: `loc-${Date.now()}-${i}`,
+                        }))
+                      );
+                      closeExample('locations');
+                    }}
+                  >
+                    <div>
+                      <strong>Desa/Kota:</strong> {EXAMPLE_LOCATIONS[0].villageCity} ·{' '}
+                      <strong>Provinsi:</strong> {EXAMPLE_LOCATIONS[0].province} ·{' '}
+                      <strong>Negara:</strong> {EXAMPLE_LOCATIONS[0].country}
+                    </div>
+                  </FieldExampleReferenceBox>
 
                   <datalist id="provinsi-indonesia">
                     {PROVINSI_INDONESIA.map((p) => (
@@ -2784,18 +2742,37 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
                 {/* Periode Tanggal Kegiatan (Mengikuti Custom Period) */}
                 <div>
-                  <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                     <label className="block text-stone-700 font-medium">
                       Periode Tanggal Kegiatan (Mengikuti Custom Period){' '}
                       <span className="text-rose-500">*</span>
                     </label>
-                    {selectedCustomPeriod && (
-                      <span className="text-[11px] font-mono font-semibold text-[#1D4ED8] bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                        Batas Custom Period {selectedCustomPeriod.code}:{' '}
-                        {selectedCustomPeriod.startDate} s/d {selectedCustomPeriod.endDate}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {selectedCustomPeriod && (
+                        <span className="text-[11px] font-mono font-semibold text-[#1D4ED8] bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                          Batas Custom Period {selectedCustomPeriod.code}:{' '}
+                          {selectedCustomPeriod.startDate} s/d {selectedCustomPeriod.endDate}
+                        </span>
+                      )}
+                      <FieldExampleToggleButton
+                        isOpen={Boolean(openExamples.dates)}
+                        onToggle={() => toggleExample('dates')}
+                        label="Bantuan Pengisian"
+                      />
+                    </div>
                   </div>
+                  <FieldExampleReferenceBox
+                    isOpen={Boolean(openExamples.dates)}
+                    onClose={() => closeExample('dates')}
+                    title="Periode Tanggal & Batas Pelaporan"
+                    guide="Pilih tanggal mulai dan selesai aktual di dalam rentang Custom Period Program yang aktif. Sistem akan menghitung durasi hari kalender dan tenggat laporan final H+7 (Executive Summary) secara otomatis."
+                  >
+                    <div>
+                      Contoh rentang pelaksanaan 3 hari: <strong>10 Oktober 2026</strong> s/d{' '}
+                      <strong>12 Oktober 2026</strong> → Tenggat Laporan Final H+7 jatuh pada{' '}
+                      <strong>19 Oktober 2026</strong>.
+                    </div>
+                  </FieldExampleReferenceBox>
                   <div className="flex items-center gap-2">
                     <div className="flex-1 flex items-center gap-1.5">
                       <input
@@ -3052,7 +3029,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* 1. LATAR BELAKANG MASALAH                                */}
             {/* ======================================================== */}
             <section id="sec-latar-belakang" className="space-y-4">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     1. Latar Belakang Masalah
@@ -3061,8 +3038,27 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Uraikan konteks masalah, data temuan awal di wilayah binaan, dan situasi mendesak.
                   </p>
                 </div>
-                <span className="text-[11px] text-rose-600 font-medium">* Wajib diisi</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.background)}
+                    onToggle={() => toggleExample('background')}
+                  />
+                  <span className="text-[11px] text-rose-600 font-medium">* Wajib diisi</span>
+                </div>
               </div>
+
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.background)}
+                onClose={() => closeExample('background')}
+                title="1. Latar Belakang Masalah"
+                guide="Jelaskan kondisi faktual di lapangan (baseline/temuan awal), akar permasalahan yang dihadapi kelompok sasaran, serta alasan perlunya intervensi kegiatan ini."
+                onUseAsDraft={() => {
+                  setBackground(EXAMPLE_BACKGROUND);
+                  closeExample('background');
+                }}
+              >
+                <div className="whitespace-pre-line">{EXAMPLE_BACKGROUND}</div>
+              </FieldExampleReferenceBox>
 
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -3087,14 +3083,33 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* 2. TUJUAN UMUM                                           */}
             {/* ======================================================== */}
             <section id="sec-tujuan-umum" className="space-y-4">
-              <div className="pb-1 border-b border-stone-200">
-                <h2 className="text-sm font-semibold text-stone-900">
-                  2. Tujuan Umum
-                </h2>
-                <p className="text-xs text-stone-500">
-                  Tujuan strategis jangka panjang dan dampak utama yang diharapkan dari kegiatan ini.
-                </p>
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <h2 className="text-sm font-semibold text-stone-900">
+                    2. Tujuan Umum
+                  </h2>
+                  <p className="text-xs text-stone-500">
+                    Tujuan strategis jangka panjang dan dampak utama yang diharapkan dari kegiatan ini.
+                  </p>
+                </div>
+                <FieldExampleToggleButton
+                  isOpen={Boolean(openExamples.generalObjective)}
+                  onToggle={() => toggleExample('generalObjective')}
+                />
               </div>
+
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.generalObjective)}
+                onClose={() => closeExample('generalObjective')}
+                title="2. Tujuan Umum"
+                guide="Rumuskan 1 paragraf ringkas yang menggambarkan kontribusi kegiatan terhadap Outcome/Output program."
+                onUseAsDraft={() => {
+                  setGeneralObjective(EXAMPLE_GENERAL_OBJECTIVE);
+                  closeExample('generalObjective');
+                }}
+              >
+                <div>{EXAMPLE_GENERAL_OBJECTIVE}</div>
+              </FieldExampleReferenceBox>
 
               <div>
                 <textarea
@@ -3111,7 +3126,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* 3. TUJUAN KHUSUS (Poin-poin & Tabel Auto-Sync)           */}
             {/* ======================================================== */}
             <section id="sec-goals" className="space-y-4">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     3. Tujuan Khusus
@@ -3120,15 +3135,53 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Poin-poin capaian khusus terukur dan otomatis masuk ke tabel hasil & perubahan yang diharapkan.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddSpecificObjectivePoint}
-                  className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Poin Tujuan Khusus</span>
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.specificObjectives)}
+                    onToggle={() => toggleExample('specificObjectives')}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddSpecificObjectivePoint}
+                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Poin Tujuan Khusus</span>
+                  </button>
+                </div>
               </div>
+
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.specificObjectives)}
+                onClose={() => closeExample('specificObjectives')}
+                title="3. Tujuan Khusus, Hasil & Perubahan yang Diharapkan"
+                guide="Susun poin tujuan khusus yang terukur beserta indikator hasil langsung (Output) dan perubahan perilaku/kelembagaan (Outcome)."
+                onUseAsDraft={() => {
+                  setSpecificObjectives(
+                    EXAMPLE_SPECIFIC_OBJECTIVES.map((so, i) => ({
+                      ...so,
+                      id: `so-${Date.now()}-${i}`,
+                    }))
+                  );
+                  closeExample('specificObjectives');
+                }}
+              >
+                <div className="space-y-2">
+                  {EXAMPLE_SPECIFIC_OBJECTIVES.map((ex, i) => (
+                    <div key={ex.id} className="border-b last:border-b-0 border-stone-100 pb-1.5 last:pb-0">
+                      <div className="font-semibold text-stone-900">
+                        {i + 1}. {ex.objective}
+                      </div>
+                      <div className="text-stone-600 mt-0.5">
+                        <span className="font-medium">Hasil:</span> {ex.expectedResult}
+                      </div>
+                      <div className="text-stone-600">
+                        <span className="font-medium">Perubahan:</span> {ex.expectedChange}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </FieldExampleReferenceBox>
 
               {/* A. Poin-poin Tujuan Khusus */}
               <div className="space-y-2">
@@ -3239,7 +3292,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* 4. PESERTA KEGIATAN (TABEL MANDIRI)                      */}
             {/* ======================================================== */}
             <section id="sec-peserta" className="space-y-3">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     4. Peserta Kegiatan
@@ -3249,6 +3302,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.participants)}
+                    onToggle={() => toggleExample('participants')}
+                  />
                   <button
                     type="button"
                     onClick={handleOpenParticipantDbModal}
@@ -3267,6 +3324,40 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                 </div>
               </div>
 
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.participants)}
+                onClose={() => closeExample('participants')}
+                title="4. Peserta Kegiatan"
+                guide="Anda dapat mengimpor langsung dari Database Peserta Master atau menambahkan baris rincian kelompok peserta beserta estimasi terpilah Laki-laki / Perempuan."
+                onUseAsDraft={() => {
+                  setParticipantType('Pengurus POKMAIR & Perangkat Desa');
+                  setParticipantsTarget('Pengurus Inti POKMAIR dan Tim Bendahara Iuran');
+                  setParticipantsCriteria(
+                    'Pengurus aktif POKMAIR berusia 20–55 tahun yang bertugas dalam pemeliharaan operasional harian dan pencatatan keuangan kas.'
+                  );
+                  setParticipantCustomColumns(DEFAULT_PARTICIPANT_COLUMNS);
+                  setParticipantRows(
+                    EXAMPLE_PARTICIPANT_ROWS.map((r, i) => ({
+                      ...r,
+                      id: `prow-${Date.now()}-${i}`,
+                    }))
+                  );
+                  closeExample('participants');
+                }}
+              >
+                <div>
+                  <strong>Jenis Peserta:</strong> Pengurus POKMAIR &amp; Perangkat Desa ·{' '}
+                  <strong>Kriteria:</strong> Pengurus aktif berusia 20–55 tahun
+                </div>
+                <ul className="list-disc pl-4 space-y-0.5 text-stone-600">
+                  {EXAMPLE_PARTICIPANT_ROWS.map((r) => (
+                    <li key={r.id}>
+                      {r.target} — L: {r.maleCount} Org, P: {r.femaleCount} Org ({r.note})
+                    </li>
+                  ))}
+                </ul>
+              </FieldExampleReferenceBox>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div>
                   <label className="block text-stone-700 font-medium mb-1">
@@ -3276,8 +3367,8 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     type="text"
                     value={participantType}
                     onChange={(e) => setParticipantType(e.target.value)}
-                    placeholder="Contoh: Pengurus POKMAIR & Perangkat Desa"
-                    className="w-full h-8 px-2.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 focus:outline-none"
+                    placeholder="Ketik jenis / kategori peserta..."
+                    className="w-full h-8 px-2.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 placeholder:text-stone-300 focus:outline-none"
                   />
                 </div>
                 <div>
@@ -3288,8 +3379,8 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     type="text"
                     value={participantsCriteria}
                     onChange={(e) => setParticipantsCriteria(e.target.value)}
-                    placeholder="Contoh: Pengurus aktif berusia 20–55 tahun..."
-                    className="w-full h-8 px-2.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 focus:outline-none"
+                    placeholder="Ketik kriteria peserta sasaran..."
+                    className="w-full h-8 px-2.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 placeholder:text-stone-300 focus:outline-none"
                   />
                 </div>
               </div>
@@ -3472,7 +3563,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* 5. TIM PELAKSANA (NAMA - LEMBAGA, ROLE & RESPONSIBILITY) */}
             {/* ======================================================== */}
             <section id="sec-roles" className="space-y-3">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     5. Tim Pelaksana (Role & Responsibility)
@@ -3481,14 +3572,48 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Daftar personel tim pelaksana dengan format Nama - Lembaga, Peran, serta Tugas & Tanggung Jawab.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowAddRoleRow(!showAddRoleRow)}
-                  className="text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  + Tim Pelaksana
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.roles)}
+                    onToggle={() => toggleExample('roles')}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowAddRoleRow(!showAddRoleRow)}
+                    className="text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    + Tim Pelaksana
+                  </button>
+                </div>
               </div>
+
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.roles)}
+                onClose={() => closeExample('roles')}
+                title="5. Tim Pelaksana (Role & Responsibility)"
+                guide="Cantumkan personel pelaksana internal maupun narasumber/instruktur eksternal beserta asal lembaga dan pembagian tugas teknisnya."
+                onUseAsDraft={() => {
+                  setRolesResponsibilities(
+                    EXAMPLE_ROLES.map((r, i) => ({
+                      ...r,
+                      id: `role-${Date.now()}-${i}`,
+                    }))
+                  );
+                  setRolesNotes(EXAMPLE_ROLES_NOTES);
+                  closeExample('roles');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-1 text-stone-700">
+                  {EXAMPLE_ROLES.map((r) => (
+                    <li key={r.id}>
+                      <strong>{r.nameInstitution}</strong> ({r.role}): {r.responsibilities}
+                    </li>
+                  ))}
+                </ul>
+                <div className="text-stone-500 pt-1">
+                  <strong>Catatan Tim:</strong> {EXAMPLE_ROLES_NOTES}
+                </div>
+              </FieldExampleReferenceBox>
 
               {rolesResponsibilities.length === 0 ? (
                 <div className="py-6 border border-dashed border-stone-200 rounded text-center space-y-2 bg-stone-50/20">
@@ -3498,7 +3623,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowAddRoleRow(true)}
-                    className="px-3 py-1.5 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors"
+                    className="px-3 py-1.5 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
                   >
                     + Tim Pelaksana
                   </button>
@@ -3552,21 +3677,21 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <input
                       type="text"
-                      placeholder="Nama Personel (cth: Budi Santoso)"
+                      placeholder="Nama Personel..."
                       value={newRoleName}
                       onChange={(e) => setNewRoleName(e.target.value)}
                       className="h-8 px-2 border border-stone-200 rounded bg-white text-stone-800 focus:outline-none focus:border-stone-400"
                     />
                     <input
                       type="text"
-                      placeholder="Asal Lembaga / Instansi (cth: Yayasan WIJNA)"
+                      placeholder="Asal Lembaga / Instansi..."
                       value={newRoleInstitution}
                       onChange={(e) => setNewRoleInstitution(e.target.value)}
                       className="h-8 px-2 border border-stone-200 rounded bg-white text-stone-800 focus:outline-none focus:border-stone-400"
                     />
                     <input
                       type="text"
-                      placeholder="Role / Peran Kegiatan (cth: Ketua Pelaksana, Fasilitator)"
+                      placeholder="Role / Peran Kegiatan..."
                       value={newRoleTitle}
                       onChange={(e) => setNewRoleTitle(e.target.value)}
                       className="h-8 px-2 border border-stone-200 rounded bg-white text-stone-800 sm:col-span-2 focus:outline-none focus:border-stone-400"
@@ -3608,7 +3733,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                   rows={2}
                   value={rolesNotes}
                   onChange={(e) => setRolesNotes(e.target.value)}
-                  placeholder="Contoh: Ketentuan pembagian tugas lapangan, koordinator cadangan..."
+                  placeholder="Ketik keterangan tambahan pembagian tugas lapangan bila diperlukan..."
                   className="w-full p-2.5 bg-stone-50/40 hover:bg-white focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none transition-colors"
                 />
               </div>
@@ -3634,65 +3759,108 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Jadwal periode pelaksanaan dan rincian aktivitas mengikuti Custom Period yang ditentukan.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddTimelineRow}
-                  className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Baris Timeline</span>
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.timeline)}
+                    onToggle={() => toggleExample('timeline')}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddTimelineRow}
+                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Baris Timeline</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="border border-stone-200 rounded overflow-hidden text-xs bg-white">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-stone-100/80 text-stone-800 border-b border-stone-200 font-semibold">
-                      <th className="p-2.5 border-r border-stone-200 w-1/4">Period</th>
-                      <th className="p-2.5 border-r border-stone-200">Activity</th>
-                      <th className="p-2 text-center w-12">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-200">
-                    {timelineItems.map((item) => (
-                      <tr key={item.id} className="hover:bg-stone-50/40">
-                        <td className="p-2 border-r border-stone-200">
-                          <input
-                            type="text"
-                            value={item.period}
-                            onChange={(e) =>
-                              handleUpdateTimelineItem(item.id, 'period', e.target.value)
-                            }
-                            placeholder="Contoh: P1 (1 Jan 2026 – 30 Jun 2026)"
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 border-r border-stone-200">
-                          <input
-                            type="text"
-                            value={item.activity}
-                            onChange={(e) =>
-                              handleUpdateTimelineItem(item.id, 'activity', e.target.value)
-                            }
-                            placeholder="Uraian aktivitas..."
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveTimelineRow(item.id)}
-                            className="p-1 text-stone-400 hover:text-rose-600 rounded transition-colors"
-                            title="Hapus baris"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.timeline)}
+                onClose={() => closeExample('timeline')}
+                title="Implementation Timeline"
+                guide="Susun tahapan pra-kegiatan, pelaksanaan utama, hingga evaluasi/pelaporan akhir. Tahapan ini juga menjadi rujukan Cash Advance & Monitoring."
+                onUseAsDraft={() => {
+                  setTimelineItems(
+                    EXAMPLE_TIMELINE_ITEMS.map((tl, i) => ({
+                      ...tl,
+                      id: `tl-${Date.now()}-${i}`,
+                    }))
+                  );
+                  closeExample('timeline');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-0.5 text-stone-700">
+                  {EXAMPLE_TIMELINE_ITEMS.map((tl) => (
+                    <li key={tl.id}>
+                      <strong>{tl.period}:</strong> {tl.activity}
+                    </li>
+                  ))}
+                </ul>
+              </FieldExampleReferenceBox>
+
+              {timelineItems.length === 0 ? (
+                <div className="py-5 border border-dashed border-stone-200 rounded text-center space-y-1.5 bg-stone-50/20 text-xs">
+                  <p className="text-stone-500">Belum ada tahapan Implementation Timeline.</p>
+                  <button
+                    type="button"
+                    onClick={handleAddTimelineRow}
+                    className="px-2.5 py-1 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
+                  >
+                    + Tambah Baris Timeline
+                  </button>
+                </div>
+              ) : (
+                <div className="border border-stone-200 rounded overflow-hidden text-xs bg-white">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-stone-100/80 text-stone-800 border-b border-stone-200 font-semibold">
+                        <th className="p-2.5 border-r border-stone-200 w-1/4">Period</th>
+                        <th className="p-2.5 border-r border-stone-200">Activity</th>
+                        <th className="p-2 text-center w-12">Aksi</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-stone-200">
+                      {timelineItems.map((item) => (
+                        <tr key={item.id} className="hover:bg-stone-50/40">
+                          <td className="p-2 border-r border-stone-200">
+                            <input
+                              type="text"
+                              value={item.period}
+                              onChange={(e) =>
+                                handleUpdateTimelineItem(item.id, 'period', e.target.value)
+                              }
+                              placeholder="Periode / tanggal tahapan..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 border-r border-stone-200">
+                            <input
+                              type="text"
+                              value={item.activity}
+                              onChange={(e) =>
+                                handleUpdateTimelineItem(item.id, 'activity', e.target.value)
+                              }
+                              placeholder="Uraian aktivitas..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveTimelineRow(item.id)}
+                              className="p-1 text-stone-400 hover:text-rose-600 rounded transition-colors"
+                              title="Hapus baris"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
 
             {/* ======================================================== */}
@@ -3712,99 +3880,174 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     )}
                   </div>
                   <p className="text-xs text-stone-500">
-                    Mekanisme M&amp;E mengikuti frekuensi Custom Period dengan aspek bawaan: Implementation process, Participant attendance, Quality of materials/output, Documentation &amp; Administration, Anticipated field challenges.
+                    Mekanisme pemantauan kegiatan mencakup aspek proses, kehadiran, kualitas output, dokumentasi, dan mitigasi kendala lapangan.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddMonitoringRow}
-                  className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Baris M&amp;E</span>
-                </button>
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.monitoring)}
+                    onToggle={() => toggleExample('monitoring')}
+                  />
+                  {monitoringItems.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMonitoringItems(
+                          EMPTY_DEFAULT_MONITORING_ITEMS.map((m, idx) => ({
+                            ...m,
+                            id: `me-${Date.now()}-${idx}`,
+                          }))
+                        )
+                      }
+                      className="px-2 py-0.5 text-[11px] font-medium text-stone-700 bg-white hover:bg-stone-100 border border-stone-200 rounded transition-colors cursor-pointer"
+                    >
+                      + Muat 5 Aspek Kosong
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleAddMonitoringRow}
+                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Baris M&amp;E</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="border border-stone-200 rounded overflow-hidden text-xs bg-white">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-stone-100/80 text-stone-800 border-b border-stone-200 font-semibold">
-                      <th className="p-2.5 border-r border-stone-200 w-1/5">Aspect</th>
-                      <th className="p-2.5 border-r border-stone-200">Method</th>
-                      <th className="p-2.5 border-r border-stone-200 w-1/5">Frequency</th>
-                      <th className="p-2.5 border-r border-stone-200 w-1/6">PIC</th>
-                      <th className="p-2 text-center w-12">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-200">
-                    {monitoringItems.map((item) => (
-                      <tr key={item.id} className="hover:bg-stone-50/40 align-top">
-                        <td className="p-2 border-r border-stone-200">
-                          <input
-                            type="text"
-                            value={item.aspect}
-                            onChange={(e) =>
-                              handleUpdateMonitoringItem(item.id, 'aspect', e.target.value)
-                            }
-                            placeholder="Aspect..."
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 font-medium focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 border-r border-stone-200">
-                          <textarea
-                            rows={2}
-                            value={item.method}
-                            onChange={(e) =>
-                              handleUpdateMonitoringItem(item.id, 'method', e.target.value)
-                            }
-                            placeholder="Method..."
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 border-r border-stone-200">
-                          <textarea
-                            rows={2}
-                            value={item.frequency}
-                            onChange={(e) =>
-                              handleUpdateMonitoringItem(item.id, 'frequency', e.target.value)
-                            }
-                            placeholder="Frequency..."
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 border-r border-stone-200">
-                          <input
-                            type="text"
-                            value={item.pic}
-                            onChange={(e) =>
-                              handleUpdateMonitoringItem(item.id, 'pic', e.target.value)
-                            }
-                            placeholder="PIC..."
-                            className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                          />
-                        </td>
-                        <td className="p-2 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveMonitoringRow(item.id)}
-                            className="p-1 text-stone-400 hover:text-rose-600 rounded transition-colors"
-                            title="Hapus baris"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.monitoring)}
+                onClose={() => closeExample('monitoring')}
+                title="Monitoring Mechanism (M&E)"
+                guide="Tetapkan metode pemantauan, frekuensi, dan penanggung jawab (PIC) untuk memastikan mutu pelaksanaan dan kelengkapan bukti."
+                onUseAsDraft={() => {
+                  setMonitoringItems(
+                    EXAMPLE_MONITORING_ITEMS.map((m, i) => ({
+                      ...m,
+                      id: `me-${Date.now()}-${i}`,
+                    }))
+                  );
+                  closeExample('monitoring');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-1 text-stone-700">
+                  {EXAMPLE_MONITORING_ITEMS.map((m) => (
+                    <li key={m.id}>
+                      <strong>{m.aspect}:</strong> {m.method} ({m.frequency} · PIC: {m.pic})
+                    </li>
+                  ))}
+                </ul>
+              </FieldExampleReferenceBox>
+
+              {monitoringItems.length === 0 ? (
+                <div className="py-5 border border-dashed border-stone-200 rounded text-center space-y-2 bg-stone-50/20 text-xs">
+                  <p className="text-stone-500">Belum ada baris Monitoring Mechanism (M&amp;E).</p>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMonitoringItems(
+                          EMPTY_DEFAULT_MONITORING_ITEMS.map((m, idx) => ({
+                            ...m,
+                            id: `me-${Date.now()}-${idx}`,
+                          }))
+                        )
+                      }
+                      className="px-2.5 py-1 text-xs font-medium text-stone-700 bg-white hover:bg-stone-100 border border-stone-200 rounded transition-colors cursor-pointer"
+                    >
+                      + Tambah 5 Aspek Standar (Kosong)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAddMonitoringRow}
+                      className="px-2.5 py-1 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
+                    >
+                      + Tambah Baris Manual
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="border border-stone-200 rounded overflow-hidden text-xs bg-white">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-stone-100/80 text-stone-800 border-b border-stone-200 font-semibold">
+                        <th className="p-2.5 border-r border-stone-200 w-1/5">Aspect</th>
+                        <th className="p-2.5 border-r border-stone-200">Method</th>
+                        <th className="p-2.5 border-r border-stone-200 w-1/5">Frequency</th>
+                        <th className="p-2.5 border-r border-stone-200 w-1/6">PIC</th>
+                        <th className="p-2 text-center w-12">Aksi</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-stone-200">
+                      {monitoringItems.map((item) => (
+                        <tr key={item.id} className="hover:bg-stone-50/40 align-top">
+                          <td className="p-2 border-r border-stone-200">
+                            <input
+                              type="text"
+                              value={item.aspect}
+                              onChange={(e) =>
+                                handleUpdateMonitoringItem(item.id, 'aspect', e.target.value)
+                              }
+                              placeholder="Aspect..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 font-medium placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 border-r border-stone-200">
+                            <textarea
+                              rows={2}
+                              value={item.method}
+                              onChange={(e) =>
+                                handleUpdateMonitoringItem(item.id, 'method', e.target.value)
+                              }
+                              placeholder="Method..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 border-r border-stone-200">
+                            <textarea
+                              rows={2}
+                              value={item.frequency}
+                              onChange={(e) =>
+                                handleUpdateMonitoringItem(item.id, 'frequency', e.target.value)
+                              }
+                              placeholder="Frequency..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 border-r border-stone-200">
+                            <input
+                              type="text"
+                              value={item.pic}
+                              onChange={(e) =>
+                                handleUpdateMonitoringItem(item.id, 'pic', e.target.value)
+                              }
+                              placeholder="PIC..."
+                              className="w-full p-1.5 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                            />
+                          </td>
+                          <td className="p-2 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveMonitoringRow(item.id)}
+                              className="p-1 text-stone-400 hover:text-rose-600 rounded transition-colors"
+                              title="Hapus baris"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
 
             {/* ======================================================== */}
             {/* SCOPE OF ACTIVITIES (Poin-poin)                          */}
             {/* ======================================================== */}
             <section id="sec-scope" className="space-y-3">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     Scope of Activities
@@ -3813,47 +4056,83 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Batasan ruang lingkup kegiatan dalam bentuk poin-poin.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddScopePoint}
-                  className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Poin Scope</span>
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.scope)}
+                    onToggle={() => toggleExample('scope')}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddScopePoint}
+                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Poin Scope</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="space-y-2">
-                {scopeOfActivities.map((point, idx) => (
-                  <div key={idx} className="flex items-start gap-2">
-                    <span className="font-semibold text-stone-400 pt-2 text-sm leading-none">
-                      •
-                    </span>
-                    <textarea
-                      rows={2}
-                      value={point}
-                      onChange={(e) => handleUpdateScopePoint(idx, e.target.value)}
-                      placeholder={`Poin ruang lingkup ke-${idx + 1}...`}
-                      className="flex-1 p-2 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveScopePoint(idx)}
-                      className="p-1.5 text-stone-400 hover:text-rose-600 rounded transition-colors shrink-0 mt-1"
-                      title="Hapus poin"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.scope)}
+                onClose={() => closeExample('scope')}
+                title="Scope of Activities"
+                guide="Rincikan ruang lingkup pekerjaan yang termasuk dalam kegiatan ini mulai dari persiapan materi, pelaksanaan, hingga pelaporan."
+                onUseAsDraft={() => {
+                  setScopeOfActivities([...EXAMPLE_SCOPE_OF_ACTIVITIES]);
+                  closeExample('scope');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-0.5 text-stone-700">
+                  {EXAMPLE_SCOPE_OF_ACTIVITIES.map((pt, i) => (
+                    <li key={i}>{pt}</li>
+                  ))}
+                </ul>
+              </FieldExampleReferenceBox>
+
+              {scopeOfActivities.length === 0 ? (
+                <div className="py-4 border border-dashed border-stone-200 rounded text-center space-y-1.5 bg-stone-50/20 text-xs">
+                  <p className="text-stone-500">Belum ada poin Scope of Activities.</p>
+                  <button
+                    type="button"
+                    onClick={handleAddScopePoint}
+                    className="px-2.5 py-1 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
+                  >
+                    + Tambah Poin Scope
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {scopeOfActivities.map((point, idx) => (
+                    <div key={idx} className="flex items-start gap-2">
+                      <span className="font-semibold text-stone-400 pt-2 text-sm leading-none">
+                        •
+                      </span>
+                      <textarea
+                        rows={2}
+                        value={point}
+                        onChange={(e) => handleUpdateScopePoint(idx, e.target.value)}
+                        placeholder={`Poin ruang lingkup ke-${idx + 1}...`}
+                        className="flex-1 p-2 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveScopePoint(idx)}
+                        className="p-1.5 text-stone-400 hover:text-rose-600 rounded transition-colors shrink-0 mt-1"
+                        title="Hapus poin"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
 
             {/* ======================================================== */}
             {/* MEKANISME PELAKSANAAN (Poin-poin)                        */}
             {/* ======================================================== */}
             <section id="sec-mekanisme" className="space-y-3">
-              <div className="pb-1 border-b border-stone-200 flex items-center justify-between">
+              <div className="pb-1 border-b border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-900">
                     Mekanisme Pelaksanaan
@@ -3862,40 +4141,76 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Prosedur operasional pencairan, koordinasi, pelaksanaan, dan pelaporan.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddMechanismPoint}
-                  className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Poin Mekanisme</span>
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.mechanisms)}
+                    onToggle={() => toggleExample('mechanisms')}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddMechanismPoint}
+                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Poin Mekanisme</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="space-y-2">
-                {implementationMechanisms.map((mech, idx) => (
-                  <div key={idx} className="flex items-start gap-2">
-                    <span className="font-semibold text-stone-400 pt-2 text-sm leading-none">
-                      •
-                    </span>
-                    <textarea
-                      rows={2}
-                      value={mech}
-                      onChange={(e) => handleUpdateMechanismPoint(idx, e.target.value)}
-                      placeholder={`Poin mekanisme ke-${idx + 1}...`}
-                      className="flex-1 p-2 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveMechanismPoint(idx)}
-                      className="p-1.5 text-stone-400 hover:text-rose-600 rounded transition-colors shrink-0 mt-1"
-                      title="Hapus poin"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.mechanisms)}
+                onClose={() => closeExample('mechanisms')}
+                title="Mekanisme Pelaksanaan"
+                guide="Uraikan alur teknis mulai dari pengajuan Cash Advance, koordinasi lapangan, metode pelaksanaan kegiatan, hingga pertanggungjawaban."
+                onUseAsDraft={() => {
+                  setImplementationMechanisms([...EXAMPLE_IMPLEMENTATION_MECHANISMS]);
+                  closeExample('mechanisms');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-0.5 text-stone-700">
+                  {EXAMPLE_IMPLEMENTATION_MECHANISMS.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              </FieldExampleReferenceBox>
+
+              {implementationMechanisms.length === 0 ? (
+                <div className="py-4 border border-dashed border-stone-200 rounded text-center space-y-1.5 bg-stone-50/20 text-xs">
+                  <p className="text-stone-500">Belum ada poin Mekanisme Pelaksanaan.</p>
+                  <button
+                    type="button"
+                    onClick={handleAddMechanismPoint}
+                    className="px-2.5 py-1 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
+                  >
+                    + Tambah Poin Mekanisme
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {implementationMechanisms.map((mech, idx) => (
+                    <div key={idx} className="flex items-start gap-2">
+                      <span className="font-semibold text-stone-400 pt-2 text-sm leading-none">
+                        •
+                      </span>
+                      <textarea
+                        rows={2}
+                        value={mech}
+                        onChange={(e) => handleUpdateMechanismPoint(idx, e.target.value)}
+                        placeholder={`Poin mekanisme ke-${idx + 1}...`}
+                        className="flex-1 p-2 bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveMechanismPoint(idx)}
+                        className="p-1.5 text-stone-400 hover:text-rose-600 rounded transition-colors shrink-0 mt-1"
+                        title="Hapus poin"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
 
             {/* ======================================================== */}
@@ -3919,17 +4234,55 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     <span className="text-xs font-normal text-stone-500">(Opsional)</span>
                   </label>
                 </div>
-                {isRundownVisible && (
-                  <button
-                    type="button"
-                    onClick={handleAddNewRundownSection}
-                    className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Buat Bagian Rundown Baru</span>
-                  </button>
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.rundown)}
+                    onToggle={() => toggleExample('rundown')}
+                  />
+                  {isRundownVisible && (
+                    <button
+                      type="button"
+                      onClick={handleAddNewRundownSection}
+                      className="inline-flex items-center gap-1 text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Buat Bagian Rundown Baru</span>
+                    </button>
+                  )}
+                </div>
               </div>
+
+              <FieldExampleReferenceBox
+                isOpen={Boolean(openExamples.rundown)}
+                onClose={() => closeExample('rundown')}
+                title="6. Rundown Kegiatan"
+                guide="Centang '6. Rundown Kegiatan' bila Anda ingin menyertakan susunan sesi acara per hari/tahapan Implementation Timeline."
+                onUseAsDraft={() => {
+                  setIsRundownVisible(true);
+                  setRundown(
+                    EXAMPLE_RUNDOWN.map((r, i) => ({
+                      ...r,
+                      id: `rd-${Date.now()}-${i}`,
+                    }))
+                  );
+                  setRundownNotes(EXAMPLE_RUNDOWN_NOTES);
+                  closeExample('rundown');
+                }}
+              >
+                <ul className="list-disc pl-4 space-y-0.5 text-stone-700">
+                  {EXAMPLE_RUNDOWN.map((rd) => (
+                    <li key={rd.id}>
+                      <strong>
+                        {rd.date} ({rd.time}):
+                      </strong>{' '}
+                      {rd.agenda} — {rd.location} (PIC: {rd.picName})
+                    </li>
+                  ))}
+                </ul>
+                <div className="text-stone-500 pt-1">
+                  <strong>Catatan Rundown:</strong> {EXAMPLE_RUNDOWN_NOTES}
+                </div>
+              </FieldExampleReferenceBox>
 
               {isRundownVisible && (
                 <div className="space-y-3 pt-1">
@@ -3952,7 +4305,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                       <button
                         type="button"
                         onClick={handleAddNewRundownSection}
-                        className="px-3 py-1.5 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors"
+                        className="px-3 py-1.5 text-xs font-medium text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded transition-colors cursor-pointer"
                       >
                         + Buat Bagian Rundown Baru
                       </button>
@@ -4140,7 +4493,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                                 />
                                 <input
                                   type="text"
-                                  placeholder="Waktu (cth: 09:00 - 12:00 WIB)"
+                                  placeholder="Waktu (09:00 - 12:00 WIB)"
                                   value={newRdTime}
                                   onChange={(e) => setNewRdTime(e.target.value)}
                                   className="h-8 px-2 border border-stone-200 rounded bg-white text-stone-800 focus:outline-none focus:border-stone-400"
@@ -4155,7 +4508,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                                 <input
                                   type="text"
                                   list="rundown-target-participants-options"
-                                  placeholder="Target Peserta (setelah Agenda Kegiatan)"
+                                  placeholder="Target Peserta"
                                   value={newRdTargetParticipants}
                                   onChange={(e) => setNewRdTargetParticipants(e.target.value)}
                                   className="h-8 px-2 border border-stone-200 rounded bg-white text-stone-800 focus:outline-none focus:border-stone-400"
@@ -4200,7 +4553,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                       <button
                         type="button"
                         onClick={handleAddNewRundownSection}
-                        className="w-full py-2 border border-dashed border-stone-200 hover:border-stone-300 bg-stone-50/30 hover:bg-stone-100/60 rounded text-xs font-medium text-stone-600 hover:text-stone-900 transition-colors"
+                        className="w-full py-2 border border-dashed border-stone-200 hover:border-stone-300 bg-stone-50/30 hover:bg-stone-100/60 rounded text-xs font-medium text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
                       >
                         + Buat Bagian Rundown Baru
                       </button>
@@ -4216,7 +4569,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                       rows={2}
                       value={rundownNotes}
                       onChange={(e) => setRundownNotes(e.target.value)}
-                      placeholder="Contoh: Jadwal istirahat fleksibel..."
+                      placeholder="Ketik keterangan tambahan terkait jadwal istirahat atau catatan teknis sesi..."
                       className="w-full p-2.5 bg-stone-50/40 hover:bg-white focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-xs text-stone-800 placeholder:text-stone-300 focus:outline-none transition-colors"
                     />
                   </div>
@@ -4229,9 +4582,27 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
             {/* ======================================================== */}
             <section className="pt-4 border-t border-stone-200 space-y-4">
               <div>
-                <label className="block text-xs font-medium text-stone-700 mb-1">
-                  Catatan Tambahan (Opsional)
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-xs font-medium text-stone-700">
+                    Catatan Tambahan (Opsional)
+                  </label>
+                  <FieldExampleToggleButton
+                    isOpen={Boolean(openExamples.additionalNotes)}
+                    onToggle={() => toggleExample('additionalNotes')}
+                  />
+                </div>
+                <FieldExampleReferenceBox
+                  isOpen={Boolean(openExamples.additionalNotes)}
+                  onClose={() => closeExample('additionalNotes')}
+                  title="Catatan Tambahan (Opsional)"
+                  guide="Tuliskan kebutuhan logistik khusus, perizinan setempat, atau informasi pendukung lain bila diperlukan."
+                  onUseAsDraft={() => {
+                    setAdditionalNotes(EXAMPLE_ADDITIONAL_NOTES);
+                    closeExample('additionalNotes');
+                  }}
+                >
+                  <div>{EXAMPLE_ADDITIONAL_NOTES}</div>
+                </FieldExampleReferenceBox>
                 <textarea
                   rows={2}
                   value={additionalNotes}
