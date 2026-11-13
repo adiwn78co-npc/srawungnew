@@ -9727,16 +9727,16 @@ async function startServer() {
         }
       } else {
         // Tentukan status awal sesuai workflow peran
-        const isDirectHrForEmployee =
+        const isDirectAssignForEmployee =
           !isStaffRequest &&
-          isHrAuthorized(currentUser) &&
+          (isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser)) &&
           wf === 'EMPLOYEE_TO_FINANCE_APPROVAL';
         const initialStatus =
           wf === 'DIRECTOR_TO_FINANCE_NOTIFY'
             ? 'Notified to Finance'
             : wf === 'FINANCE_TO_DIRECTOR_REVIEW'
             ? 'Submitted for Review'
-            : isDirectHrForEmployee
+            : isDirectAssignForEmployee
             ? 'Approved'
             : 'Pending';
 
@@ -9761,11 +9761,11 @@ async function startServer() {
               ? `${currentUser.name} (Director → Finance: Notify for Information)`
               : wf === 'FINANCE_TO_DIRECTOR_REVIEW'
               ? `${currentUser.name} (Finance → Director: Submit for Review)`
-              : isDirectHrForEmployee
-              ? `${currentUser.name} (Finance)`
+              : isDirectAssignForEmployee
+              ? `${currentUser.name} (${isDirectorAuthorized(currentUser) ? 'Director' : 'Finance'})`
               : `${currentUser.name} (Employee → Finance: Submit for Approval)`,
-          reviewedByName: isDirectHrForEmployee ? currentUser.name : undefined,
-          reviewedAt: isDirectHrForEmployee ? nowIso : undefined,
+          reviewedByName: isDirectAssignForEmployee ? currentUser.name : undefined,
+          reviewedAt: isDirectAssignForEmployee ? nowIso : undefined,
           createdAt: nowIso,
           updatedAt: nowIso,
         };
@@ -9866,18 +9866,41 @@ async function startServer() {
           errMsg = 'Pengajuan dari Finance direview oleh Director untuk masukan strategis.';
           return;
         }
+        const isReturnedByDirector = decision === 'return' || decision === 'reject';
+        const cleanDirectorNote = notes
+          ? String(notes).trim()
+          : isReturnedByDirector
+          ? 'Diminta penyesuaian jadwal oleh Director.'
+          : 'Telah direview oleh Director (tanpa keberatan).';
         sys.flextimeAssignments[idx] = {
           ...prev,
           workflowType: wf,
-          isActive: true,
-          status: 'Reviewed by Director',
+          isActive: !isReturnedByDirector,
+          status: isReturnedByDirector ? 'Returned' : 'Reviewed by Director',
+          returnReason: isReturnedByDirector ? cleanDirectorNote : undefined,
           directorReviewedByName: currentUser.name,
           directorReviewedAt: nowIso,
-          directorReviewNotes: notes
-            ? String(notes).trim()
-            : 'Telah direview oleh Director (tanpa keberatan).',
+          directorReviewNotes: cleanDirectorNote,
           updatedAt: nowIso,
         };
+        if (!isReturnedByDirector) {
+          for (let i = 0; i < sys.records.length; i++) {
+            const rec = sys.records[i];
+            if (
+              rec.userId === prev.userId &&
+              rec.recordType === 'ATTENDANCE' &&
+              rec.date >= prev.startDate &&
+              rec.date <= prev.endDate
+            ) {
+              sys.records[i] = {
+                ...rec,
+                isFlextimeApplied: true,
+                flextimeRuleLabel: prev.scheduleArrangement,
+                updatedAt: nowIso,
+              };
+            }
+          }
+        }
       } else {
         // EMPLOYEE_TO_FINANCE_APPROVAL
         if (!isHrAuthorized(currentUser)) {
@@ -9940,24 +9963,32 @@ async function startServer() {
 
   app.delete('/api/attendance-system/flextime/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!isHrAuthorized(currentUser)) {
-      return res.status(403).json({ error: 'Hanya HR yang dapat menghapus atau menonaktifkan pengaturan Flextime.' });
-    }
     const { id } = req.params;
+    let errMsg: string | null = null;
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
       const target = sys.flextimeAssignments.find((f) => f.id === id);
       if (!target) return;
+      const canSelfCancel =
+        target.userId === currentUser.id &&
+        (target.status === 'Pending' || target.status === 'Returned' || target.status === 'Diajukan Staf');
+      if (!isHrAuthorized(currentUser) && !isDirectorAuthorized(currentUser) && !canSelfCancel) {
+        errMsg = 'Hanya Direktur, Finance/HR, atau pengaju (saat masih Pending/Returned) yang dapat menghapus pengaturan Flextime.';
+        return;
+      }
       sys.flextimeAssignments = sys.flextimeAssignments.filter((f) => f.id !== id);
       appendAttendanceAudit(
         draft,
         currentUser,
         'FLEXTIME',
-        'Penghapusan Periode Flextime oleh HR',
-        `HR (${currentUser.name}) menghapus pengaturan Flextime milik ${target.userName} (${target.startDate} s/d ${target.endDate}).`,
+        'Penghapusan Periode Flextime',
+        `${currentUser.name} (${currentUser.roleTitle}) menghapus pengaturan Flextime milik ${target.userName} (${target.startDate} s/d ${target.endDate}).`,
         target.userName
       );
     });
+    if (errMsg) {
+      return res.status(403).json({ error: errMsg });
+    }
     res.json({ bundle: db.getData().attendanceSystem });
   });
 
@@ -11379,6 +11410,53 @@ async function startServer() {
     });
 
     res.json({ bundle: db.getData().attendanceSystem });
+  });
+
+  // 11. RESET SELURUH DATA REKAP KERJA (KHUSUS DIREKTUR SAJA — MENGHAPUS HANYA DATA REKAP KERJA)
+  app.post('/api/attendance-system/work-recap-reset', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== 'director') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya Direktur yang berwenang melakukan reset data Rekap Kerja.',
+      });
+    }
+
+    if (!req.body?.confirmReset) {
+      return res.status(400).json({
+        error: 'Konfirmasi reset data Rekap Kerja wajib disertakan.',
+      });
+    }
+
+    db.update((draft) => {
+      const sys = ensureAttendanceSystemInitialized(draft);
+      const prevRecordsCount = (sys.records || []).length;
+      const prevWfaCount = (sys.wfaRequests || []).length;
+      const prevFlexCount = (sys.flextimeAssignments || []).length;
+      const prevLeaveCount = (sys.leaveRequests || []).length;
+      const prevHolidayCount = (sys.holidayRequests || []).length;
+      const prevVerifCount = Object.keys(sys.workRecapVerifications || {}).length;
+
+      // Hapus seluruh data operasional Rekap Kerja (tanpa menyentuh data Program, ToR, Finance, Peserta, atau Akun User)
+      sys.records = [];
+      sys.wfaRequests = [];
+      sys.flextimeAssignments = [];
+      sys.leaveRequests = [];
+      sys.holidayRequests = [];
+      sys.workRecapVerifications = {};
+
+      appendAttendanceAudit(
+        draft,
+        currentUser,
+        'TIMESHEET',
+        'Reset Seluruh Data Rekap Kerja oleh Direktur',
+        `${currentUser.name} (${currentUser.roleTitle}) mereset seluruh data Rekap Kerja (Kehadiran/Timesheet: ${prevRecordsCount}, WFA: ${prevWfaCount}, Flextime: ${prevFlexCount}, Cuti/Izin: ${prevLeaveCount}, Libur: ${prevHolidayCount}, Verifikasi Rekap: ${prevVerifCount}).`
+      );
+    });
+
+    res.json({
+      message: 'Seluruh data pada Rekap Kerja telah berhasil dihapus dan direset oleh Direktur.',
+      bundle: buildAttendanceBundleForUser(currentUser),
+    });
   });
 
   // Reset demo data utility (Strictly Locked in Production to Protect Operational Data)

@@ -1049,6 +1049,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  resetWorkRecapData: () =>
+    request<{ message: string; bundle: AttendanceSystemBundle }>(
+      '/api/attendance-system/work-recap-reset',
+      {
+        method: 'POST',
+        body: JSON.stringify({ confirmReset: true }),
+      }
+    ),
 
   // Stats & Audit
   getStats: () => request<DashboardStats>('/api/stats'),

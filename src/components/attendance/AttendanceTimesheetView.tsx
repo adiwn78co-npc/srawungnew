@@ -28,6 +28,7 @@ import {
   ShieldCheck,
   Eye,
   Users as UsersIcon,
+  RotateCcw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../lib/api.js';
@@ -382,6 +383,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     currentUser?.role === 'hr' ||
     currentUser?.role === 'admin';
   const isDirector = currentUser?.role === 'director' || currentUser?.role === 'admin';
+  const isStrictDirector = currentUser?.role === 'director';
   // Detail lintas staf hanya dapat dilihat oleh Finance (HR) dan Director
   const canViewDetails = isHR || isDirector;
   // Rekap Kerja HANYA bisa dilihat oleh HR/Finance dan Director
@@ -416,6 +418,11 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const [showInteractiveCalendar, setShowInteractiveCalendar] = useState<boolean>(false);
   const [showFocusGuideModal, setShowFocusGuideModal] = useState<boolean>(false);
   const [showWorkRecapPreviewModal, setShowWorkRecapPreviewModal] = useState<boolean>(false);
+  const [showResetRecapModal, setShowResetRecapModal] = useState<boolean>(false);
+  const [resettingWorkRecap, setResettingWorkRecap] = useState<boolean>(false);
+  const [flexWorkflowFilter, setFlexWorkflowFilter] = useState<
+    'ALL' | 'FINANCE_TO_DIRECTOR_REVIEW' | 'DIRECTOR_TO_FINANCE_NOTIFY' | 'EMPLOYEE_TO_FINANCE_APPROVAL'
+  >('ALL');
   const [downloadingRecapPdf, setDownloadingRecapPdf] = useState<boolean>(false);
   const workRecapSheetRef = useRef<HTMLElement | null>(null);
   const modalWorkRecapSheetRef = useRef<HTMLElement | null>(null);
@@ -510,10 +517,16 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const [polAllocation, setPolAllocation] = useState<number>(12);
   const [polTerms, setPolTerms] = useState<string>('');
 
-  // Finance/HR Flextime Form State
+  // Flextime Form State (Mendukung Employee -> Finance, Finance -> Director, Director -> Finance)
   const [flexUserId, setFlexUserId] = useState<string>('');
-  const [flexStartDate, setFlexStartDate] = useState<string>('2026-11-01');
-  const [flexEndDate, setFlexEndDate] = useState<string>('2026-11-30');
+  const [flexStartDate, setFlexStartDate] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10)
+  );
+  const [flexEndDate, setFlexEndDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    return d.toISOString().slice(0, 10);
+  });
   const [flexSchedule, setFlexSchedule] = useState<string>(
     'Jam Masuk Fleksibel 07:30–10:00 WIB (8 Jam Kerja/Hari)'
   );
@@ -604,10 +617,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
 
   // Jika pengguna berganti ke staf biasa saat berada di tab khusus Finance/Director, kembalikan ke 'daily'
   useEffect(() => {
-    if (
-      !canViewDetails &&
-      (subTab === 'flextime' || subTab === 'leave_quota' || subTab === 'audit')
-    ) {
+    if (!canViewDetails && (subTab === 'leave_quota' || subTab === 'audit')) {
       setSubTab('daily');
     }
   }, [canViewDetails, subTab]);
@@ -737,9 +747,19 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     if (allUsers.length > 0 && !hrManualWfaUserId) {
       const firstStaff = allUsers.find((u) => u.role !== 'admin') || allUsers[0];
       setHrManualWfaUserId(firstStaff.id);
-      setFlexUserId(firstStaff.id);
     }
   }, [allUsers, hrManualWfaUserId]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!canViewDetails || currentUser.role === 'director') {
+      setFlexUserId(currentUser.id);
+      return;
+    }
+    if (!flexUserId && allUsers.length > 0) {
+      setFlexUserId(currentUser.id);
+    }
+  }, [currentUser, canViewDetails, allUsers, flexUserId]);
 
   // CRITICAL CLOCK LOGIC: Prioritaskan sesi Clock In yang masih AKTIF (belum Clock Out) milik user saat ini
   // lintas tanggal/midnight sehingga refresh, navigasi, maupun pergantian hari tidak pernah memutus sesi aktif.
@@ -1284,25 +1304,39 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     }
   };
 
-  // FLEXTIME OLEH FINANCE (HR) / DIRECTOR
+  // FLEXTIME BERDASARKAN 3 ALUR PERAN (EMPLOYEE -> FINANCE, FINANCE -> DIRECTOR, DIRECTOR -> FINANCE)
   const handleSaveFlextime = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    const effectiveTargetUserId = !canViewDetails
+      ? currentUser?.id || ''
+      : flexUserId || currentUser?.id || '';
+    const targetUserObj = allUsers.find((u) => u.id === effectiveTargetUserId) || currentUser;
+    if (flexEndDate < flexStartDate) {
+      setErrorMsg('Tanggal akhir periode Flextime tidak boleh lebih awal dari tanggal mulai.');
+      return;
+    }
     try {
       const res = await api.saveFlextimeAssignment({
-        userId: flexUserId,
+        userId: effectiveTargetUserId,
         startDate: flexStartDate,
         endDate: flexEndDate,
         scheduleArrangement: flexSchedule,
         policyNotes: flexNotes,
         isActive: true,
+        mode: !canViewDetails ? 'staff_request' : 'hr_assign',
       });
       setBundle(res.bundle);
       setFlexNotes('');
+      const targetRole = targetUserObj?.role;
       showToast(
-        isDirector
-          ? 'Pengaturan Flextime Direktur diberitahukan ke Finance sebagai informasi.'
-          : 'Pengaturan Flextime berhasil disimpan.'
+        targetRole === 'director'
+          ? 'Pengaturan Flextime Direktur berhasil disimpan & diberitahukan ke Finance sebagai informasi (Notify for Information).'
+          : targetRole === 'finance' || targetRole === 'hr'
+          ? 'Pengajuan Flextime Finance berhasil dikirim ke Direktur untuk direview (Submit for Review).'
+          : !canViewDetails
+          ? 'Pengajuan Flextime berhasil dikirim ke Finance untuk persetujuan (Employee → Finance).'
+          : `Pengaturan Flextime untuk ${targetUserObj?.name || 'staf'} berhasil disimpan & diaktifkan.`
       );
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menyimpan pengaturan Flextime.');
@@ -1331,7 +1365,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     try {
       const res = await api.deleteFlextimeAssignment(id);
       setBundle(res.bundle);
-      showToast('Periode Flextime dihapus oleh Finance.');
+      showToast('Pengaturan periode Flextime berhasil dihapus.');
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menghapus periode Flextime.');
     }
@@ -1588,7 +1622,11 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     setErrorMsg(null);
     const noteText = (flexDecisionNotesMap[id] || '').trim();
     if (decision === 'return' && !noteText) {
-      setErrorMsg('Alasan pengembalian (Return) wajib diisi oleh Finance.');
+      setErrorMsg(
+        isDirector
+          ? 'Tuliskan catatan penyesuaian sebelum mengembalikan pengajuan Flextime Finance.'
+          : 'Alasan pengembalian (Return) wajib diisi oleh Finance.'
+      );
       return;
     }
     try {
@@ -1597,14 +1635,21 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
         notes: noteText || undefined,
       });
       setBundle(res.bundle);
+      setFlexDecisionNotesMap((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       showToast(
         decision === 'approve'
           ? 'Pengajuan Flextime disetujui oleh Finance & kalender otomatis diperbarui.'
           : decision === 'return'
-          ? 'Pengajuan Flextime dikembalikan (Returned) ke staf beserta alasan dari Finance.'
+          ? isDirector
+            ? 'Pengajuan Flextime Finance dikembalikan oleh Direktur untuk penyesuaian jadwal.'
+            : 'Pengajuan Flextime dikembalikan (Returned) ke staf beserta alasan dari Finance.'
           : decision === 'review'
-          ? 'Catatan review Direktur atas Flextime Finance berhasil disimpan.'
-          : 'Informasi Flextime Direktur telah dicatat oleh Finance.'
+          ? 'Catatan review Direktur atas pengajuan Flextime Finance berhasil disimpan.'
+          : 'Informasi Flextime Direktur telah dicatat (acknowledged) oleh Finance.'
       );
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal memproses tindak lanjut Flextime.');
@@ -1824,6 +1869,31 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       }
     } catch (err: any) {
       showToast(err?.message || 'Gagal menyimpan verifikasi Rekap Kerja.');
+    }
+  };
+
+  const handleConfirmResetWorkRecap = async () => {
+    if (!isStrictDirector) {
+      setErrorMsg('Hanya Direktur yang memiliki kewenangan mereset data Rekap Kerja.');
+      return;
+    }
+    setErrorMsg(null);
+    setResettingWorkRecap(true);
+    try {
+      const res = await api.resetWorkRecapData();
+      if (res?.bundle) {
+        setBundle(res.bundle);
+      }
+      setRecapVerifications({});
+      setShowResetRecapModal(false);
+      showToast(
+        res?.message ||
+          'Seluruh data pada Rekap Kerja berhasil dihapus dan direset ke nol oleh Direktur.'
+      );
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Gagal mereset data Rekap Kerja.');
+    } finally {
+      setResettingWorkRecap(false);
     }
   };
 
@@ -2373,8 +2443,38 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                 num: '08',
                 label: 'Flextime',
                 active: subTab === 'flextime',
-                show: canViewDetails,
-                badgeCount: 0,
+                show: true,
+                badgeCount: (() => {
+                  const list = bundle?.flextimeAssignments || [];
+                  if (isDirector) {
+                    return list.filter(
+                      (f) =>
+                        (f.workflowType === 'FINANCE_TO_DIRECTOR_REVIEW' ||
+                          f.userId === 'user-finance') &&
+                        f.status === 'Submitted for Review'
+                    ).length;
+                  }
+                  if (isHR) {
+                    return list.filter((f) => {
+                      const wf =
+                        f.workflowType ||
+                        (f.userId === 'user-director'
+                          ? 'DIRECTOR_TO_FINANCE_NOTIFY'
+                          : f.userId === 'user-finance'
+                          ? 'FINANCE_TO_DIRECTOR_REVIEW'
+                          : 'EMPLOYEE_TO_FINANCE_APPROVAL');
+                      return (
+                        (wf === 'EMPLOYEE_TO_FINANCE_APPROVAL' &&
+                          (f.status === 'Pending' || f.status === 'Diajukan Staf')) ||
+                        (wf === 'DIRECTOR_TO_FINANCE_NOTIFY' &&
+                          f.status === 'Notified to Finance')
+                      );
+                    }).length;
+                  }
+                  return list.filter(
+                    (f) => f.userId === currentUser?.id && f.status === 'Returned'
+                  ).length;
+                })(),
               },
               {
                 id: 'audit' as const,
@@ -4227,258 +4327,475 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 08: FLEXTIME (KHUSUS FINANCE/HR & DIRECTOR)                       */}
+      {/* TAB 08: FLEXTIME (EMPLOYEE -> FINANCE | FINANCE -> DIRECTOR | DIR -> FIN) */}
       {/* ===================================================================== */}
-      {subTab === 'flextime' && canViewDetails && (
+      {subTab === 'flextime' && (
         <div className="space-y-4">
-          <div className="bg-white border border-[#E5E5E3] rounded-lg p-4 space-y-3 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFEFED] pb-2">
+          <div className="bg-white border border-[#E5E5E3] rounded-lg p-4 space-y-3.5 text-xs">
+            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#EFEFED] pb-2.5">
               <div>
                 <h3 className="font-bold text-[#252525] uppercase tracking-wider">
-                  Pengaturan & Tindak Lanjut Flextime (Employee → Finance · Finance → Director · Director → Finance)
+                  Pengaturan &amp; Tindak Lanjut Flextime (Employee → Finance · Finance → Director · Director → Finance)
                 </h3>
                 <p className="text-[11px] text-[#6B6B68] mt-0.5">
                   {isDirector
                     ? 'Direktur dapat mengatur Flextime (diberitahukan ke Finance sebagai informasi) atau memberikan catatan review atas pengajuan Flextime Finance.'
-                    : 'Finance menyetujui (Approve) atau mengembalikan (Return dengan alasan) pengajuan Flextime staf, serta mencatat informasi Flextime Direktur.'}
+                    : isHR
+                    ? 'Finance dapat mengajukan Flextime ke Direktur untuk direview, menyetujui/mengembalikan pengajuan staf, serta mencatat informasi Flextime Direktur.'
+                    : 'Staf dapat mengajukan jadwal Flextime ke Finance untuk memperoleh persetujuan dan sinkronisasi otomatis ke kalender kerja.'}
                 </p>
               </div>
+
+              {(() => {
+                const selectedTarget = !canViewDetails
+                  ? currentUser
+                  : allUsers.find((u) => u.id === flexUserId) || currentUser;
+                const targetRole = selectedTarget?.role;
+                const activeFlowBadge =
+                  targetRole === 'director'
+                    ? 'Alur Aktif: Director → Finance (Notify for Information)'
+                    : targetRole === 'finance' || targetRole === 'hr'
+                    ? 'Alur Aktif: Finance → Director (Submit for Review)'
+                    : !canViewDetails
+                    ? 'Alur Aktif: Employee → Finance (Submit for Approval)'
+                    : `Penetapan Langsung oleh ${isDirector ? 'Direktur' : 'Finance'}`;
+                return (
+                  <span className="inline-flex items-center px-2.5 py-1 rounded bg-[#F7F7F5] border border-[#D9D9D6] text-[11px] font-semibold text-[#252525]">
+                    {activeFlowBadge}
+                  </span>
+                );
+              })()}
             </div>
 
-            {isHR && (
-              <form
-                onSubmit={handleSaveFlextime}
-                className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5 items-end"
-              >
-                <div className="lg:col-span-3">
-                  <label className="block font-medium text-[#37352F] mb-1">Pilih Staf</label>
+            <form
+              onSubmit={handleSaveFlextime}
+              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5 items-end"
+            >
+              <div className="lg:col-span-3">
+                <label className="block font-medium text-[#37352F] mb-1">
+                  {canViewDetails ? 'Pengaju / Pilih Staf' : 'Nama Pengaju'}
+                </label>
+                {canViewDetails ? (
                   <select
-                    value={flexUserId}
+                    value={flexUserId || currentUser?.id || ''}
                     onChange={(e) => setFlexUserId(e.target.value)}
-                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white text-[#252525]"
                   >
+                    {currentUser && (
+                      <option value={currentUser.id}>
+                        ★ {currentUser.name} —{' '}
+                        {isDirector
+                          ? 'Diri Sendiri (Director → Finance)'
+                          : 'Diri Sendiri (Finance → Director)'}
+                      </option>
+                    )}
                     {allUsers
-                      .filter((u) => u.isActive && u.role !== 'admin')
+                      .filter(
+                        (u) =>
+                          u.isActive &&
+                          u.role !== 'admin' &&
+                          u.id !== currentUser?.id
+                      )
                       .map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.name} ({u.roleTitle})
                         </option>
                       ))}
                   </select>
-                </div>
-                <div className="lg:col-span-2">
-                  <label className="block font-medium text-[#37352F] mb-1">Mulai Periode</label>
+                ) : (
                   <input
-                    type="date"
+                    type="text"
+                    readOnly
+                    value={`${currentUser?.name || ''} (${currentUser?.roleTitle || 'Staf'})`}
+                    className="w-full px-2.5 py-1.5 border border-[#E5E5E3] rounded bg-[#F7F7F5] text-[#5A5A58]"
+                  />
+                )}
+              </div>
+
+              <div className="lg:col-span-2">
+                <label className="block font-medium text-[#37352F] mb-1">Mulai Periode</label>
+                <input
+                  type="date"
+                  required
+                  value={flexStartDate}
+                  onChange={(e) => setFlexStartDate(e.target.value)}
+                  className="w-full px-2 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                />
+              </div>
+
+              <div className="lg:col-span-2">
+                <label className="block font-medium text-[#37352F] mb-1">Akhir Periode</label>
+                <input
+                  type="date"
+                  required
+                  value={flexEndDate}
+                  onChange={(e) => setFlexEndDate(e.target.value)}
+                  className="w-full px-2 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                />
+              </div>
+
+              <div className="lg:col-span-3">
+                <label className="block font-medium text-[#37352F] mb-1">
+                  Pengaturan Jam Kerja &amp; Catatan
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  <input
+                    type="text"
                     required
-                    value={flexStartDate}
-                    onChange={(e) => setFlexStartDate(e.target.value)}
-                    className="w-full px-2 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                    value={flexSchedule}
+                    onChange={(e) => setFlexSchedule(e.target.value)}
+                    placeholder="Mis. 07:30–10:00 WIB"
+                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                  />
+                  <input
+                    type="text"
+                    value={flexNotes}
+                    onChange={(e) => setFlexNotes(e.target.value)}
+                    placeholder={
+                      isDirector
+                        ? 'Catatan informasi ke Finance...'
+                        : isHR && flexUserId === currentUser?.id
+                        ? 'Alasan pengajuan ke Direktur...'
+                        : 'Catatan pengajuan / kebijakan...'
+                    }
+                    className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
                   />
                 </div>
-                <div className="lg:col-span-2">
-                  <label className="block font-medium text-[#37352F] mb-1">Akhir Periode</label>
-                  <input
-                    type="date"
-                    required
-                    value={flexEndDate}
-                    onChange={(e) => setFlexEndDate(e.target.value)}
-                    className="w-full px-2 py-1.5 border border-[#D9D9D6] rounded bg-white"
-                  />
-                </div>
-                <div className="lg:col-span-3">
-                  <label className="block font-medium text-[#37352F] mb-1">
-                    Pengaturan Jam Kerja & Catatan
-                  </label>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <input
-                      type="text"
-                      required
-                      value={flexSchedule}
-                      onChange={(e) => setFlexSchedule(e.target.value)}
-                      placeholder="Mis. 07:30–10:00 WIB"
-                      className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
-                    />
-                    <input
-                      type="text"
-                      value={flexNotes}
-                      onChange={(e) => setFlexNotes(e.target.value)}
-                      placeholder="Catatan kebijakan..."
-                      className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
-                    />
-                  </div>
-                </div>
-                <div className="lg:col-span-2">
-                  <button
-                    type="submit"
-                    className="w-full py-1.5 px-3 rounded bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-semibold cursor-pointer whitespace-nowrap"
-                  >
-                    Simpan Flextime
-                  </button>
-                </div>
-              </form>
-            )}
+              </div>
+
+              <div className="lg:col-span-2">
+                <button
+                  type="submit"
+                  className="w-full py-1.5 px-3 rounded bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-semibold cursor-pointer whitespace-nowrap"
+                >
+                  {(() => {
+                    const selectedTarget = !canViewDetails
+                      ? currentUser
+                      : allUsers.find((u) => u.id === flexUserId) || currentUser;
+                    if (selectedTarget?.role === 'director') {
+                      return 'Beritahu Finance';
+                    }
+                    if (selectedTarget?.role === 'finance' || selectedTarget?.role === 'hr') {
+                      return 'Ajukan ke Direktur';
+                    }
+                    if (!canViewDetails) {
+                      return 'Ajukan Flextime';
+                    }
+                    return 'Simpan Flextime';
+                  })()}
+                </button>
+              </div>
+            </form>
           </div>
 
           <div className="bg-white border border-[#E5E5E3] rounded-lg overflow-hidden">
-            <div className="px-4 py-3 bg-[#FAFAF9] border-b border-[#E5E5E3]">
+            <div className="px-4 py-3 bg-[#FAFAF9] border-b border-[#E5E5E3] flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs font-bold text-[#252525] uppercase tracking-wider">
-                Daftar Penugasan & Periode Flextime Staf
+                {canViewDetails
+                  ? 'Daftar Penugasan, Pengajuan & Tindak Lanjut Flextime'
+                  : 'Riwayat Pengajuan & Periode Flextime Saya'}
               </h3>
+
+              {canViewDetails && (
+                <div className="flex flex-wrap items-center gap-1">
+                  {(
+                    [
+                      { id: 'ALL', label: 'Semua Alur' },
+                      {
+                        id: 'FINANCE_TO_DIRECTOR_REVIEW',
+                        label: 'Finance → Director (Review Direktur)',
+                      },
+                      {
+                        id: 'DIRECTOR_TO_FINANCE_NOTIFY',
+                        label: 'Director → Finance (Info)',
+                      },
+                      {
+                        id: 'EMPLOYEE_TO_FINANCE_APPROVAL',
+                        label: 'Employee → Finance (Staf)',
+                      },
+                    ] as const
+                  ).map((flt) => (
+                    <button
+                      key={flt.id}
+                      type="button"
+                      onClick={() => setFlexWorkflowFilter(flt.id)}
+                      className={`px-2.5 py-1 rounded text-[11px] font-medium border cursor-pointer transition-colors ${
+                        flexWorkflowFilter === flt.id
+                          ? 'bg-[#252525] text-white border-[#252525]'
+                          : 'bg-white text-[#5A5A58] border-[#D9D9D6] hover:bg-[#F4F4F2]'
+                      }`}
+                    >
+                      {flt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-[#F7F7F5] border-b border-[#E5E5E3] text-[11px] font-semibold text-[#6B6B68] uppercase">
-                    <th className="py-2.5 px-4 w-[18%] min-w-[160px]">Nama Staf & Alur</th>
-                    <th className="py-2.5 px-4 w-[16%] min-w-[160px]">Periode</th>
-                    <th className="py-2.5 px-4 w-[32%] min-w-[240px]">
-                      Pengaturan Flextime & Catatan
+                    <th className="py-2.5 px-4 w-[18%] min-w-[160px]">Nama &amp; Alur</th>
+                    <th className="py-2.5 px-4 w-[16%] min-w-[155px]">Periode</th>
+                    <th className="py-2.5 px-4 w-[30%] min-w-[240px]">
+                      Pengaturan Flextime &amp; Catatan Review
                     </th>
-                    <th className="py-2.5 px-4 w-[12%] min-w-[110px]">Status</th>
-                    <th className="py-2.5 px-4 w-[22%] min-w-[180px] text-right">Tindak Lanjut</th>
+                    <th className="py-2.5 px-4 w-[12%] min-w-[115px]">Status</th>
+                    <th className="py-2.5 px-4 w-[24%] min-w-[210px] text-right">Tindak Lanjut</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#EFEFED]">
-                  {(bundle?.flextimeAssignments || []).map((f) => {
-                    const wfType =
-                      f.workflowType ||
-                      (f.userId === 'user-director'
-                        ? 'DIRECTOR_TO_FINANCE_NOTIFY'
-                        : f.userId === 'user-finance'
-                        ? 'FINANCE_TO_DIRECTOR_REVIEW'
-                        : 'EMPLOYEE_TO_FINANCE_APPROVAL');
-                    const isReturned = f.status === 'Returned' || f.status === 'Ditolak HR';
-                    return (
-                      <tr key={f.id} className="hover:bg-[#FAFAF9] align-middle">
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-[#252525] leading-snug">
-                            {f.userName}
-                          </div>
-                          <div className="text-[11px] text-[#6B6B68] mt-0.5">{f.userRoleTitle}</div>
-                          <span className="inline-block mt-1 px-1.5 py-0.2 rounded bg-[#F4F4F2] border border-[#E5E5E3] text-[10px] font-mono text-[#5A5A58]">
-                            {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY'
-                              ? 'Director → Finance'
-                              : wfType === 'FINANCE_TO_DIRECTOR_REVIEW'
-                              ? 'Finance → Director'
-                              : 'Employee → Finance'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 font-mono text-[11.5px] text-[#252525] whitespace-nowrap">
-                          {f.startDate} s/d {f.endDate}
-                        </td>
-                        <td className="py-3 px-4 space-y-1">
-                          <div className="font-semibold text-[#252525] leading-snug">
-                            {f.scheduleArrangement}
-                          </div>
-                          {f.policyNotes && (
-                            <div className="text-[11px] text-[#6B6B68] leading-relaxed">
-                              {f.policyNotes}
+                  {(() => {
+                    const resolveWf = (f: any) => {
+                      if (f.workflowType) return f.workflowType;
+                      const matchedUser = allUsers.find((u) => u.id === f.userId);
+                      const roleStr = String(matchedUser?.role || '').toLowerCase();
+                      const titleStr = String(f.userRoleTitle || '').toLowerCase();
+                      if (
+                        f.userId === 'user-director' ||
+                        roleStr === 'director' ||
+                        titleStr.includes('director') ||
+                        titleStr.includes('direktur')
+                      ) {
+                        return 'DIRECTOR_TO_FINANCE_NOTIFY';
+                      }
+                      if (
+                        f.userId === 'user-finance' ||
+                        roleStr === 'finance' ||
+                        roleStr === 'hr' ||
+                        titleStr.includes('finance') ||
+                        titleStr.includes('hr manager')
+                      ) {
+                        return 'FINANCE_TO_DIRECTOR_REVIEW';
+                      }
+                      return 'EMPLOYEE_TO_FINANCE_APPROVAL';
+                    };
+
+                    const visibleRows = (bundle?.flextimeAssignments || []).filter((f) => {
+                      if (!canViewDetails && f.userId !== currentUser?.id) return false;
+                      if (canViewDetails && flexWorkflowFilter !== 'ALL') {
+                        return resolveWf(f) === flexWorkflowFilter;
+                      }
+                      return true;
+                    });
+
+                    if (visibleRows.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={5} className="py-8 px-4 text-center text-[#787774]">
+                            Belum ada data pengaturan atau pengajuan Flextime pada kategori ini.
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return visibleRows.map((f) => {
+                      const wfType = resolveWf(f);
+                      const isReturned = f.status === 'Returned' || f.status === 'Ditolak HR';
+                      const canSelfDelete =
+                        f.userId === currentUser?.id &&
+                        (f.status === 'Pending' ||
+                          f.status === 'Returned' ||
+                          f.status === 'Diajukan Staf');
+
+                      return (
+                        <tr key={f.id} className="hover:bg-[#FAFAF9] align-middle">
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-[#252525] leading-snug">
+                              {f.userName}
                             </div>
-                          )}
-                          {f.returnReason && (
-                            <div className="px-2 py-1 rounded bg-rose-50 border border-rose-200 text-[11px] text-rose-800">
-                              <strong>Alasan Dikembalikan (Finance):</strong> &ldquo;{f.returnReason}&rdquo;
+                            <div className="text-[11px] text-[#6B6B68] mt-0.5">
+                              {f.userRoleTitle}
                             </div>
-                          )}
-                          {f.directorReviewNotes && (
-                            <div className="px-2 py-1 rounded bg-blue-50 border border-blue-200 text-[11px] text-blue-900">
-                              <strong>Review Direktur:</strong> &ldquo;{f.directorReviewNotes}&rdquo;
+                            <span className="inline-block mt-1 px-1.5 py-0.2 rounded bg-[#F4F4F2] border border-[#E5E5E3] text-[10px] font-mono text-[#5A5A58]">
+                              {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY'
+                                ? 'Director → Finance'
+                                : wfType === 'FINANCE_TO_DIRECTOR_REVIEW'
+                                ? 'Finance → Director'
+                                : 'Employee → Finance'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11.5px] text-[#252525] whitespace-nowrap">
+                            {f.startDate} s/d {f.endDate}
+                          </td>
+                          <td className="py-3 px-4 space-y-1">
+                            <div className="font-semibold text-[#252525] leading-snug">
+                              {f.scheduleArrangement}
                             </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          <span
-                            className={`inline-block px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
-                              f.status === 'Pending' || f.status === 'Diajukan Staf'
-                                ? 'bg-amber-50 text-amber-800 border-amber-200'
-                                : isReturned
-                                ? 'bg-rose-50 text-rose-700 border-rose-200'
-                                : f.isActive
-                                ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
-                                : 'bg-[#F4F4F2] text-[#787774] border-[#D9D9D6]'
-                            }`}
-                          >
-                            {f.status || (f.isActive ? 'Approved' : 'Nonaktif')}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right whitespace-nowrap">
-                          {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isHR && (
-                            <div className="inline-flex items-center gap-1.5">
-                              <input
-                                type="text"
-                                value={flexDecisionNotesMap[f.id] || ''}
-                                onChange={(e) =>
-                                  setFlexDecisionNotesMap((prev) => ({
-                                    ...prev,
-                                    [f.id]: e.target.value,
-                                  }))
-                                }
-                                placeholder="Catatan / alasan return..."
-                                className="w-32 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => handleFlextimeDecision(f.id, 'approve')}
-                                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-semibold cursor-pointer"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleFlextimeDecision(f.id, 'return')}
-                                className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer"
-                              >
-                                Return
-                              </button>
+                            {f.policyNotes && (
+                              <div className="text-[11px] text-[#6B6B68] leading-relaxed">
+                                {f.policyNotes}
+                              </div>
+                            )}
+                            {f.returnReason && (
+                              <div className="px-2 py-1 rounded bg-rose-50 border border-rose-200 text-[11px] text-rose-800">
+                                <strong>Catatan Pengembalian:</strong> &ldquo;{f.returnReason}&rdquo;
+                              </div>
+                            )}
+                            {f.directorReviewNotes && (
+                              <div className="px-2 py-1 rounded bg-blue-50 border border-blue-200 text-[11px] text-blue-900">
+                                <strong>
+                                  Review Direktur
+                                  {f.directorReviewedByName ? ` (${f.directorReviewedByName})` : ''}:
+                                </strong>{' '}
+                                &ldquo;{f.directorReviewNotes}&rdquo;
+                              </div>
+                            )}
+                            {f.financeAckNotes && (
+                              <div className="px-2 py-1 rounded bg-purple-50 border border-purple-200 text-[11px] text-purple-900">
+                                <strong>
+                                  Dicatat Finance
+                                  {f.financeAcknowledgedByName
+                                    ? ` (${f.financeAcknowledgedByName})`
+                                    : ''}
+                                  :
+                                </strong>{' '}
+                                &ldquo;{f.financeAckNotes}&rdquo;
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <span
+                              className={`inline-block px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
+                                f.status === 'Pending' ||
+                                f.status === 'Diajukan Staf' ||
+                                f.status === 'Submitted for Review' ||
+                                f.status === 'Notified to Finance'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : isReturned
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                  : f.isActive
+                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                  : 'bg-[#F4F4F2] text-[#787774] border-[#D9D9D6]'
+                              }`}
+                            >
+                              {f.status || (f.isActive ? 'Approved' : 'Nonaktif')}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isHR && (
+                              <div className="inline-flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={flexDecisionNotesMap[f.id] || ''}
+                                  onChange={(e) =>
+                                    setFlexDecisionNotesMap((prev) => ({
+                                      ...prev,
+                                      [f.id]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Catatan / alasan return..."
+                                  className="w-32 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleFlextimeDecision(f.id, 'approve')}
+                                  className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleFlextimeDecision(f.id, 'return')}
+                                  className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Return
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteFlextime(f.id)}
+                                  className="p-1.5 rounded text-[#787774] hover:text-red-600 cursor-pointer"
+                                  title="Hapus"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+
+                            {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isDirector && (
+                              <div className="inline-flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={flexDecisionNotesMap[f.id] ?? ''}
+                                  onChange={(e) =>
+                                    setFlexDecisionNotesMap((prev) => ({
+                                      ...prev,
+                                      [f.id]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Catatan review Direktur..."
+                                  className="w-40 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleFlextimeDecision(f.id, 'review')}
+                                  className="px-2.5 py-1 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Simpan Review
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleFlextimeDecision(f.id, 'return')}
+                                  className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer"
+                                  title="Kembalikan untuk penyesuaian jadwal"
+                                >
+                                  Return
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteFlextime(f.id)}
+                                  className="p-1.5 rounded text-[#787774] hover:text-red-600 cursor-pointer"
+                                  title="Hapus"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+
+                            {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isHR && (
+                              <div className="inline-flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={flexDecisionNotesMap[f.id] || ''}
+                                  onChange={(e) =>
+                                    setFlexDecisionNotesMap((prev) => ({
+                                      ...prev,
+                                      [f.id]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Catatan pencatatan Finance..."
+                                  className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleFlextimeDecision(f.id, 'acknowledge')}
+                                  className="px-2.5 py-1 rounded bg-purple-700 hover:bg-purple-800 text-white text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Catat / Acknowledge
+                                </button>
+                              </div>
+                            )}
+
+                            {((wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isDirector) ||
+                              (wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isDirector) ||
+                              (wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isHR) ||
+                              (!canViewDetails && canSelfDelete)) && (
                               <button
                                 type="button"
                                 onClick={() => handleDeleteFlextime(f.id)}
-                                className="p-1.5 rounded text-[#787774] hover:text-red-600 cursor-pointer"
-                                title="Hapus"
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[#E5E5E3] text-[#787774] hover:text-rose-600 hover:border-rose-200 text-[11px] cursor-pointer"
+                                title="Hapus Pengaturan Flextime"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
+                                <span>Hapus</span>
                               </button>
-                            </div>
-                          )}
-                          {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isDirector && (
-                            <div className="inline-flex items-center gap-1.5">
-                              <input
-                                type="text"
-                                value={flexDecisionNotesMap[f.id] || ''}
-                                onChange={(e) =>
-                                  setFlexDecisionNotesMap((prev) => ({
-                                    ...prev,
-                                    [f.id]: e.target.value,
-                                  }))
-                                }
-                                placeholder="Catatan review Direktur..."
-                                className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => handleFlextimeDecision(f.id, 'review')}
-                                className="px-2.5 py-1 rounded bg-[#1D4ED8] text-white text-[11px] font-semibold cursor-pointer"
-                              >
-                                Simpan Review
-                              </button>
-                            </div>
-                          )}
-                          {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isHR && (
-                            <div className="inline-flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handleFlextimeDecision(f.id, 'acknowledge')}
-                                className="px-2.5 py-1 rounded bg-purple-700 text-white text-[11px] font-semibold cursor-pointer"
-                              >
-                                Catat / Acknowledge
-                              </button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -4784,7 +5101,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                 </select>
               </div>
 
-              {/* Tombol Preview & Download PDF (HANYA terlihat & dapat diakses oleh Finance/HR dan Director) */}
+              {/* Tombol Preview & Download PDF (Finance/HR & Director) + Reset Data Rekap (KHUSUS Director) */}
               {canViewDetails && (
                 <div className="flex flex-wrap items-center gap-1.5 pl-1 border-l border-[#E5E5E3]">
                   <button
@@ -4806,6 +5123,17 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                     <Download className="w-3.5 h-3.5" />
                     <span>{downloadingRecapPdf ? 'Menyiapkan PDF...' : 'Download PDF'}</span>
                   </button>
+                  {isStrictDirector && (
+                    <button
+                      type="button"
+                      onClick={() => setShowResetRecapModal(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold cursor-pointer"
+                      title="Reset & Hapus Seluruh Data Rekap Kerja (Khusus Direktur)"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Reset Data Rekap</span>
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -6728,6 +7056,62 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
           </div>
         );
       })()}
+
+      {/* MODAL KONFIRMASI RESET SELURUH DATA REKAP KERJA (KHUSUS DIREKTUR) */}
+      {showResetRecapModal && isStrictDirector && (
+        <div className="fixed inset-0 z-[80] bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl border border-slate-200 max-w-md w-full overflow-hidden">
+            <div className="px-4 py-3 border-b border-rose-200 bg-rose-50/80 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-rose-700">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-sm font-bold">Reset Seluruh Data Rekap Kerja</h3>
+              </div>
+              <button
+                type="button"
+                disabled={resettingWorkRecap}
+                onClick={() => setShowResetRecapModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-2.5 text-xs text-slate-700 leading-relaxed">
+              <p className="font-semibold text-slate-900">
+                Tindakan ini hanya dapat dijalankan oleh Direktur dan akan menghapus seluruh data pada Rekap Kerja secara permanen:
+              </p>
+              <ul className="list-disc pl-4 space-y-1 text-slate-600">
+                <li>Catatan kehadiran harian, jam kerja, dan kontribusi Timesheet</li>
+                <li>Riwayat dan pengajuan WFA, Flextime, Cuti/Izin, serta Libur Bersama</li>
+                <li>Status pengesahan &amp; verifikasi audit digital Rekap Kerja</li>
+              </ul>
+              <div className="p-2.5 rounded bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+                <strong>Catatan Keamanan:</strong> Data di luar Rekap Kerja (Program, Logframe, ToR, Anggaran/Finance, Database Peserta, dan Akun Pengguna) <strong>tetap aman dan tidak ikut terhapus</strong>.
+              </div>
+            </div>
+
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={resettingWorkRecap}
+                onClick={() => setShowResetRecapModal(false)}
+                className="px-3.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={resettingWorkRecap}
+                onClick={handleConfirmResetWorkRecap}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{resettingWorkRecap ? 'Mereset Data...' : 'Ya, Hapus Semua Data Rekap'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
