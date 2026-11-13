@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import type {
@@ -202,11 +203,30 @@ const INITIAL_USERS: User[] = [
   },
 ];
 
+function buildInitialPasswordHash(): string {
+  const defaultPass = process.env.DEFAULT_TESTING_PASSWORD || 'Wijna@2026';
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedHex = crypto.scryptSync(defaultPass, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derivedHex}`;
+}
+
 function cloneInitialUsers(): User[] {
-  return INITIAL_USERS.map((u) => ({
-    ...u,
-    permissions: { ...u.permissions },
-  }));
+  const initialHash = buildInitialPasswordHash();
+  return INITIAL_USERS.map((u) => {
+    const derivedUsername =
+      u.username ||
+      (u.email || '').split('@')[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '') ||
+      u.id;
+    return {
+      ...u,
+      username: derivedUsername,
+      accountStatus: u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'),
+      passwordHash: u.passwordHash || initialHash,
+      passwordUpdatedAt: u.passwordUpdatedAt || u.createdAt,
+      mustChangePassword: true,
+      permissions: { ...u.permissions },
+    };
+  });
 }
 
 function createDefaultSeed(): DatabaseSchema {
@@ -700,7 +720,8 @@ function buildMysqlWriteFailureError(err: any, contextLabel: string): Error & {
 class Database {
   private data: DatabaseSchema;
   private lastCommittedJson = '';
-  private dirtySinceCommit = false;
+  private mutationVersion = 0;
+  private committedVersion = 0;
   private isCommittingWrite = false;
   private mysqlWriteChain: Promise<void> = Promise.resolve();
   private initPromise: Promise<void> | null = null;
@@ -845,37 +866,37 @@ class Database {
    * Menyelaraskan baseline snapshot bersih setelah normalisasi memori non-mutasi (seperti saat startup / reload).
    */
   public syncCleanBaseline(): void {
-    if (!this.dirtySinceCommit && !this.isCommittingWrite) {
+    if (this.mutationVersion === this.committedVersion && !this.isCommittingWrite) {
       this.lastCommittedJson = JSON.stringify(this.data);
     }
   }
 
   public hasUncommittedChanges(): boolean {
-    return this.dirtySinceCommit;
+    return this.mutationVersion > this.committedVersion;
   }
 
   public rollbackUncommittedChanges(): void {
-    if (this.dirtySinceCommit && this.lastCommittedJson) {
+    if (this.mutationVersion > this.committedVersion && this.lastCommittedJson) {
       try {
         this.data = JSON.parse(this.lastCommittedJson);
       } catch {
         // ignore parse fallback
       }
-      this.dirtySinceCommit = false;
+      this.mutationVersion = this.committedVersion;
     }
   }
 
   /**
    * Menyimpan seluruh perubahan yang dilakukan melalui `db.update()` ke MySQL secara sinkron & atomik.
-   * Jika query INSERT/UPDATE/DELETE ke MySQL gagal, state memori (`this.data`) dikembalikan ke state terakhir
-   * yang sudah ter-commit di MySQL, dan error dilempar agar API TIDAK PERNAH mengembalikan sukses palsu (fake 200 OK).
+   * Menggunakan penghitung versi monotonik (`mutationVersion` vs `committedVersion`) agar dua request
+   * paralel tidak pernah saling menghapus flag dirty atau mengembalikan 200 OK sebelum versinya ter-commit di MySQL.
    */
   public async commitPendingWrites(contextLabel = 'write'): Promise<void> {
     if (!this.isStrictMysqlRequired()) {
-      if (this.dirtySinceCommit) {
+      if (this.mutationVersion > this.committedVersion) {
         this.persistLocalJsonOnly(this.data);
         this.lastCommittedJson = JSON.stringify(this.data);
-        this.dirtySinceCommit = false;
+        this.committedVersion = this.mutationVersion;
       }
       return;
     }
@@ -889,12 +910,13 @@ class Database {
       });
     }
 
-    if (!this.dirtySinceCommit) {
+    const requiredVersion = this.mutationVersion;
+    if (requiredVersion <= this.committedVersion) {
       return;
     }
 
     await this.enqueueWriteTask(async () => {
-      if (!this.dirtySinceCommit) {
+      if (this.committedVersion >= requiredVersion && this.mutationVersion <= this.committedVersion) {
         return;
       }
       this.isCommittingWrite = true;
@@ -904,18 +926,21 @@ class Database {
           throw new Error('MySQL connection pool is unavailable during commit.');
         }
 
-        const prevData: DatabaseSchema = this.lastCommittedJson
-          ? JSON.parse(this.lastCommittedJson)
-          : createEmptyDatabaseState();
-        const nextSnapshotJson = JSON.stringify(this.data);
-        const nextData: DatabaseSchema = JSON.parse(nextSnapshotJson);
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVersion = this.mutationVersion;
+          const prevData: DatabaseSchema = this.lastCommittedJson
+            ? JSON.parse(this.lastCommittedJson)
+            : createEmptyDatabaseState();
+          const nextSnapshotJson = JSON.stringify(this.data);
+          const nextData: DatabaseSchema = JSON.parse(nextSnapshotJson);
 
-        await saveDiffToMysql(pool, prevData, nextData, contextLabel);
+          await saveDiffToMysql(pool, prevData, nextData, contextLabel);
 
-        this.lastCommittedJson = nextSnapshotJson;
-        this.dirtySinceCommit = false;
-        this.lastFullMysqlSyncAt = Date.now();
-        this.lastUsersRefreshAt = Date.now();
+          this.lastCommittedJson = nextSnapshotJson;
+          this.committedVersion = targetVersion;
+          this.lastFullMysqlSyncAt = Date.now();
+          this.lastUsersRefreshAt = Date.now();
+        }
       } catch (err) {
         this.lastMysqlErrorSummary = sanitizeDbError(err);
         if (this.lastCommittedJson) {
@@ -925,7 +950,7 @@ class Database {
             // ignore
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       } finally {
         this.isCommittingWrite = false;
@@ -989,12 +1014,12 @@ class Database {
 
         this.persistLocalJsonOnly(this.data);
         this.lastCommittedJson = JSON.stringify(this.data);
-        this.dirtySinceCommit = false;
+        this.committedVersion = this.mutationVersion;
         console.log(`[IMPORT] COMMIT SUCCESS (programId=${batchParams.programId}, mode=preview-local)`);
         return this.data;
       } catch (err) {
         this.data = JSON.parse(backupJson);
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       }
     }
@@ -1016,6 +1041,18 @@ class Database {
           throw new Error('MySQL connection pool is unavailable during hierarchy import.');
         }
 
+        // Pastikan seluruh mutasi memori sebelumnya telah ter-commit sebelum import
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVer = this.mutationVersion;
+          const prevData: DatabaseSchema = this.lastCommittedJson
+            ? JSON.parse(this.lastCommittedJson)
+            : createEmptyDatabaseState();
+          const snapJson = JSON.stringify(this.data);
+          await saveDiffToMysql(pool, prevData, JSON.parse(snapJson), `${contextLabel}:pre-flush`);
+          this.lastCommittedJson = snapJson;
+          this.committedVersion = targetVer;
+        }
+
         await importProgramHierarchyToMysql(pool, batchParams);
 
         // Setelah COMMIT sukses di MySQL, muat ulang data otoritatif langsung dari MySQL (SELECT)
@@ -1023,7 +1060,7 @@ class Database {
         if (freshFromMysql) {
           this.data = normalizeSchema(freshFromMysql, { isFromMysql: true });
           this.lastCommittedJson = JSON.stringify(this.data);
-          this.dirtySinceCommit = false;
+          this.committedVersion = this.mutationVersion;
           this.lastFullMysqlSyncAt = Date.now();
           this.lastUsersRefreshAt = Date.now();
         }
@@ -1037,7 +1074,7 @@ class Database {
             // ignore
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       } finally {
         this.isCommittingWrite = false;
@@ -1054,7 +1091,7 @@ class Database {
     if (
       !isMysqlConfigured() ||
       this.mysqlStatus !== 'ready' ||
-      this.dirtySinceCommit ||
+      this.hasUncommittedChanges() ||
       this.isCommittingWrite
     ) {
       return false;
@@ -1063,11 +1100,17 @@ class Database {
     if (now - this.lastFullMysqlSyncAt < maxAgeMs) {
       return false;
     }
+    const versionBeforeFetch = this.mutationVersion;
     try {
       const pool = await getMysqlPool();
       if (!pool) return false;
       const fresh = await loadDatabaseFromMysql(pool);
-      if (fresh && !this.dirtySinceCommit && !this.isCommittingWrite) {
+      if (
+        fresh &&
+        !this.hasUncommittedChanges() &&
+        !this.isCommittingWrite &&
+        this.mutationVersion === versionBeforeFetch
+      ) {
         this.data = normalizeSchema(fresh, { isFromMysql: true });
         this.lastCommittedJson = JSON.stringify(this.data);
         this.lastFullMysqlSyncAt = Date.now();
@@ -1088,7 +1131,7 @@ class Database {
     if (
       !isMysqlConfigured() ||
       this.mysqlStatus !== 'ready' ||
-      this.dirtySinceCommit ||
+      this.hasUncommittedChanges() ||
       this.isCommittingWrite
     ) {
       return this.data.users || [];
@@ -1097,6 +1140,7 @@ class Database {
     if (!force && now - this.lastUsersRefreshAt < 2_000 && this.data.users.length > 0) {
       return this.data.users;
     }
+    const versionBeforeFetch = this.mutationVersion;
     try {
       const pool = await getMysqlPool();
       if (!pool) return this.data.users || [];
@@ -1104,8 +1148,9 @@ class Database {
       if (
         Array.isArray(freshUsers) &&
         freshUsers.length > 0 &&
-        !this.dirtySinceCommit &&
-        !this.isCommittingWrite
+        !this.hasUncommittedChanges() &&
+        !this.isCommittingWrite &&
+        this.mutationVersion === versionBeforeFetch
       ) {
         this.data.users = freshUsers as User[];
         this.lastUsersRefreshAt = now;
@@ -1132,7 +1177,7 @@ class Database {
     }
 
     try {
-      if (this.dirtySinceCommit) {
+      if (this.hasUncommittedChanges()) {
         await this.commitPendingWrites(label);
       } else if (isMysqlConfigured() && this.mysqlStatus === 'ready' && user?.id) {
         await this.enqueueWriteTask(async () => {
@@ -1140,7 +1185,9 @@ class Database {
           if (!pool) throw new Error('MySQL connection pool is unavailable.');
           await upsertMysqlUserRow(pool, user);
           this.lastUsersRefreshAt = Date.now();
-          this.lastCommittedJson = JSON.stringify(this.data);
+          if (!this.hasUncommittedChanges()) {
+            this.lastCommittedJson = JSON.stringify(this.data);
+          }
         });
       }
     } catch (err) {
@@ -1179,7 +1226,8 @@ class Database {
 
         await deleteMysqlUserRow(pool, userId);
 
-        if (this.dirtySinceCommit) {
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVersion = this.mutationVersion;
           const prevData: DatabaseSchema = this.lastCommittedJson
             ? JSON.parse(this.lastCommittedJson)
             : createEmptyDatabaseState();
@@ -1187,10 +1235,9 @@ class Database {
           const nextData: DatabaseSchema = JSON.parse(nextSnapshotJson);
           await saveDiffToMysql(pool, prevData, nextData, label);
           this.lastCommittedJson = nextSnapshotJson;
-          this.dirtySinceCommit = false;
-        } else {
-          this.lastCommittedJson = JSON.stringify(this.data);
+          this.committedVersion = targetVersion;
         }
+        this.lastCommittedJson = JSON.stringify(this.data);
 
         this.lastUsersRefreshAt = Date.now();
         this.lastFullMysqlSyncAt = Date.now();
@@ -1203,7 +1250,7 @@ class Database {
             // ignore
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, label);
       } finally {
         this.isCommittingWrite = false;
@@ -1308,9 +1355,18 @@ class Database {
               missingFlags.cleanResetPrj3581V2 = true;
             }
 
+            if (!existingFromMysql.users || existingFromMysql.users.length === 0) {
+              const seededUsers = cloneInitialUsers();
+              for (const u of seededUsers) {
+                await upsertMysqlUserRow(pool, u);
+              }
+              existingFromMysql.users = seededUsers;
+              existingFromMysql.currentUserId = 'user-director';
+            }
+
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
             this.lastCommittedJson = JSON.stringify(this.data);
-            this.dirtySinceCommit = false;
+            this.committedVersion = this.mutationVersion;
             this.mysqlStatus = 'ready';
             this.lastMysqlErrorSummary = '';
             this.failedMysqlCycles = 0;
@@ -1339,7 +1395,7 @@ class Database {
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
           this.lastCommittedJson = JSON.stringify(this.data);
-          this.dirtySinceCommit = false;
+          this.committedVersion = this.mutationVersion;
           this.mysqlStatus = 'ready';
           this.lastMysqlErrorSummary = '';
           this.failedMysqlCycles = 0;
@@ -1363,7 +1419,7 @@ class Database {
       // Proteksi mutlak: JANGAN memuat data/db.json atau dummy seed apabila MySQL gagal terhubung!
       this.data = createEmptyDatabaseState();
       this.lastCommittedJson = JSON.stringify(this.data);
-      this.dirtySinceCommit = false;
+      this.committedVersion = this.mutationVersion;
       console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
@@ -1379,7 +1435,7 @@ class Database {
       updater(this.data);
       this.persistLocalJsonOnly(this.data);
       this.lastCommittedJson = JSON.stringify(this.data);
-      this.dirtySinceCommit = false;
+      this.committedVersion = this.mutationVersion;
       return this.data;
     }
 
@@ -1396,7 +1452,7 @@ class Database {
     }
 
     updater(this.data);
-    this.dirtySinceCommit = true;
+    this.mutationVersion += 1;
     return this.data;
   }
 
@@ -1408,7 +1464,7 @@ class Database {
     this.persistExplicitBackup(this.data);
     this.persistLocalJsonOnly(this.data);
     this.lastCommittedJson = JSON.stringify(this.data);
-    this.dirtySinceCommit = false;
+    this.committedVersion = this.mutationVersion;
     return this.data;
   }
 }

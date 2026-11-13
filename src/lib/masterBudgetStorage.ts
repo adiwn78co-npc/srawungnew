@@ -1,7 +1,9 @@
+import { api } from './api.js';
+
 /**
- * Storage dan Pengelolaan Master Kode Budget Organisasi WIJNA
- * Dikelola secara manual oleh Finance di Dashboard Keuangan.
- * Terhubung langsung dengan formulir Cash Advance (Kasbon Operasional).
+ * Pengelolaan Master Kode Budget Organisasi WIJNA
+ * Tersimpan secara permanen di database server (MySQL) melalui /api/finance-workspace/budgets.
+ * Bebas ketergantungan localStorage agar data konsisten lintas sesi & perangkat.
  */
 
 export interface MasterBudgetItem {
@@ -28,35 +30,70 @@ export interface MasterBudgetItem {
 
 export const DEFAULT_MASTER_BUDGET_ITEMS: MasterBudgetItem[] = [];
 
-const STORAGE_KEY = 'wijna_master_budget_items_v3';
+export const MASTER_BUDGET_ITEMS_SERVER_KEY = '__MASTER_BUDGET_ITEMS__';
+
+let masterBudgetMemoryCache: MasterBudgetItem[] = [];
+let serverBudgetMapRef: Record<string, any> | null = null;
 
 export function getMasterBudgetList(): MasterBudgetItem[] {
-  if (typeof window === 'undefined') return DEFAULT_MASTER_BUDGET_ITEMS;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_MASTER_BUDGET_ITEMS));
-      return DEFAULT_MASTER_BUDGET_ITEMS;
+  return [...masterBudgetMemoryCache];
+}
+
+export function hydrateMasterBudgetListFromServerPayload(rawPayload: any): MasterBudgetItem[] {
+  if (!rawPayload) {
+    return masterBudgetMemoryCache;
+  }
+  const items = Array.isArray(rawPayload)
+    ? rawPayload
+    : Array.isArray(rawPayload?.items)
+    ? rawPayload.items
+    : null;
+  if (items) {
+    masterBudgetMemoryCache = items;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('master-budget-updated', { detail: masterBudgetMemoryCache })
+      );
     }
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed;
-    }
-    return DEFAULT_MASTER_BUDGET_ITEMS;
-  } catch (e) {
-    console.error('Failed to parse master budget items from storage:', e);
-    return DEFAULT_MASTER_BUDGET_ITEMS;
+  }
+  return masterBudgetMemoryCache;
+}
+
+export function saveMasterBudgetList(
+  items: MasterBudgetItem[],
+  persistToServer: boolean = true
+): void {
+  masterBudgetMemoryCache = Array.isArray(items) ? [...items] : [];
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('master-budget-updated', { detail: masterBudgetMemoryCache })
+    );
+  }
+  if (persistToServer) {
+    api
+      .saveFinanceProgramBudget(MASTER_BUDGET_ITEMS_SERVER_KEY, {
+        id: MASTER_BUDGET_ITEMS_SERVER_KEY,
+        items: masterBudgetMemoryCache,
+        updatedAt: new Date().toISOString(),
+      })
+      .catch((err) => {
+        console.warn('Could not persist master budget items to MySQL server:', err);
+      });
   }
 }
 
-export function saveMasterBudgetList(items: MasterBudgetItem[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    window.dispatchEvent(new CustomEvent('master-budget-updated', { detail: items }));
-  } catch (e) {
-    console.error('Failed to save master budget items to storage:', e);
-  }
+export async function saveMasterBudgetListAsync(
+  items: MasterBudgetItem[]
+): Promise<MasterBudgetItem[]> {
+  const normalized = Array.isArray(items) ? [...items] : [];
+  const saved = await api.saveFinanceProgramBudget(MASTER_BUDGET_ITEMS_SERVER_KEY, {
+    id: MASTER_BUDGET_ITEMS_SERVER_KEY,
+    items: normalized,
+    updatedAt: new Date().toISOString(),
+  });
+  const finalItems = Array.isArray(saved?.items) ? saved.items : normalized;
+  saveMasterBudgetList(finalItems, false);
+  return finalItems;
 }
 
 export function addMasterBudgetItem(
@@ -70,7 +107,7 @@ export function addMasterBudgetItem(
     changeHistoryCount: 1,
   };
   const updated = [newItem, ...current];
-  saveMasterBudgetList(updated);
+  saveMasterBudgetList(updated, true);
   return newItem;
 }
 
@@ -89,14 +126,14 @@ export function updateMasterBudgetItem(
     changeHistoryCount: (current[idx].changeHistoryCount || 0) + 1,
   };
   current[idx] = updatedItem;
-  saveMasterBudgetList(current);
+  saveMasterBudgetList(current, true);
   return updatedItem;
 }
 
 export function deleteMasterBudgetItem(id: string): void {
   const current = getMasterBudgetList();
   const filtered = current.filter((b) => b.id !== id);
-  saveMasterBudgetList(filtered);
+  saveMasterBudgetList(filtered, true);
 }
 
 export interface ResolvedMasterBudgetInfo {
@@ -109,15 +146,16 @@ export interface ResolvedMasterBudgetInfo {
   formattedMasterLabel: string;
 }
 
-let serverBudgetMapRef: Record<string, any> | null = null;
-
-export function syncMasterBudgetLookupWithServerMap(datasets: Record<string, any> | null | undefined): void {
+export function syncMasterBudgetLookupWithServerMap(
+  datasets: Record<string, any> | null | undefined
+): void {
   if (datasets && typeof datasets === 'object') {
     serverBudgetMapRef = datasets;
+    if (datasets[MASTER_BUDGET_ITEMS_SERVER_KEY]) {
+      hydrateMasterBudgetListFromServerPayload(datasets[MASTER_BUDGET_ITEMS_SERVER_KEY]);
+    }
   }
 }
-
-const PROGRAM_BUDGET_STORAGE_KEY = 'wijna_finance_program_budgets_v3';
 
 function findProgramBudgetCategoryByCode(
   cleanCode: string,
@@ -126,16 +164,7 @@ function findProgramBudgetCategoryByCode(
 ): { code: string; budgetCategory: string; programName?: string } | null {
   if (!cleanCode || cleanCode === '-') return null;
   try {
-    let all: Record<string, any> | null = serverBudgetMapRef;
-    if (!all && typeof window !== 'undefined') {
-      const raw = localStorage.getItem(PROGRAM_BUDGET_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          all = parsed;
-        }
-      }
-    }
+    const all: Record<string, any> | null = serverBudgetMapRef;
     if (!all || typeof all !== 'object') return null;
 
     const normCode = cleanCode.trim().toLowerCase();
@@ -259,5 +288,3 @@ export function resolveMasterBudgetByCode(
     formattedMasterLabel: `${fallbackName} — ${derivedParent}: ${fallbackOutcome}`,
   };
 }
-
-

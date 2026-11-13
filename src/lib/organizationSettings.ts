@@ -9,7 +9,6 @@ export interface OrganizationSettings {
   updatedByName?: string;
 }
 
-const STORAGE_KEY = 'wijna_organization_settings_v1';
 const EVENT_NAME = 'wijna-org-settings-updated';
 
 export const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
@@ -18,38 +17,17 @@ export const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
   sidebarSubtitle: 'HR & Program System',
 };
 
+let organizationSettingsMemoryCache: OrganizationSettings = {
+  ...DEFAULT_ORGANIZATION_SETTINGS,
+};
+
 export function getOrganizationSettings(): OrganizationSettings {
-  if (typeof window === 'undefined') {
-    return DEFAULT_ORGANIZATION_SETTINGS;
-  }
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_ORGANIZATION_SETTINGS;
-    const parsed = JSON.parse(raw);
-    return {
-      organizationName:
-        typeof parsed.organizationName === 'string' && parsed.organizationName.trim()
-          ? parsed.organizationName.trim()
-          : DEFAULT_ORGANIZATION_SETTINGS.organizationName,
-      sidebarBrandName:
-        typeof parsed.sidebarBrandName === 'string' && parsed.sidebarBrandName.trim()
-          ? parsed.sidebarBrandName.trim()
-          : typeof parsed.organizationName === 'string' && parsed.organizationName.trim()
-          ? parsed.organizationName.trim()
-          : DEFAULT_ORGANIZATION_SETTINGS.sidebarBrandName,
-      sidebarSubtitle:
-        typeof parsed.sidebarSubtitle === 'string' && parsed.sidebarSubtitle.trim()
-          ? parsed.sidebarSubtitle.trim()
-          : DEFAULT_ORGANIZATION_SETTINGS.sidebarSubtitle,
-      updatedAt: parsed.updatedAt,
-      updatedByName: parsed.updatedByName,
-    };
-  } catch {
-    return DEFAULT_ORGANIZATION_SETTINGS;
-  }
+  return { ...organizationSettingsMemoryCache };
 }
 
-export function setLocalOrganizationSettings(next: Partial<OrganizationSettings>): OrganizationSettings {
+export function setLocalOrganizationSettings(
+  next: Partial<OrganizationSettings>
+): OrganizationSettings {
   const current = getOrganizationSettings();
   const merged: OrganizationSettings = {
     ...current,
@@ -69,13 +47,9 @@ export function setLocalOrganizationSettings(next: Partial<OrganizationSettings>
         ? next.sidebarSubtitle.trim()
         : current.sidebarSubtitle,
   };
+  organizationSettingsMemoryCache = merged;
   if (typeof window !== 'undefined') {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-      window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: merged }));
-    } catch {
-      // ignore storage errors
-    }
+    window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: merged }));
   }
   return merged;
 }
@@ -98,7 +72,7 @@ export async function hydrateOrganizationSettingsFromServer(): Promise<Organizat
       }
     }
   } catch {
-    // fallback to local settings
+    // fallback to current memory settings if network fails transiently
   }
   return getOrganizationSettings();
 }

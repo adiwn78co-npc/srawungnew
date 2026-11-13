@@ -241,6 +241,7 @@ export function isMysqlLoopbackInCloudRun(): boolean {
 export async function resetMysqlPool(): Promise<void> {
   const existing = cachedPool;
   cachedPool = null;
+  schemaVerifiedOnceForPool = false;
   tableColumnsCache.clear();
   if (existing) {
     try {
@@ -327,10 +328,72 @@ export async function verifyAndGetMysqlPool(): Promise<MysqlPoolLike> {
   }
 }
 
+const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
+  table: string;
+  column: string;
+  definition: string;
+}> = [
+  { table: 'users', column: 'must_change_password', definition: 'TINYINT(1) NOT NULL DEFAULT 0' },
+  { table: 'users', column: 'password_updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'users', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'programs', column: 'location', definition: 'VARCHAR(255) NULL' },
+  { table: 'programs', column: 'folder_url', definition: 'TEXT NULL' },
+  { table: 'programs', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'programs', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'programs', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outcomes', column: 'outcome_number', definition: 'VARCHAR(64) NULL' },
+  { table: 'outcomes', column: 'title', definition: 'TEXT NULL' },
+  { table: 'outcomes', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'outcomes', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'outcomes', column: 'status', definition: 'VARCHAR(64) NULL' },
+  { table: 'outcomes', column: 'indicators_json', definition: 'LONGTEXT NULL' },
+  { table: 'outcomes', column: 'created_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outcomes', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outputs', column: 'output_number', definition: 'VARCHAR(64) NULL' },
+  { table: 'outputs', column: 'title', definition: 'TEXT NULL' },
+  { table: 'outputs', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'outputs', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'outputs', column: 'status', definition: 'VARCHAR(64) NULL' },
+  { table: 'outputs', column: 'indicators_json', definition: 'LONGTEXT NULL' },
+  { table: 'outputs', column: 'created_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outputs', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'activities', column: 'activity_number', definition: 'VARCHAR(64) NULL' },
+  { table: 'activities', column: 'title', definition: 'TEXT NULL' },
+  { table: 'activities', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'activities', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'activities', column: 'start_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'activities', column: 'end_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'activities', column: 'status', definition: 'VARCHAR(64) NULL' },
+  { table: 'activities', column: 'created_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'activities', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'sub_activities', column: 'program_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'sub_activities', column: 'outcome_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'sub_activities', column: 'output_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'sub_activities', column: 'title', definition: 'TEXT NULL' },
+  { table: 'sub_activities', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'sub_activities', column: 'start_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'sub_activities', column: 'end_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'sub_activities', column: 'status', definition: 'VARCHAR(64) NULL' },
+  { table: 'sub_activities', column: 'created_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'sub_activities', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'tors', column: 'sub_activity_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'tors', column: 'activity_status', definition: 'VARCHAR(64) NULL' },
+  { table: 'tors', column: 'budget_approved', definition: 'DECIMAL(18, 2) NULL' },
+  { table: 'meeting_minutes', column: 'document_number', definition: 'VARCHAR(128) NULL' },
+  { table: 'meeting_minutes', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'participants', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+];
+
+let schemaVerifiedOnceForPool = false;
+
 /**
  * Menjalankan DDL pembuatan tabel MySQL dari database/schema.sql secara non-destructive (CREATE TABLE IF NOT EXISTS)
+ * serta menambahkan kolom-kolom baru yang belum tersedia pada tabel lama secara aman (ALTER TABLE ADD COLUMN).
  */
 export async function ensureMysqlSchema(pool: MysqlPoolLike): Promise<void> {
+  if (schemaVerifiedOnceForPool && cachedPool === pool) {
+    return;
+  }
   const candidatePaths = [
     path.resolve(process.cwd(), 'database', 'schema.sql'),
     path.resolve(__poolDir, 'database', 'schema.sql'),
@@ -354,6 +417,34 @@ export async function ensureMysqlSchema(pool: MysqlPoolLike): Promise<void> {
     }
     await pool.query(stmt);
   }
+
+  // Non-destructive column sync untuk instalasi tabel versi sebelumnya
+  const existingColsByTable = new Map<string, Set<string>>();
+  for (const item of EXPECTED_TABLE_COLUMN_ADDITIONS) {
+    try {
+      let colSet = existingColsByTable.get(item.table);
+      if (!colSet) {
+        const [cols]: any = await pool.query(`SHOW COLUMNS FROM \`${item.table}\``);
+        colSet = new Set(
+          (Array.isArray(cols) ? cols : []).map((c: any) =>
+            String(c.Field || c.field || '').toLowerCase()
+          )
+        );
+        existingColsByTable.set(item.table, colSet);
+      }
+      if (!colSet.has(item.column.toLowerCase())) {
+        await pool.query(
+          `ALTER TABLE \`${item.table}\` ADD COLUMN \`${item.column}\` ${item.definition}`
+        );
+        colSet.add(item.column.toLowerCase());
+        tableColumnsCache.delete(item.table);
+      }
+    } catch {
+      // Abaikan secara aman jika user DB tidak memiliki hak ALTER; executeAdaptiveUpsert tetap menangani kolom yang ada
+    }
+  }
+
+  schemaVerifiedOnceForPool = true;
 }
 
 function truncStr(val: any, maxLen: number): string | null {
@@ -598,7 +689,14 @@ export async function loadDatabaseFromMysql(
   const torRows = await safeSelectTableRows(pool, 'tors');
   const approvalRows = await safeSelectTableRows(pool, 'approval_records');
   const caRows = await safeSelectTableRows(pool, 'cash_advances');
+  const caSummaryRows = await safeSelectTableRows(pool, 'cash_advance_summaries');
   const minutesRows = await safeSelectTableRows(pool, 'meeting_minutes');
+  const activityDocRows = await safeSelectTableRows(pool, 'activity_documentations');
+  const outputRaciRows = await safeSelectTableRows(pool, 'output_raci_records');
+  const activityMonRows = await safeSelectTableRows(pool, 'activity_monitoring_records');
+  const monReportRows = await safeSelectTableRows(pool, 'monitoring_reports');
+  const apvHubRows = await safeSelectTableRows(pool, 'approval_hub_items');
+  const progBudgetRows = await safeSelectTableRows(pool, 'program_budgets');
   const participantRows = await safeSelectTableRows(pool, 'participants');
   const attendanceRows = await safeSelectTableRows(pool, 'attendance_records');
   const auditRows = await safeSelectTableRows(pool, 'audit_logs');
@@ -618,7 +716,14 @@ export async function loadDatabaseFromMysql(
     torRows.length +
     approvalRows.length +
     caRows.length +
+    caSummaryRows.length +
     minutesRows.length +
+    activityDocRows.length +
+    outputRaciRows.length +
+    activityMonRows.length +
+    monReportRows.length +
+    apvHubRows.length +
+    progBudgetRows.length +
     participantRows.length +
     attendanceRows.length +
     kvRows.length;
@@ -654,6 +759,10 @@ export async function loadDatabaseFromMysql(
     id: String(r?.id || raw.id || ''),
     code: r?.code || raw.code || '',
     name: r?.name || raw.name || '',
+    location: r?.location ?? raw.location ?? '',
+    folderUrl: r?.folder_url ?? raw.folderUrl ?? '',
+    picId: r?.pic_id || raw.picId || '',
+    picName: r?.pic_name || raw.picName || '',
     description: r?.description ?? raw.description ?? '',
     donor: r?.donor ?? raw.donor ?? '',
     startDate: r?.start_date || raw.startDate || '',
@@ -669,8 +778,9 @@ export async function loadDatabaseFromMysql(
         ? Number(r.total_budget)
         : Number(raw.totalBudget ?? 0),
     currency: r?.currency || raw.currency || 'IDR',
-    status: r?.status || raw.status || 'Active',
+    status: r?.status || raw.status || 'Aktif',
     createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || undefined,
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const stripInternalCodePrefix = (val: unknown): string => {
@@ -794,6 +904,8 @@ export async function loadDatabaseFromMysql(
       outcomeId: r?.outcome_id || raw.outcomeId || '',
       outputId: r?.output_id || raw.outputId || '',
       activityId: r?.activity_id || raw.activityId || '',
+      subActivityId: r?.sub_activity_id ?? raw.subActivityId ?? undefined,
+      subActivityName: raw.subActivityName ?? undefined,
       activityName: raw.activityName || r?.title || raw.title || '',
       picId: raw.picId || resolvedCreatedById,
       picName: raw.picName || resolvedCreatedByName,
@@ -801,7 +913,7 @@ export async function loadDatabaseFromMysql(
       createdByName: resolvedCreatedByName,
       status: r?.status || resolvedSubmissionStatus,
       submissionStatus: resolvedSubmissionStatus,
-      activityStatus: resolvedActivityStatus,
+      activityStatus: r?.activity_status || resolvedActivityStatus,
       background: typeof raw.background === 'string' ? raw.background : '',
       rationale: typeof raw.rationale === 'string' ? raw.rationale : '',
       generalObjective: typeof raw.generalObjective === 'string' ? raw.generalObjective : '',
@@ -837,11 +949,21 @@ export async function loadDatabaseFromMysql(
       budgetRequested:
         r?.budget_requested !== undefined && r?.budget_requested !== null
           ? Number(r.budget_requested)
-          : Number(raw.budgetRequested ?? 0),
+          : raw.budgetRequested !== undefined && raw.budgetRequested !== null
+          ? Number(raw.budgetRequested)
+          : null,
+      budgetApproved:
+        r?.budget_approved !== undefined && r?.budget_approved !== null
+          ? Number(r.budget_approved)
+          : raw.budgetApproved !== undefined && raw.budgetApproved !== null
+          ? Number(raw.budgetApproved)
+          : null,
       budgetActualSpent:
         r?.budget_actual_spent !== undefined && r?.budget_actual_spent !== null
           ? Number(r.budget_actual_spent)
-          : Number(raw.budgetActualSpent ?? 0),
+          : raw.budgetActualSpent !== undefined && raw.budgetActualSpent !== null
+          ? Number(raw.budgetActualSpent)
+          : null,
       startDate: r?.start_date || raw.startDate || '',
       endDate: r?.end_date || raw.endDate || '',
       location: r?.location || raw.location || '',
@@ -1049,6 +1171,188 @@ export async function loadDatabaseFromMysql(
     attendanceSystem.records = kvAttendanceRecords;
   }
 
+  // Hidrasi tabel operasional relasional tambahan dengan fallback aman ke system_kv_store (kompatibilitas 100%)
+  const cashAdvanceSummaries: Record<string, any> =
+    caSummaryRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = {};
+          for (const r of caSummaryRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const torKey = String(r?.tor_id || raw.torId || r?.id || '');
+            if (!torKey) continue;
+            map[torKey] = {
+              ...raw,
+              torId: torKey,
+              approvalStatus: r?.approval_status || raw.approvalStatus,
+              updatedAt: r?.updated_at || raw.updatedAt,
+            };
+          }
+          return map;
+        })()
+      : kvMap['cashAdvanceSummaries'] || {};
+
+  const activityDocumentationList: any[] =
+    activityDocRows.length > 0
+      ? parseAndHydrateRows<any>(activityDocRows, (r, raw) => ({
+          ...raw,
+          id: String(r?.id || raw.id || ''),
+          documentNumber: r?.document_number || raw.documentNumber || '',
+          torId: r?.tor_id || raw.torId || '',
+          programId: r?.program_id || raw.programId || '',
+          activityTitle: r?.activity_title || raw.activityTitle || '',
+          bestPhotosStoryTopic: r?.story_topic ?? raw.bestPhotosStoryTopic ?? '',
+          bestPhotos: Array.isArray(raw.bestPhotos) ? raw.bestPhotos : [],
+          humanInterestStories: Array.isArray(raw.humanInterestStories)
+            ? raw.humanInterestStories
+            : [],
+          generalPhotoLinks: Array.isArray(raw.generalPhotoLinks) ? raw.generalPhotoLinks : [],
+          updatedById: r?.updated_by_user_id || raw.updatedById || '',
+          createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+          updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+        }))
+      : Array.isArray(kvMap['activityDocumentationList'])
+      ? kvMap['activityDocumentationList']
+      : [];
+
+  const activityDocumentations: Record<string, any> = {
+    ...(kvMap['activityDocumentations'] || {}),
+  };
+  for (const doc of activityDocumentationList) {
+    if (doc && doc.torId) {
+      activityDocumentations[doc.torId] = doc;
+    }
+  }
+
+  const outputRaciRecords: Record<string, any> =
+    outputRaciRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = {};
+          for (const r of outputRaciRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const outKey = String(r?.output_id || raw.outputId || r?.id || '');
+            if (!outKey) continue;
+            map[outKey] = {
+              ...raw,
+              outputId: outKey,
+              outcomeId: r?.outcome_id || raw.outcomeId || '',
+              programId: r?.program_id || raw.programId || '',
+              responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || '',
+              accountableUserId: r?.accountable_user_id || raw.accountableUserId || '',
+              accountableFinanceUserId:
+                r?.accountable_finance_user_id || raw.accountableFinanceUserId || '',
+              status: r?.status || raw.status || 'Menunggu Persetujuan Direktur',
+              approvedById: r?.approved_by_user_id || raw.approvedById || undefined,
+              approvedAt: r?.approved_at || raw.approvedAt || undefined,
+              updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+            };
+          }
+          return map;
+        })()
+      : kvMap['outputRaciRecords'] || {};
+
+  const activityMonitoringRecords: Record<string, any> =
+    activityMonRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = {};
+          for (const r of activityMonRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const actKey = String(r?.activity_id || raw.activityId || r?.id || '');
+            if (!actKey) continue;
+            map[actKey] = {
+              ...raw,
+              activityId: actKey,
+              outputId: r?.output_id || raw.outputId || '',
+              outcomeId: r?.outcome_id || raw.outcomeId || '',
+              programId: r?.program_id || raw.programId || '',
+              tools: Array.isArray(raw.tools) ? raw.tools : [],
+              status: r?.status || raw.status || 'Belum Ada Monitoring',
+              updatedById: r?.updated_by_user_id || raw.updatedById || '',
+              updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+            };
+          }
+          return map;
+        })()
+      : kvMap['activityMonitoringRecords'] || {};
+
+  const monitoringReports: Record<string, any> =
+    monReportRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = {};
+          for (const r of monReportRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const repId = String(r?.id || raw.id || '');
+            if (!repId) continue;
+            map[repId] = {
+              ...raw,
+              id: repId,
+              torId: r?.tor_id || raw.torId || '',
+              programId: r?.program_id || raw.programId || '',
+              outcomeId: r?.outcome_id || raw.outcomeId || '',
+              outputId: r?.output_id || raw.outputId || '',
+              activityId: r?.activity_id || raw.activityId || '',
+              cashAdvanceId: r?.cash_advance_id || raw.cashAdvanceId || '',
+              toolId: r?.tool_id || raw.toolId || '',
+              toolName: r?.tool_name || raw.toolName || '',
+              responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || '',
+              status: r?.status || raw.status || 'Planned',
+              monitoringDate: r?.monitoring_date || raw.monitoringDate || '',
+              createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+              updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+            };
+          }
+          return map;
+        })()
+      : kvMap['monitoringReports'] || {};
+
+  const approvalHubItems: Record<string, any> =
+    apvHubRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = {};
+          for (const r of apvHubRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const itemId = String(r?.id || raw.id || '');
+            if (!itemId) continue;
+            map[itemId] = {
+              ...raw,
+              id: itemId,
+              categoryCode: r?.category_code || raw.categoryCode || 'tor',
+              sourceTorId: r?.source_tor_id || raw.sourceTorId || undefined,
+              sourceEntityId: r?.source_entity_id || raw.sourceEntityId || '',
+              programId: r?.program_id || raw.programId || undefined,
+              referenceNumber: r?.reference_number || raw.referenceNumber || '',
+              title: r?.title || raw.title || '',
+              status: r?.status || raw.status || 'Draft',
+              responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || '',
+              updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+            };
+          }
+          return map;
+        })()
+      : kvMap['approvalHubItems'] || {};
+
+  const programBudgets: Record<string, any> =
+    progBudgetRows.length > 0
+      ? (() => {
+          const map: Record<string, any> = { ...(kvMap['programBudgets'] || {}) };
+          for (const r of progBudgetRows) {
+            const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
+            const key = String(r?.id || raw.id || '');
+            if (!key) continue;
+            map[key] = {
+              ...raw,
+              id: key,
+              ...(r?.program_id ? { programId: r.program_id } : {}),
+              ...(r?.program_name ? { programName: r.program_name } : {}),
+              ...(r?.fiscal_year !== null && r?.fiscal_year !== undefined
+                ? { fiscalYear: Number(r.fiscal_year) }
+                : {}),
+              updatedAt: r?.updated_at || raw.updatedAt,
+            };
+          }
+          return map;
+        })()
+      : kvMap['programBudgets'] || {};
+
   return {
     users: users as any,
     currentUserId: kvMap['currentUserId'] || users[0]?.id || 'user-director',
@@ -1061,18 +1365,18 @@ export async function loadDatabaseFromMysql(
     approvalRecords,
     auditLogs,
     cashAdvances,
-    cashAdvanceSummaries: kvMap['cashAdvanceSummaries'] || {},
+    cashAdvanceSummaries,
     cashAdvanceAuditLogs: kvMap['cashAdvanceAuditLogs'] || {},
     meetingMinutes,
-    activityDocumentations: kvMap['activityDocumentations'] || {},
-    activityDocumentationList: kvMap['activityDocumentationList'] || [],
-    outputRaciRecords: kvMap['outputRaciRecords'] || {},
-    activityMonitoringRecords: kvMap['activityMonitoringRecords'] || {},
-    monitoringReports: kvMap['monitoringReports'] || {},
-    approvalHubItems: kvMap['approvalHubItems'] || {},
+    activityDocumentations,
+    activityDocumentationList,
+    outputRaciRecords,
+    activityMonitoringRecords,
+    monitoringReports,
+    approvalHubItems,
     approvalWorkflowConfigs: kvMap['approvalWorkflowConfigs'] || {},
     approvalNotifications: kvMap['approvalNotifications'] || [],
-    programBudgets: kvMap['programBudgets'] || {},
+    programBudgets,
     participantDatabase,
     attendanceSystem,
     organizationSettings: kvMap['organizationSettings'] || undefined,
@@ -1511,6 +1815,45 @@ async function executeAdaptiveUpsert(
   return Number(result?.affectedRows || 0);
 }
 
+interface RelationValidationSets {
+  userIds?: Set<string>;
+  programIds?: Set<string>;
+  outcomeIds?: Set<string>;
+  outputIds?: Set<string>;
+  activityIds?: Set<string>;
+  subActivityIds?: Set<string>;
+  torIds?: Set<string>;
+  cashAdvanceIds?: Set<string>;
+}
+
+function buildRelationSetsFromData(d: DatabaseSchema): RelationValidationSets {
+  return {
+    userIds: new Set((d.users || []).filter((x) => x?.id).map((x) => String(x.id))),
+    programIds: new Set((d.programs || []).filter((x) => x?.id).map((x) => String(x.id))),
+    outcomeIds: new Set((d.outcomes || []).filter((x) => x?.id).map((x) => String(x.id))),
+    outputIds: new Set((d.outputs || []).filter((x) => x?.id).map((x) => String(x.id))),
+    activityIds: new Set((d.activities || []).filter((x) => x?.id).map((x) => String(x.id))),
+    subActivityIds: new Set(
+      (d.subActivities || []).filter((x) => x?.id).map((x) => String(x.id))
+    ),
+    torIds: new Set((d.tors || []).filter((x) => x?.id).map((x) => String(x.id))),
+    cashAdvanceIds: new Set((d.cashAdvances || []).filter((x) => x?.id).map((x) => String(x.id))),
+  };
+}
+
+function validFkOrNull(
+  rawVal: any,
+  validSet: Set<string> | undefined,
+  maxLen = 128
+): string | null {
+  const s = truncStr(rawVal, maxLen);
+  if (!s) return null;
+  if (validSet && !validSet.has(s)) {
+    return null;
+  }
+  return s;
+}
+
 function buildUserCandidateRow(u: any, nowIso: string): Record<string, any> {
   const effectiveHash =
     (typeof u.passwordHash === 'string' && u.passwordHash.trim()) ||
@@ -1542,12 +1885,19 @@ function buildUserCandidateRow(u: any, nowIso: string): Record<string, any> {
   };
 }
 
-function buildProgramCandidateRow(p: any, nowIso: string): Record<string, any> {
+function buildProgramCandidateRow(
+  p: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   return {
     id: String(p.id).slice(0, 128),
     code: truncStr(p.code, 64),
     name: truncStr(p.name, 255) || '',
     location: truncStr(p.location, 255),
+    folder_url: p.folderUrl || null,
+    pic_id: validFkOrNull(p.picId, rels?.userIds, 128),
+    pic_name: truncStr(p.picName, 255),
     description: p.description || null,
     donor: truncStr(p.donor, 255),
     start_date: truncStr(p.startDate, 32),
@@ -1561,7 +1911,11 @@ function buildProgramCandidateRow(p: any, nowIso: string): Record<string, any> {
   };
 }
 
-function buildOutcomeCandidateRow(oc: any, nowIso?: string): Record<string, any> {
+function buildOutcomeCandidateRow(
+  oc: any,
+  nowIso?: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   const ts = nowIso || new Date().toISOString();
   const effectiveName = truncStr(oc.name || oc.title, 500) || '';
   const indicatorsJson = JSON.stringify(Array.isArray(oc.indicators) ? oc.indicators : []);
@@ -1574,7 +1928,7 @@ function buildOutcomeCandidateRow(oc: any, nowIso?: string): Record<string, any>
     name: effectiveName,
     title: truncStr(oc.title || oc.name, 500) || effectiveName,
     description: oc.description || null,
-    pic_id: truncStr(oc.picId, 128),
+    pic_id: validFkOrNull(oc.picId, rels?.userIds, 128),
     pic_name: truncStr(oc.picName, 255),
     status: truncStr(oc.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
@@ -1586,21 +1940,25 @@ function buildOutcomeCandidateRow(oc: any, nowIso?: string): Record<string, any>
   };
 }
 
-function buildOutputCandidateRow(op: any, nowIso?: string): Record<string, any> {
+function buildOutputCandidateRow(
+  op: any,
+  nowIso?: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   const ts = nowIso || new Date().toISOString();
   const effectiveName = truncStr(op.name || op.title, 500) || '';
   const indicatorsJson = JSON.stringify(Array.isArray(op.indicators) ? op.indicators : []);
   const resolvedCode = truncStr(op.code || op.outputNumber || op.id, 64);
   return {
     id: String(op.id).slice(0, 128),
-    program_id: truncStr(op.programId, 128),
+    program_id: validFkOrNull(op.programId, rels?.programIds, 128),
     outcome_id: truncStr(op.outcomeId, 128),
     code: resolvedCode,
     output_number: truncStr(op.outputNumber || op.code || op.id, 64),
     name: effectiveName,
     title: truncStr(op.title || op.name, 500) || effectiveName,
     description: op.description || null,
-    pic_id: truncStr(op.picId, 128),
+    pic_id: validFkOrNull(op.picId, rels?.userIds, 128),
     pic_name: truncStr(op.picName, 255),
     status: truncStr(op.status || 'Belum Dimulai', 64),
     budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
@@ -1612,21 +1970,25 @@ function buildOutputCandidateRow(op: any, nowIso?: string): Record<string, any> 
   };
 }
 
-function buildActivityCandidateRow(ac: any, nowIso?: string): Record<string, any> {
+function buildActivityCandidateRow(
+  ac: any,
+  nowIso?: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   const ts = nowIso || new Date().toISOString();
   const effectiveName = truncStr(ac.name || ac.title, 500) || '';
   const resolvedCode = truncStr(ac.code || ac.activityNumber || ac.id, 64);
   return {
     id: String(ac.id).slice(0, 128),
-    program_id: truncStr(ac.programId, 128),
-    outcome_id: truncStr(ac.outcomeId, 128),
+    program_id: validFkOrNull(ac.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(ac.outcomeId, rels?.outcomeIds, 128),
     output_id: truncStr(ac.outputId, 128),
     code: resolvedCode,
     activity_number: truncStr(ac.activityNumber || ac.code || ac.id, 64),
     name: effectiveName,
     title: truncStr(ac.title || ac.name, 500) || effectiveName,
     description: ac.description || null,
-    pic_id: truncStr(ac.picId, 128),
+    pic_id: validFkOrNull(ac.picId, rels?.userIds, 128),
     pic_name: truncStr(ac.picName, 255),
     start_date: truncStr(ac.startDate, 32),
     end_date: truncStr(ac.endDate, 32),
@@ -1638,15 +2000,19 @@ function buildActivityCandidateRow(ac: any, nowIso?: string): Record<string, any
   };
 }
 
-function buildSubActivityCandidateRow(sa: any, nowIso?: string): Record<string, any> {
+function buildSubActivityCandidateRow(
+  sa: any,
+  nowIso?: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   const ts = nowIso || new Date().toISOString();
   const effectiveName = truncStr(sa.name, 500) || '';
   const resolvedCode = truncStr(sa.code || sa.id, 64);
   return {
     id: String(sa.id).slice(0, 128),
-    program_id: truncStr(sa.programId, 128),
-    outcome_id: truncStr(sa.outcomeId, 128),
-    output_id: truncStr(sa.outputId, 128),
+    program_id: validFkOrNull(sa.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(sa.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(sa.outputId, rels?.outputIds, 128),
     activity_id: truncStr(sa.activityId, 128),
     code: resolvedCode,
     name: effectiveName,
@@ -1663,20 +2029,31 @@ function buildSubActivityCandidateRow(sa: any, nowIso?: string): Record<string, 
   };
 }
 
-function buildTorCandidateRow(t: any, nowIso: string): Record<string, any> {
+function buildTorCandidateRow(
+  t: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   return {
     id: String(t.id).slice(0, 128),
     tor_number: truncStr(t.torNumber || t.documentNumber, 128),
     title: truncStr(t.title, 500) || '',
-    program_id: truncStr(t.programId, 128),
-    outcome_id: truncStr(t.outcomeId, 128),
-    output_id: truncStr(t.outputId, 128),
-    activity_id: truncStr(t.activityId, 128),
-    created_by_user_id: truncStr(t.createdByUserId || t.createdById || t.picId, 128),
+    program_id: validFkOrNull(t.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(t.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(t.outputId, rels?.outputIds, 128),
+    activity_id: validFkOrNull(t.activityId, rels?.activityIds, 128),
+    sub_activity_id: validFkOrNull(t.subActivityId, rels?.subActivityIds, 128),
+    created_by_user_id: validFkOrNull(
+      t.createdByUserId || t.createdById || t.picId,
+      rels?.userIds,
+      128
+    ),
     created_by_name: truncStr(t.createdByName || t.picName, 255),
     status: truncStr(t.submissionStatus || t.status || 'Draft', 128),
+    activity_status: truncStr(t.activityStatus || 'Belum Dimulai', 64),
     current_stage: safeFiniteNumber(t.currentWorkflowStage ?? t.currentStage, 1),
     budget_requested: safeFiniteNumber(t.budgetRequested, null),
+    budget_approved: safeFiniteNumber(t.budgetApproved, null),
     budget_actual_spent: safeFiniteNumber(t.budgetActualSpent, null),
     start_date: truncStr(t.startDate, 32),
     end_date: truncStr(t.endDate, 32),
@@ -1687,15 +2064,22 @@ function buildTorCandidateRow(t: any, nowIso: string): Record<string, any> {
   };
 }
 
-function buildApprovalRecordCandidateRow(ar: any, nowIso: string): Record<string, any> {
+function buildApprovalRecordCandidateRow(
+  ar: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   return {
     id: String(ar.id).slice(0, 128),
     tor_id: truncStr(ar.torId, 128) || '',
-    // Mendukung stage bertipe INT maupun VARCHAR tanpa pernah menghasilkan NaN
     stage: ar.stage ?? null,
-    approver_user_id: truncStr(ar.approverUserId || ar.approverId || ar.reviewerId, 128),
-    approver_name: truncStr(ar.approverName || ar.reviewerName, 255),
-    role: truncStr(ar.role || ar.reviewerRole, 128),
+    approver_user_id: validFkOrNull(
+      ar.approverUserId || ar.approverId || ar.actorId || ar.reviewerId,
+      rels?.userIds,
+      128
+    ),
+    approver_name: truncStr(ar.approverName || ar.actorName || ar.reviewerName, 255),
+    role: truncStr(ar.role || ar.actorRole || ar.reviewerRole, 128),
     action: truncStr(ar.action || ar.decision, 128),
     notes: ar.notes ?? ar.comment ?? null,
     timestamp: ar.timestamp || nowIso,
@@ -1703,14 +2087,22 @@ function buildApprovalRecordCandidateRow(ar: any, nowIso: string): Record<string
   };
 }
 
-function buildCashAdvanceCandidateRow(ca: any, nowIso: string): Record<string, any> {
+function buildCashAdvanceCandidateRow(
+  ca: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   return {
     id: String(ca.id).slice(0, 128),
     ca_number: truncStr(ca.advanceNumber || ca.caNumber || ca.documentNumber, 128),
-    tor_id: truncStr(ca.torId, 128),
-    program_id: truncStr(ca.programId, 128),
-    activity_id: truncStr(ca.activityId, 128),
-    requester_user_id: truncStr(ca.requesterUserId || ca.requesterId || ca.submittedByUserId, 128),
+    tor_id: validFkOrNull(ca.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(ca.programId, rels?.programIds, 128),
+    activity_id: validFkOrNull(ca.activityId, rels?.activityIds, 128),
+    requester_user_id: validFkOrNull(
+      ca.requesterUserId || ca.requesterId || ca.submittedByUserId,
+      rels?.userIds,
+      128
+    ),
     requester_name: truncStr(ca.requesterName || ca.submittedByName, 255),
     total_amount: safeFiniteNumber(ca.totalAmount ?? ca.requestedAmount, 0),
     realized_amount: safeFiniteNumber(ca.realizedAmount ?? ca.actualSpentAmount, null),
@@ -1722,18 +2114,172 @@ function buildCashAdvanceCandidateRow(ca: any, nowIso: string): Record<string, a
   };
 }
 
-function buildMeetingMinuteCandidateRow(mm: any, nowIso: string): Record<string, any> {
+function buildCashAdvanceSummaryCandidateRow(
+  sum: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  const torIdVal = String(sum.torId || sum.id || '').slice(0, 128);
+  const rows = Array.isArray(sum.summaryRows) ? sum.summaryRows : [];
+  const totalAdv = rows.reduce((s: number, r: any) => s + (Number(r?.approvedAdvance) || 0), 0);
+  const totalReal = rows.reduce((s: number, r: any) => s + (Number(r?.actualExpense) || 0), 0);
+  return {
+    id: torIdVal,
+    tor_id: validFkOrNull(torIdVal, rels?.torIds, 128) || torIdVal,
+    approval_status: truncStr(sum.summaryApprovalStatus || sum.approvalStatus, 128),
+    total_approved_advance: safeFiniteNumber(
+      sum.totalApprovedAdvance ?? sum.totalAdvance ?? totalAdv,
+      0
+    ),
+    total_realized_amount: safeFiniteNumber(
+      sum.totalRealizedAmount ?? sum.totalSpent ?? totalReal,
+      0
+    ),
+    updated_at: sum.updatedAt || nowIso,
+    raw_json: JSON.stringify(sum),
+  };
+}
+
+function buildMeetingMinuteCandidateRow(
+  mm: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
   return {
     id: String(mm.id).slice(0, 128),
-    tor_id: truncStr(mm.torId, 128),
-    activity_id: truncStr(mm.activityId, 128),
+    document_number: truncStr(mm.documentNumber, 128),
+    tor_id: validFkOrNull(mm.torId, rels?.torIds, 128),
+    activity_id: validFkOrNull(mm.activityId, rels?.activityIds, 128),
     title: truncStr(mm.title || mm.agenda, 500),
     meeting_date: truncStr(mm.meetingDate || mm.date, 32),
-    location: truncStr(mm.location, 255),
-    created_by_user_id: truncStr(mm.createdByUserId || mm.createdById, 128),
+    location: truncStr(mm.meetingLocation || mm.location, 255),
+    created_by_user_id: validFkOrNull(mm.createdByUserId || mm.createdById, rels?.userIds, 128),
     status: truncStr(mm.status, 64),
     created_at: mm.createdAt || nowIso,
+    updated_at: mm.updatedAt || nowIso,
     raw_json: JSON.stringify(mm),
+  };
+}
+
+function buildActivityDocumentationCandidateRow(
+  doc: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  return {
+    id: String(doc.id).slice(0, 128),
+    document_number: truncStr(doc.documentNumber, 128),
+    tor_id: validFkOrNull(doc.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(doc.programId, rels?.programIds, 128),
+    activity_title: truncStr(doc.activityTitle, 500),
+    story_topic: doc.bestPhotosStoryTopic || null,
+    updated_by_user_id: validFkOrNull(doc.updatedById, rels?.userIds, 128),
+    created_at: doc.createdAt || nowIso,
+    updated_at: doc.updatedAt || nowIso,
+    raw_json: JSON.stringify(doc),
+  };
+}
+
+function buildOutputRaciCandidateRow(
+  raci: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  const outId = String(raci.outputId || raci.id || '').slice(0, 128);
+  return {
+    id: outId,
+    output_id: outId,
+    outcome_id: validFkOrNull(raci.outcomeId, rels?.outcomeIds, 128),
+    program_id: validFkOrNull(raci.programId, rels?.programIds, 128),
+    responsible_user_id: validFkOrNull(raci.responsibleUserId, rels?.userIds, 128),
+    accountable_user_id: validFkOrNull(raci.accountableUserId, rels?.userIds, 128),
+    accountable_finance_user_id: validFkOrNull(raci.accountableFinanceUserId, rels?.userIds, 128),
+    status: truncStr(raci.status, 128),
+    approved_by_user_id: validFkOrNull(raci.approvedById, rels?.userIds, 128),
+    approved_at: raci.approvedAt || null,
+    updated_at: raci.updatedAt || nowIso,
+    raw_json: JSON.stringify(raci),
+  };
+}
+
+function buildActivityMonitoringCandidateRow(
+  mon: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  const actId = String(mon.activityId || mon.id || '').slice(0, 128);
+  return {
+    id: actId,
+    activity_id: actId,
+    output_id: validFkOrNull(mon.outputId, rels?.outputIds, 128),
+    outcome_id: validFkOrNull(mon.outcomeId, rels?.outcomeIds, 128),
+    program_id: validFkOrNull(mon.programId, rels?.programIds, 128),
+    status: truncStr(mon.status, 128),
+    updated_by_user_id: validFkOrNull(mon.updatedById, rels?.userIds, 128),
+    updated_at: mon.updatedAt || nowIso,
+    raw_json: JSON.stringify(mon),
+  };
+}
+
+function buildMonitoringReportCandidateRow(
+  rep: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  return {
+    id: String(rep.id).slice(0, 255),
+    tor_id: validFkOrNull(rep.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(rep.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(rep.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(rep.outputId, rels?.outputIds, 128),
+    activity_id: validFkOrNull(rep.activityId, rels?.activityIds, 128),
+    cash_advance_id: validFkOrNull(rep.cashAdvanceId, rels?.cashAdvanceIds, 128),
+    tool_id: truncStr(rep.toolId, 64),
+    tool_name: truncStr(rep.toolName, 255),
+    responsible_user_id: validFkOrNull(rep.responsibleUserId, rels?.userIds, 128),
+    status: truncStr(rep.status, 64),
+    monitoring_date: truncStr(rep.monitoringDate, 32),
+    created_at: rep.createdAt || nowIso,
+    updated_at: rep.updatedAt || nowIso,
+    raw_json: JSON.stringify(rep),
+  };
+}
+
+function buildApprovalHubItemCandidateRow(
+  item: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  return {
+    id: String(item.id).slice(0, 255),
+    category_code: truncStr(item.categoryCode || 'tor', 64) || 'tor',
+    source_tor_id: validFkOrNull(item.sourceTorId, rels?.torIds, 128),
+    source_entity_id: truncStr(item.sourceEntityId, 128),
+    program_id: validFkOrNull(item.programId, rels?.programIds, 128),
+    reference_number: truncStr(item.referenceNumber, 128),
+    title: truncStr(item.title, 500),
+    status: truncStr(item.status, 64),
+    responsible_user_id: validFkOrNull(item.responsibleUserId, rels?.userIds, 128),
+    updated_at: item.updatedAt || nowIso,
+    raw_json: JSON.stringify(item),
+  };
+}
+
+function buildProgramBudgetCandidateRow(
+  bgt: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  return {
+    id: String(bgt.id).slice(0, 191),
+    program_id: validFkOrNull(bgt.programId, rels?.programIds, 128),
+    program_name: truncStr(bgt.programName, 255),
+    fiscal_year: safeFiniteNumber(bgt.fiscalYear, null),
+    total_program_budget: safeFiniteNumber(bgt.totalProgramBudget, 0),
+    annual_approved_budget: safeFiniteNumber(bgt.annualApprovedBudget, 0),
+    updated_by: truncStr(bgt.updatedBy, 255),
+    updated_at: bgt.updatedAt || nowIso,
+    raw_json: JSON.stringify(bgt),
   };
 }
 
@@ -1747,6 +2293,7 @@ function buildParticipantCandidateRow(pt: any, nowIso: string): Record<string, a
     phone: truncStr(pt.phoneNumber || pt.contactPhone, 64),
     village_or_city: truncStr(pt.cityOrRegency || pt.villageOrSubdistrict, 255),
     created_at: pt.createdAt || nowIso,
+    updated_at: pt.updatedAt || nowIso,
     raw_json: JSON.stringify(pt),
   };
 }
@@ -1780,11 +2327,17 @@ function buildAttendanceRecordCandidateRow(att: any, nowIso: string): Record<str
   };
 }
 
-function buildAuditLogCandidateRow(al: any, nowIso: string): Record<string, any> {
+function buildAuditLogCandidateRow(
+  al: any,
+  nowIso: string,
+  rels?: RelationValidationSets
+): Record<string, any> {
+  const candidateTorId = al.torId || (al.entityType === 'TOR' ? al.entityId : null);
+  const candidateUserId = al.userId || al.actorId;
   return {
     id: String(al.id).slice(0, 128),
-    tor_id: truncStr(al.torId || (al.entityType === 'TOR' ? al.entityId : null), 128),
-    user_id: truncStr(al.userId || al.actorId, 128),
+    tor_id: validFkOrNull(candidateTorId, rels?.torIds, 128),
+    user_id: validFkOrNull(candidateUserId, rels?.userIds, 128),
     user_name: truncStr(al.userName || al.actorName, 255),
     user_role: truncStr(al.userRole || al.actorRole, 64),
     action: truncStr(al.action, 255) || '',
@@ -1870,7 +2423,11 @@ export async function deleteMysqlUserRow(pool: MysqlPoolLike, userId: string): P
 interface EntityTableSyncSpec {
   tableName: string;
   getRows: (d: DatabaseSchema) => any[];
-  buildCandidate: (item: any, nowIso: string) => Record<string, any>;
+  buildCandidate: (
+    item: any,
+    nowIso: string,
+    rels?: RelationValidationSets
+  ) => Record<string, any>;
   allowTargetedDelete: boolean;
   upsertOptions?: AdaptiveUpsertOptions;
 }
@@ -1879,7 +2436,7 @@ const ENTITY_TABLE_SPECS: EntityTableSyncSpec[] = [
   {
     tableName: 'users',
     getRows: (d) => d.users || [],
-    buildCandidate: buildUserCandidateRow,
+    buildCandidate: (u, nowIso) => buildUserCandidateRow(u, nowIso),
     allowTargetedDelete: false, // Penghapusan user hanya boleh melalui deleteMysqlUserRow eksplisit
     upsertOptions: {
       primaryKeyColumn: 'id',
@@ -1897,25 +2454,25 @@ const ENTITY_TABLE_SPECS: EntityTableSyncSpec[] = [
   {
     tableName: 'outcomes',
     getRows: (d) => d.outcomes || [],
-    buildCandidate: (oc, nowIso) => buildOutcomeCandidateRow(oc, nowIso),
+    buildCandidate: (oc, nowIso, rels) => buildOutcomeCandidateRow(oc, nowIso, rels),
     allowTargetedDelete: true,
   },
   {
     tableName: 'outputs',
     getRows: (d) => d.outputs || [],
-    buildCandidate: (op, nowIso) => buildOutputCandidateRow(op, nowIso),
+    buildCandidate: (op, nowIso, rels) => buildOutputCandidateRow(op, nowIso, rels),
     allowTargetedDelete: true,
   },
   {
     tableName: 'activities',
     getRows: (d) => d.activities || [],
-    buildCandidate: (ac, nowIso) => buildActivityCandidateRow(ac, nowIso),
+    buildCandidate: (ac, nowIso, rels) => buildActivityCandidateRow(ac, nowIso, rels),
     allowTargetedDelete: true,
   },
   {
     tableName: 'sub_activities',
     getRows: (d) => d.subActivities || [],
-    buildCandidate: (sa, nowIso) => buildSubActivityCandidateRow(sa, nowIso),
+    buildCandidate: (sa, nowIso, rels) => buildSubActivityCandidateRow(sa, nowIso, rels),
     allowTargetedDelete: true,
   },
   {
@@ -1937,10 +2494,108 @@ const ENTITY_TABLE_SPECS: EntityTableSyncSpec[] = [
     allowTargetedDelete: true,
   },
   {
+    tableName: 'cash_advance_summaries',
+    getRows: (d) =>
+      Object.entries(d.cashAdvanceSummaries || {})
+        .map(([torId, rec]: [string, any]) =>
+          rec && typeof rec === 'object'
+            ? { ...rec, id: rec.id || torId, torId: rec.torId || torId }
+            : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildCashAdvanceSummaryCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: [],
+    },
+  },
+  {
     tableName: 'meeting_minutes',
     getRows: (d) => d.meetingMinutes || [],
     buildCandidate: buildMeetingMinuteCandidateRow,
     allowTargetedDelete: true,
+  },
+  {
+    tableName: 'activity_documentations',
+    getRows: (d) => d.activityDocumentationList || [],
+    buildCandidate: buildActivityDocumentationCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'output_raci_records',
+    getRows: (d) =>
+      Object.entries(d.outputRaciRecords || {})
+        .map(([outId, rec]: [string, any]) =>
+          rec && typeof rec === 'object'
+            ? { ...rec, id: outId, outputId: rec.outputId || outId }
+            : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildOutputRaciCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: [],
+    },
+  },
+  {
+    tableName: 'activity_monitoring_records',
+    getRows: (d) =>
+      Object.entries(d.activityMonitoringRecords || {})
+        .map(([actId, rec]: [string, any]) =>
+          rec && typeof rec === 'object'
+            ? { ...rec, id: actId, activityId: rec.activityId || actId }
+            : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildActivityMonitoringCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: [],
+    },
+  },
+  {
+    tableName: 'monitoring_reports',
+    getRows: (d) =>
+      Object.entries(d.monitoringReports || {})
+        .map(([repId, rec]: [string, any]) =>
+          rec && typeof rec === 'object' ? { ...rec, id: rec.id || repId } : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildMonitoringReportCandidateRow,
+    allowTargetedDelete: true,
+  },
+  {
+    tableName: 'approval_hub_items',
+    getRows: (d) =>
+      Object.entries(d.approvalHubItems || {})
+        .map(([itemId, rec]: [string, any]) =>
+          rec && typeof rec === 'object' ? { ...rec, id: rec.id || itemId } : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildApprovalHubItemCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: [],
+    },
+  },
+  {
+    tableName: 'program_budgets',
+    getRows: (d) =>
+      Object.entries(d.programBudgets || {})
+        .map(([key, rec]: [string, any]) =>
+          rec && typeof rec === 'object' ? { ...rec, id: key } : null
+        )
+        .filter(Boolean),
+    buildCandidate: buildProgramBudgetCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: 'id',
+      immutableOnUpdateColumns: [],
+    },
   },
   {
     tableName: 'participants',
@@ -2064,6 +2719,8 @@ export async function saveDiffToMysql(
   let activeTable = '';
   let activeOperation = '';
 
+  const relSets = buildRelationSetsFromData(nextData);
+
   try {
     await conn.beginTransaction();
 
@@ -2073,9 +2730,18 @@ export async function saveDiffToMysql(
       activeTable = op.spec.tableName;
       activeOperation = 'DELETE';
       for (const delId of op.toDeleteIds) {
+        if (op.spec.tableName === 'tors') {
+          try {
+            await conn.query('UPDATE `audit_logs` SET `tor_id` = NULL WHERE `tor_id` = ?', [
+              delId.slice(0, 128),
+            ]);
+          } catch {
+            // abaikan jika kolom tor_id tidak ada
+          }
+        }
         const [delRes]: any = await conn.query(
           `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
-          [delId.slice(0, 128)]
+          [delId.slice(0, 255)]
         );
         deletedRows += 1;
         totalAffectedRows += Number(delRes?.affectedRows || 0);
@@ -2091,7 +2757,7 @@ export async function saveDiffToMysql(
         const affected = await executeAdaptiveUpsert(
           conn,
           op.spec.tableName,
-          op.spec.buildCandidate(item, nowIso),
+          op.spec.buildCandidate(item, nowIso, relSets),
           op.spec.upsertOptions
         );
         upsertedRows += 1;
@@ -2266,14 +2932,23 @@ export async function importProgramHierarchyToMysql(
       }
     }
 
-    // 6. Catat Audit Log ke tabel audit_logs dalam transaksi yang sama
+    // 6. Catat Audit Log ke tabel audit_logs dalam transaksi yang sama (aman terhadap Foreign Key)
     if (auditLog && auditLog.id) {
       currentStage = 'AUDIT LOG INSERT';
       currentTable = 'audit_logs';
+      const [existingUsers]: any = await conn
+        .query('SELECT `id` FROM `users`')
+        .catch(() => [[]]);
+      const importRelSets: RelationValidationSets = {
+        userIds: new Set(
+          (Array.isArray(existingUsers) ? existingUsers : []).map((u: any) => String(u.id))
+        ),
+        torIds: new Set<string>(),
+      };
       const affected = await executeAdaptiveUpsert(
         conn,
         'audit_logs',
-        buildAuditLogCandidateRow(auditLog, nowIso)
+        buildAuditLogCandidateRow(auditLog, nowIso, importRelSets)
       );
       totalAffectedRows += affected;
     }
@@ -2318,6 +2993,7 @@ export async function saveDatabaseToMysql(
   data: DatabaseSchema
 ): Promise<void> {
   const nowIso = new Date().toISOString();
+  const relSets = buildRelationSetsFromData(data);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -2328,7 +3004,7 @@ export async function saveDatabaseToMysql(
         await executeAdaptiveUpsert(
           conn,
           spec.tableName,
-          spec.buildCandidate(item, nowIso),
+          spec.buildCandidate(item, nowIso, relSets),
           spec.upsertOptions
         );
       }

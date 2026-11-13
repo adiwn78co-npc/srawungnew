@@ -569,6 +569,8 @@ export interface CashAdvanceRecord {
   department: string;
   torId: string;
   torNumber: string;
+  programId?: string;
+  activityId?: string;
   activityTitle: string;
   programName: string;
   activityStartDate: string;

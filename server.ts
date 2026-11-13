@@ -2398,7 +2398,21 @@ async function startServer() {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Program baru' });
     }
 
-    const { name, location, startDate, endDate, description, folderUrl, picId, status } = req.body;
+    const {
+      name,
+      code,
+      donor,
+      totalBudget,
+      budget,
+      currency,
+      location,
+      startDate,
+      endDate,
+      description,
+      folderUrl,
+      picId,
+      status,
+    } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Nama Program / Judul Program wajib diisi' });
     }
@@ -2417,20 +2431,30 @@ async function startServer() {
 
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : currentUser;
+    const resolvedBudget =
+      totalBudget !== undefined
+        ? Number(totalBudget) || 0
+        : budget !== undefined
+        ? Number(budget) || 0
+        : 0;
 
     const newProgram: Program = {
       id: `prog-${Date.now()}`,
+      code: typeof code === 'string' && code.trim() ? code.trim() : undefined,
       name: name.trim(),
+      donor: typeof donor === 'string' && donor.trim() ? donor.trim() : undefined,
       location: location.trim(),
       startDate,
       endDate,
+      totalBudget: resolvedBudget,
+      currency: typeof currency === 'string' && currency.trim() ? currency.trim() : 'IDR',
       description: description ? description.trim() : '',
       folderUrl: folderUrl ? String(folderUrl).trim() : '',
       picId: picUser ? picUser.id : currentUser.id,
       picName: picUser ? picUser.name : currentUser.name,
       status: (status as ProgramStatus) || 'Aktif',
       createdAt: new Date().toISOString(),
-    };
+    } as any;
 
     db.update((d) => {
       if (!d.programs) d.programs = [];
@@ -2464,7 +2488,21 @@ async function startServer() {
     }
 
     const { id } = req.params;
-    const { name, location, startDate, endDate, description, folderUrl, picId, status } = req.body;
+    const {
+      name,
+      code,
+      donor,
+      totalBudget,
+      budget,
+      currency,
+      location,
+      startDate,
+      endDate,
+      description,
+      folderUrl,
+      picId,
+      status,
+    } = req.body;
 
     if (startDate && endDate && new Date(endDate) < new Date(startDate)) {
       return res.status(400).json({ error: 'Tanggal selesai tidak boleh lebih awal dari tanggal mulai' });
@@ -2478,19 +2516,39 @@ async function startServer() {
       if (!d.programs) d.programs = [];
       const idx = d.programs.findIndex((p) => p.id === id);
       if (idx !== -1) {
+        const existingProg: any = d.programs[idx];
+        const nextBudget =
+          totalBudget !== undefined
+            ? Number(totalBudget) || 0
+            : budget !== undefined
+            ? Number(budget) || 0
+            : existingProg.totalBudget;
         d.programs[idx] = {
-          ...d.programs[idx],
-          name: name ? name.trim() : d.programs[idx].name,
-          location: location ? location.trim() : d.programs[idx].location,
-          startDate: startDate ?? d.programs[idx].startDate,
-          endDate: endDate ?? d.programs[idx].endDate,
-          description: description !== undefined ? description.trim() : d.programs[idx].description,
-          folderUrl: folderUrl !== undefined ? String(folderUrl).trim() : d.programs[idx].folderUrl,
-          picId: picUser ? picUser.id : d.programs[idx].picId,
-          picName: picUser ? picUser.name : d.programs[idx].picName,
-          status: status ?? d.programs[idx].status,
+          ...existingProg,
+          code:
+            code !== undefined
+              ? String(code).trim() || undefined
+              : existingProg.code,
+          name: name ? name.trim() : existingProg.name,
+          donor:
+            donor !== undefined
+              ? String(donor).trim() || undefined
+              : existingProg.donor,
+          location: location ? location.trim() : existingProg.location,
+          startDate: startDate ?? existingProg.startDate,
+          endDate: endDate ?? existingProg.endDate,
+          totalBudget: nextBudget,
+          currency:
+            currency !== undefined
+              ? String(currency).trim() || 'IDR'
+              : existingProg.currency,
+          description: description !== undefined ? description.trim() : existingProg.description,
+          folderUrl: folderUrl !== undefined ? String(folderUrl).trim() : existingProg.folderUrl,
+          picId: picUser ? picUser.id : existingProg.picId,
+          picName: picUser ? picUser.name : existingProg.picName,
+          status: status ?? existingProg.status,
           updatedAt: new Date().toISOString(),
-        };
+        } as any;
         updated = d.programs[idx];
 
         // Keep programName in associated outcomes & tors synced
@@ -2693,6 +2751,8 @@ async function startServer() {
       picId: picUser.id,
       picName: picUser.name,
       projectName: program.name,
+      budgetAllocated:
+        req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
       indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: nowIso,
@@ -2778,6 +2838,10 @@ async function startServer() {
           picId: picUser ? picUser.id : d.outcomes[idx].picId,
           picName: picUser ? picUser.name : d.outcomes[idx].picName,
           projectName: projectName ?? d.outcomes[idx].projectName ?? parentProgram.name,
+          budgetAllocated:
+            req.body.budgetAllocated !== undefined
+              ? Number(req.body.budgetAllocated) || 0
+              : (d.outcomes[idx] as any).budgetAllocated,
           indicators: indicators ?? d.outcomes[idx].indicators,
           status: status ?? d.outcomes[idx].status,
           updatedAt: nowIso,
@@ -2896,6 +2960,8 @@ async function startServer() {
       description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
+      budgetAllocated:
+        req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
       indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: nowIso,
@@ -2982,6 +3048,10 @@ async function startServer() {
           description: nextDesc ?? d.outputs[idx].description,
           picId: picUser ? picUser.id : d.outputs[idx].picId,
           picName: picUser ? picUser.name : d.outputs[idx].picName,
+          budgetAllocated:
+            req.body.budgetAllocated !== undefined
+              ? Number(req.body.budgetAllocated) || 0
+              : (d.outputs[idx] as any).budgetAllocated,
           indicators: indicators ?? d.outputs[idx].indicators,
           status: status ?? d.outputs[idx].status,
           updatedAt: nowIso,
@@ -3117,6 +3187,8 @@ async function startServer() {
       picName: picUser.name,
       startDate: startDate || nowIso.slice(0, 10),
       endDate: endDate || nowIso.slice(0, 10),
+      budgetAllocated:
+        req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -3224,6 +3296,10 @@ async function startServer() {
           picName: picUser ? picUser.name : d.activities[idx].picName,
           startDate: startDate ?? d.activities[idx].startDate,
           endDate: endDate ?? d.activities[idx].endDate,
+          budgetAllocated:
+            req.body.budgetAllocated !== undefined
+              ? Number(req.body.budgetAllocated) || 0
+              : (d.activities[idx] as any).budgetAllocated,
           status: status ?? d.activities[idx].status,
           updatedAt: nowIso,
         } as any;
@@ -3337,6 +3413,8 @@ async function startServer() {
       picName: picName || '',
       startDate: startDate || '',
       endDate: endDate || '',
+      budgetAllocated:
+        req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -3388,6 +3466,10 @@ async function startServer() {
           picName: picName ?? d.subActivities[idx].picName,
           startDate: startDate ?? d.subActivities[idx].startDate,
           endDate: endDate ?? d.subActivities[idx].endDate,
+          budgetAllocated:
+            req.body.budgetAllocated !== undefined
+              ? Number(req.body.budgetAllocated) || 0
+              : (d.subActivities[idx] as any).budgetAllocated,
           status: status ?? d.subActivities[idx].status,
           updatedAt: nowIso,
         } as any;
@@ -3984,7 +4066,11 @@ async function startServer() {
       activityId,
       activityName: activity.name,
       subActivityId: req.body.subActivityId || null,
-      subActivityName: req.body.subActivityName || null,
+      subActivityName: req.body.subActivityId
+        ? (data.subActivities || []).find((s) => s.id === req.body.subActivityId)?.name ||
+          req.body.subActivityName ||
+          null
+        : req.body.subActivityName || null,
       picId: picUser.id,
       picName: picUser.name,
       implementingTeam: implementingTeam || [],
@@ -5219,17 +5305,22 @@ async function startServer() {
     }
 
     const newId = `ca-${Date.now()}`;
+    const resolvedOrgName =
+      (data as any).organizationSettings?.organizationName ||
+      'Yayasan Inti Muda Indonesia (WIJNA)';
     const newRecord: CashAdvanceRecord = {
       id: newId,
       advanceNumber: body.advanceNumber || autoNumber,
       requestDate: requestDateStr,
-      organizationName: 'Yayasan Inti Muda Indonesia (WIJNA)',
+      organizationName: resolvedOrgName,
       requesterId: currentUser.id,
       requesterName: currentUser.name,
       requesterRole: currentUser.roleTitle,
       department: currentUser.department || 'Program & Implementasi Lapangan',
       torId: targetTor.id,
       torNumber: targetTor.torNumber,
+      programId: targetTor.programId,
+      activityId: targetTor.activityId,
       activityTitle: targetTor.title,
       programName: targetTor.programName || 'Program Yayasan Inti Muda Indonesia',
       activityStartDate: targetTor.startDate,
@@ -8180,6 +8271,7 @@ async function startServer() {
     const { notificationId, markAll } = req.body || {};
 
     db.update((draft) => {
+      syncApprovalHubData(draft);
       if (!draft.approvalNotifications) return;
       for (const notif of draft.approvalNotifications) {
         if (markAll || notif.id === notificationId) {
@@ -8311,7 +8403,7 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: 'Pengaturan Alur Persetujuan (Approval Hub)',
-        entityType: 'TOR',
+        entityType: 'PROGRAM',
         entityId: categoryCode,
         details: `Mengubah mekanisme persetujuan kategori [${categoryCode}] menjadi ${mechanism} (${
           parallelRule || 'PRIMARY_WITH_CONSULTATION'

@@ -61,8 +61,7 @@ import {
   getOrCreateProgramBudgetDataset,
   saveProgramBudgetDataset,
   saveProgramBudgetDatasetAsync,
-  saveAllProgramBudgetDatasets,
-  loadAllProgramBudgetDatasets,
+  hydrateProgramBudgetDatasetsFromServer,
   getActivePeriods,
   matchPeriodForDate,
   calculateProgramBudgetMetrics,
@@ -287,19 +286,9 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         setCashAdvances(caList);
         setApprovalHubItems(hubList);
 
-        // Merge server-persisted budgets into local cache
+        // Hydrate directly from authoritative MySQL server budgets
         if (serverBudgets && typeof serverBudgets === 'object') {
-          const localAll = loadAllProgramBudgetDatasets();
-          let changed = false;
-          for (const [k, v] of Object.entries(serverBudgets)) {
-            if (v && typeof v === 'object') {
-              localAll[k] = v as ProgramBudgetDataset;
-              changed = true;
-            }
-          }
-          if (changed) {
-            saveAllProgramBudgetDatasets(localAll);
-          }
+          hydrateProgramBudgetDatasetsFromServer(serverBudgets);
         }
 
         if (selectedProgram) {

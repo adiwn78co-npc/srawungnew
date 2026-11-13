@@ -11,8 +11,8 @@ import {
   ApprovalHubItem,
 } from '../types/index.js';
 import {
-  saveMasterBudgetList,
-  getMasterBudgetList,
+  MASTER_BUDGET_ITEMS_SERVER_KEY,
+  hydrateMasterBudgetListFromServerPayload,
   syncMasterBudgetLookupWithServerMap,
 } from './masterBudgetStorage.js';
 import { api } from './api.js';
@@ -483,72 +483,54 @@ function normalizeProgramBudgetDataset(ds: any): ProgramBudgetDataset {
   };
 }
 
+export let authoritativeMemoryCache: Record<string, ProgramBudgetDataset> = {};
+
 export function loadAllProgramBudgetDatasets(): Record<string, ProgramBudgetDataset> {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      const normalized: Record<string, ProgramBudgetDataset> = {};
-      for (const [k, ds] of Object.entries(parsed)) {
-        if (ds && typeof ds === 'object' && (ds as any).programId) {
-          normalized[k] = normalizeProgramBudgetDataset(ds);
-        }
-      }
-      return normalized;
-    }
-    return {};
-  } catch {
-    return {};
-  }
+  return { ...authoritativeMemoryCache };
 }
 
-export let authoritativeMemoryCache: Record<string, ProgramBudgetDataset> | null = null;
-
 export function getHydratedProgramBudgetDatasetsSnapshot(): Record<string, ProgramBudgetDataset> {
-  if (authoritativeMemoryCache) {
-    return authoritativeMemoryCache;
-  }
-  return loadAllProgramBudgetDatasets();
+  return { ...authoritativeMemoryCache };
 }
 
 export function saveAllProgramBudgetDatasets(
   datasets: Record<string, ProgramBudgetDataset>
 ): void {
-  authoritativeMemoryCache = datasets;
-  syncMasterBudgetLookupWithServerMap(datasets);
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(datasets));
-    setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('program-budget-updated'));
-      window.dispatchEvent(new CustomEvent('program-budget-dataset-updated'));
-    }, 0);
-  } catch (e) {
-    console.error('Failed to save program budget datasets:', e);
+  const normalized: Record<string, ProgramBudgetDataset> = {};
+  for (const [k, ds] of Object.entries(datasets || {})) {
+    if (ds && typeof ds === 'object' && (ds as any).programId) {
+      normalized[k] = normalizeProgramBudgetDataset(ds);
+    }
   }
+  authoritativeMemoryCache = normalized;
+  syncMasterBudgetLookupWithServerMap(normalized);
+  if (typeof window === 'undefined') return;
+  setTimeout(() => {
+    window.dispatchEvent(new CustomEvent('program-budget-updated'));
+    window.dispatchEvent(new CustomEvent('program-budget-dataset-updated'));
+  }, 0);
 }
 
 /**
- * Hydrates memory cache & localStorage with the authoritative ProgramBudgetDatasets from the backend server.
+ * Hydrates authoritative memory cache strictly from the backend MySQL server response.
  */
 export function hydrateProgramBudgetDatasetsFromServer(
-  remoteDatasets: Record<string, ProgramBudgetDataset> | null | undefined
+  remoteDatasets: Record<string, any> | null | undefined
 ): Record<string, ProgramBudgetDataset> {
   if (!remoteDatasets || typeof remoteDatasets !== 'object') {
     return getHydratedProgramBudgetDatasetsSnapshot();
   }
+  if (remoteDatasets[MASTER_BUDGET_ITEMS_SERVER_KEY] !== undefined) {
+    hydrateMasterBudgetListFromServerPayload(remoteDatasets[MASTER_BUDGET_ITEMS_SERVER_KEY]);
+  }
   const authoritative: Record<string, ProgramBudgetDataset> = {};
   for (const [k, ds] of Object.entries(remoteDatasets)) {
+    if (k === MASTER_BUDGET_ITEMS_SERVER_KEY) continue;
     if (ds && typeof ds === 'object' && ds.programId) {
       authoritative[k] = normalizeProgramBudgetDataset(ds);
     }
   }
   saveAllProgramBudgetDatasets(authoritative);
-  if (Object.keys(authoritative).length === 0) {
-    saveMasterBudgetList([]);
-  }
   return authoritative;
 }
 
