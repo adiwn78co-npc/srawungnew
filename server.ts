@@ -1124,18 +1124,64 @@ async function startServer() {
     if (user.role !== 'staff' || user.permissions?.canViewAllTors) {
       return true;
     }
-    if (tor.picId === user.id || tor.createdById === user.id) {
+    const normUserName = String(user.name || '').trim().toLowerCase();
+    if (
+      tor.picId === user.id ||
+      tor.createdById === user.id ||
+      (Boolean(normUserName) &&
+        (String(tor.picName || '').trim().toLowerCase() === normUserName ||
+          String(tor.createdByName || '').trim().toLowerCase() === normUserName))
+    ) {
       return true;
     }
-    const raci = data.outputRaciRecords?.[tor.outputId];
+    if (
+      Boolean(normUserName) &&
+      Array.isArray(tor.implementingTeam) &&
+      tor.implementingTeam.some(
+        (m: any) =>
+          m?.userId === user.id ||
+          String(m?.name || m?.fullName || '').trim().toLowerCase() === normUserName
+      )
+    ) {
+      return true;
+    }
+    const activity = (data.activities || []).find((a) => a.id === tor.activityId);
+    const resolvedOutputId = tor.outputId || activity?.outputId || '';
+    const output = (data.outputs || []).find((o) => o.id === resolvedOutputId);
+    if (
+      output &&
+      (output.picId === user.id ||
+        (Boolean(normUserName) &&
+          String(output.picName || '').trim().toLowerCase() === normUserName))
+    ) {
+      return true;
+    }
+    const raci = resolvedOutputId ? data.outputRaciRecords?.[resolvedOutputId] : undefined;
     if (
       raci &&
       (raci.responsibleUserId === user.id ||
         raci.accountableUserId === user.id ||
         raci.accountableFinanceUserId === user.id ||
-        (raci.consultedUsers || []).includes(user.name) ||
-        (raci.informedUsers || []).includes(user.name))
+        (Boolean(normUserName) &&
+          (String(raci.responsibleUserName || '').trim().toLowerCase() === normUserName ||
+            String(raci.accountableUserName || '').trim().toLowerCase() === normUserName ||
+            (raci.consultedUsers || []).some(
+              (n) => String(n || '').trim().toLowerCase() === normUserName
+            ) ||
+            (raci.informedUsers || []).some(
+              (n) => String(n || '').trim().toLowerCase() === normUserName
+            ))))
     ) {
+      return true;
+    }
+    const hasLinkedCa = (data.cashAdvances || []).some(
+      (ca) =>
+        ca.torId === tor.id &&
+        (ca.requesterId === user.id ||
+          (Boolean(normUserName) &&
+            String(ca.requesterName || '').trim().toLowerCase() === normUserName))
+    );
+    if (hasLinkedCa) {
       return true;
     }
     return false;
@@ -3569,10 +3615,10 @@ async function startServer() {
     }));
 
     // Role-based visibility:
-    // Director, PM, MEAL, Finance, Admin see all TORs.
-    // User Biasa / Staff only sees TORs where they are PIC or creator.
+    // Director, PM, MEAL, Finance, HR, Admin see all TORs.
+    // Staff sees TORs where they are PIC, creator, implementing team member, Output RACI member, or CA requester.
     if (currentUser.role === 'staff' && !currentUser.permissions?.canViewAllTors) {
-      tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
+      tors = tors.filter((t) => canUserAccessTorRecord(currentUser, t, data));
     }
 
     // Filters:
@@ -3581,10 +3627,10 @@ async function startServer() {
       const q = search.toLowerCase();
       tors = tors.filter(
         (t) =>
-          t.title.toLowerCase().includes(q) ||
-          t.torNumber.toLowerCase().includes(q) ||
-          t.activityName.toLowerCase().includes(q) ||
-          t.picName.toLowerCase().includes(q)
+          String(t.title || '').toLowerCase().includes(q) ||
+          String(t.torNumber || '').toLowerCase().includes(q) ||
+          String(t.activityName || '').toLowerCase().includes(q) ||
+          String(t.picName || '').toLowerCase().includes(q)
       );
     }
     if (picId && typeof picId === 'string') {
@@ -3605,10 +3651,12 @@ async function startServer() {
     // 5. TOR yang selesai dan seluruh kewajiban terpenuhi
     tors.sort((a, b) => {
       const score = (t: Tor) => {
-        if (t.activityStatus === 'Sedang Berjalan') return 1;
-        if (t.submissionStatus.includes('Menunggu Persetujuan')) return 2;
-        if (t.activityStatus === 'Belum Dimulai') return 3;
-        if (t.activityStatus === 'Selesai') return 4;
+        const actStatus = String(t.activityStatus || '');
+        const subStatus = String(t.submissionStatus || '');
+        if (actStatus === 'Sedang Berjalan') return 1;
+        if (subStatus.includes('Menunggu Persetujuan') || subStatus === 'Diajukan') return 2;
+        if (actStatus === 'Belum Dimulai') return 3;
+        if (actStatus === 'Selesai') return 4;
         return 5;
       };
       return score(a) - score(b);
@@ -4814,8 +4862,15 @@ async function startServer() {
     let records = data.cashAdvances || [];
 
     if (currentUser.role === 'staff' && !currentUser.permissions?.canViewAllTors) {
+      const normUserName = String(currentUser.name || '').trim().toLowerCase();
       records = records.filter((ca) => {
         if (ca.requesterId === currentUser.id) return true;
+        if (
+          Boolean(normUserName) &&
+          String(ca.requesterName || '').trim().toLowerCase() === normUserName
+        ) {
+          return true;
+        }
         const linkedTor = data.tors.find((t) => t.id === ca.torId);
         return linkedTor ? canUserAccessTorRecord(currentUser, linkedTor, data) : false;
       });
@@ -4831,15 +4886,18 @@ async function startServer() {
       const q = search.toLowerCase();
       records = records.filter(
         (ca) =>
-          ca.advanceNumber.toLowerCase().includes(q) ||
-          ca.torNumber.toLowerCase().includes(q) ||
-          ca.activityTitle.toLowerCase().includes(q) ||
-          ca.requesterName.toLowerCase().includes(q)
+          String(ca.advanceNumber || '').toLowerCase().includes(q) ||
+          String(ca.torNumber || '').toLowerCase().includes(q) ||
+          String(ca.activityTitle || '').toLowerCase().includes(q) ||
+          String(ca.requesterName || '').toLowerCase().includes(q)
       );
     }
 
     // Sort by createdAt descending
-    records.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    records = [...records].sort(
+      (a, b) =>
+        (new Date(b.createdAt || 0).getTime() || 0) - (new Date(a.createdAt || 0).getTime() || 0)
+    );
     res.json(records);
   });
 
@@ -5946,17 +6004,15 @@ async function startServer() {
     res.json({ message: 'Draf Cash Advance berhasil dihapus' });
   });
 
-  // Stats calculation (Synchronized with ApprovalHub & RACI Access)
+  // Stats calculation (Synchronized with ApprovalHub & RACI Access without dirtying DB read state)
   app.get('/api/stats', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    db.update((draft) => {
-      syncApprovalHubData(draft);
-    });
     const data = db.getData();
+    syncApprovalHubData(data);
     let tors = [...data.tors];
 
     if (currentUser.role === 'staff' && !currentUser.permissions?.canViewAllTors) {
-      tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
+      tors = tors.filter((t) => canUserAccessTorRecord(currentUser, t, data));
     }
 
     const now = new Date();
@@ -7532,35 +7588,34 @@ async function startServer() {
       : allItems.filter((item) => validIdsForScope.has(item.id));
 
     return filtered.sort((a, b) => {
-      const caCmp = a.cashAdvanceNumber.localeCompare(b.cashAdvanceNumber);
+      const caCmp = String(a.cashAdvanceNumber || '').localeCompare(
+        String(b.cashAdvanceNumber || '')
+      );
       if (caCmp !== 0) return caCmp;
       if (a.toolId === 'EXEC-SUMMARY' && b.toolId !== 'EXEC-SUMMARY') return 1;
       if (b.toolId === 'EXEC-SUMMARY' && a.toolId !== 'EXEC-SUMMARY') return -1;
-      return a.toolId.localeCompare(b.toolId);
+      return String(a.toolId || '').localeCompare(String(b.toolId || ''));
     });
   }
 
   app.get('/api/monitoring-reports', (req: Request, res: Response) => {
     const torId = typeof req.query.torId === 'string' ? req.query.torId : undefined;
-    let syncedItems: MonitoringReportItem[] = [];
+    const draft = db.getData();
+    const syncedItems = syncMonitoringReportsForTor(draft, torId);
     let plannedTools: SelectedActivityMonitoringTool[] = [];
     let plannedToolsCount = 0;
     let cashAdvanceCount = 0;
 
-    db.update((draft) => {
-      syncedItems = syncMonitoringReportsForTor(draft, torId);
-      if (torId) {
-        const targetTor = (draft.tors || []).find((t: Tor) => t.id === torId);
-        if (targetTor) {
-          plannedTools =
-            draft.activityMonitoringRecords?.[targetTor.activityId]?.tools || [];
-          plannedToolsCount = plannedTools.length;
-          cashAdvanceCount = (draft.cashAdvances || []).filter(
-            (ca: CashAdvanceRecord) => ca.torId === torId && ca.status !== 'Ditolak'
-          ).length;
-        }
+    if (torId) {
+      const targetTor = (draft.tors || []).find((t: Tor) => t.id === torId);
+      if (targetTor) {
+        plannedTools = draft.activityMonitoringRecords?.[targetTor.activityId]?.tools || [];
+        plannedToolsCount = plannedTools.length;
+        cashAdvanceCount = (draft.cashAdvances || []).filter(
+          (ca: CashAdvanceRecord) => ca.torId === torId && ca.status !== 'Ditolak'
+        ).length;
       }
-    });
+    }
 
     res.json({
       items: syncedItems,
@@ -8025,8 +8080,8 @@ async function startServer() {
       const programId = String(item.programId || '').trim();
       if (!programId || seen.has(programId)) continue;
       const matchedProg = (programs || []).find((p) => p.id === programId);
-      const programName = matchedProg?.name || String(item.programName || '').trim();
-      if (!programName) continue;
+      const programName =
+        matchedProg?.name || String(item.programName || '').trim() || programId;
       seen.add(programId);
       const rolesArr = Array.isArray(item.rolesInProgram)
         ? item.rolesInProgram.map((r: any) => String(r || '').trim()).filter(Boolean)
@@ -8622,14 +8677,7 @@ async function startServer() {
   }
 
   function buildAttendanceBundleForUser(currentUser: User): AttendanceSystemBundle {
-    let bundle = db.getData().attendanceSystem;
-    if (!bundle) {
-      db.update((draft) => {
-        bundle = ensureAttendanceSystemInitialized(draft);
-      });
-    } else {
-      bundle = ensureAttendanceSystemInitialized(db.getData());
-    }
+    const bundle = ensureAttendanceSystemInitialized(db.getData());
 
     const canViewAll = isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser);
     if (!canViewAll && bundle) {

@@ -281,7 +281,7 @@ export const ParticipantDatabaseView: React.FC<ParticipantDatabaseViewProps> = (
       const [res, fetchedProgs] = await Promise.all([
         api.getParticipantDatabase(),
         !externalPrograms || externalPrograms.length === 0
-          ? api.getPrograms().catch(() => [] as Program[])
+          ? api.getPrograms().catch(() => ({ programs: [] as Program[] }))
           : Promise.resolve(externalPrograms),
       ]);
       const nextRecords = res.records || [];
@@ -289,8 +289,13 @@ export const ParticipantDatabaseView: React.FC<ParticipantDatabaseViewProps> = (
       setAuditLogs(Array.isArray(res.auditLogs) ? res.auditLogs : []);
       setNextIndividualCode(res.nextIndividualCode || 'IND-0001');
       setNextGroupCode(res.nextGroupCode || 'KLP-0001');
-      if (Array.isArray(fetchedProgs) && fetchedProgs.length > 0) {
-        setProgramsList(fetchedProgs);
+      const resolvedPrograms: Program[] = Array.isArray(fetchedProgs)
+        ? fetchedProgs
+        : Array.isArray((fetchedProgs as any)?.programs)
+        ? (fetchedProgs as any).programs
+        : [];
+      if (resolvedPrograms.length > 0) {
+        setProgramsList(resolvedPrograms);
       }
       if (viewingRecord) {
         const refreshed = nextRecords.find((r) => r.id === viewingRecord.id);

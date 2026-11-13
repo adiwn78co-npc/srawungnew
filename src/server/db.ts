@@ -43,24 +43,6 @@ import {
   validateMysqlEnvConfiguration,
   verifyAndGetMysqlPool,
 } from './mysqlPool.ts';
-import {
-  SEED_PROGRAMS,
-  SEED_OUTCOMES,
-  SEED_OUTPUTS,
-  SEED_ACTIVITIES,
-  SEED_SUB_ACTIVITIES,
-  SEED_TORS,
-  SEED_APPROVAL_RECORDS,
-  SEED_CASH_ADVANCES,
-  SEED_MEETING_MINUTES,
-  SEED_ACTIVITY_DOCUMENTATIONS,
-  SEED_ACTIVITY_DOCUMENTATION_LIST,
-  SEED_OUTPUT_RACI_RECORDS,
-  SEED_ACTIVITY_MONITORING_RECORDS,
-  SEED_MONITORING_REPORTS,
-  SEED_PARTICIPANT_DATABASE,
-  SEED_PROGRAM_BUDGETS,
-} from './integratedSeedData.ts';
 
 export interface DatabaseSchema {
   users: User[];
@@ -96,8 +78,6 @@ export interface DatabaseSchema {
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.resolve(DATA_DIR, 'db.json');
 const DB_BACKUP_FILE = path.resolve(DATA_DIR, 'db.backup.json');
-
-const INITIAL_PROGRAMS: Program[] = SEED_PROGRAMS;
 
 const INITIAL_USERS: User[] = [
   {
@@ -221,23 +201,6 @@ const INITIAL_USERS: User[] = [
   },
 ];
 
-const INITIAL_OUTCOMES: Outcome[] = SEED_OUTCOMES;
-const INITIAL_OUTPUTS: Output[] = SEED_OUTPUTS;
-const INITIAL_ACTIVITIES: Activity[] = SEED_ACTIVITIES;
-const INITIAL_SUB_ACTIVITIES: SubActivity[] = SEED_SUB_ACTIVITIES;
-const INITIAL_TORS: Tor[] = SEED_TORS;
-const INITIAL_APPROVAL_RECORDS: TorApprovalRecord[] = SEED_APPROVAL_RECORDS;
-const INITIAL_AUDIT_LOGS: AuditLog[] = [];
-export const INITIAL_CASH_ADVANCES: CashAdvanceRecord[] = SEED_CASH_ADVANCES;
-const INITIAL_ACTIVITY_DOCUMENTATIONS: Record<string, ActivityDocumentationRecord> = SEED_ACTIVITY_DOCUMENTATIONS;
-const INITIAL_ACTIVITY_DOCUMENTATION_LIST: ActivityDocumentationRecord[] = SEED_ACTIVITY_DOCUMENTATION_LIST;
-const INITIAL_MEETING_MINUTES: MeetingMinutesRecord[] = SEED_MEETING_MINUTES;
-const INITIAL_OUTPUT_RACI_RECORDS: Record<string, OutputRaciRecord> = SEED_OUTPUT_RACI_RECORDS;
-const INITIAL_ACTIVITY_MONITORING_RECORDS: Record<string, ActivityMonitoringRecord> = SEED_ACTIVITY_MONITORING_RECORDS;
-const INITIAL_MONITORING_REPORTS: Record<string, MonitoringReportItem> = SEED_MONITORING_REPORTS;
-const INITIAL_PARTICIPANT_DATABASE: MasterParticipantRecord[] = SEED_PARTICIPANT_DATABASE;
-const INITIAL_PROGRAM_BUDGETS: Record<string, any> = SEED_PROGRAM_BUDGETS;
-
 function cloneInitialUsers(): User[] {
   return INITIAL_USERS.map((u) => ({
     ...u,
@@ -249,27 +212,28 @@ function createDefaultSeed(): DatabaseSchema {
   return {
     users: cloneInitialUsers(),
     currentUserId: 'user-director',
-    programs: [...INITIAL_PROGRAMS],
-    outcomes: [...INITIAL_OUTCOMES],
-    outputs: [...INITIAL_OUTPUTS],
-    activities: [...INITIAL_ACTIVITIES],
-    subActivities: [...INITIAL_SUB_ACTIVITIES],
-    tors: [...INITIAL_TORS],
-    approvalRecords: [...INITIAL_APPROVAL_RECORDS],
-    auditLogs: [...INITIAL_AUDIT_LOGS],
-    cashAdvances: [...INITIAL_CASH_ADVANCES],
+    programs: [],
+    outcomes: [],
+    outputs: [],
+    activities: [],
+    subActivities: [],
+    tors: [],
+    approvalRecords: [],
+    auditLogs: [],
+    cashAdvances: [],
     cashAdvanceSummaries: {},
     cashAdvanceAuditLogs: {},
-    meetingMinutes: [...INITIAL_MEETING_MINUTES],
-    activityDocumentations: { ...INITIAL_ACTIVITY_DOCUMENTATIONS },
-    activityDocumentationList: [...INITIAL_ACTIVITY_DOCUMENTATION_LIST],
-    outputRaciRecords: { ...INITIAL_OUTPUT_RACI_RECORDS },
-    activityMonitoringRecords: { ...INITIAL_ACTIVITY_MONITORING_RECORDS },
-    monitoringReports: { ...INITIAL_MONITORING_REPORTS },
+    meetingMinutes: [],
+    activityDocumentations: {},
+    activityDocumentationList: [],
+    outputRaciRecords: {},
+    activityMonitoringRecords: {},
+    monitoringReports: {},
     approvalHubItems: {},
+    approvalWorkflowConfigs: {},
     approvalNotifications: [],
-    programBudgets: { ...INITIAL_PROGRAM_BUDGETS },
-    participantDatabase: [...INITIAL_PARTICIPANT_DATABASE],
+    programBudgets: {},
+    participantDatabase: [],
     cleanResetPrj3581V1: true,
     cleanResetPrj3581V2: true,
   };
@@ -466,7 +430,25 @@ function normalizeSchema(
   }
 
   if (Array.isArray(parsed.tors) && Array.isArray(parsed.cashAdvances)) {
-    parsed.tors = parsed.tors.map((t) => {
+    const programByIdMap = new Map<string, Program>();
+    for (const pr of parsed.programs) {
+      if (pr && pr.id) programByIdMap.set(pr.id, pr);
+    }
+
+    parsed.tors = parsed.tors.map((t: any) => {
+      const linkedAct = t?.activityId ? activityByIdMap.get(t.activityId) : undefined;
+      const resolvedOutputId = t?.outputId || linkedAct?.outputId || '';
+      const linkedOutp = resolvedOutputId ? outputByIdMap.get(resolvedOutputId) : undefined;
+      const resolvedOutcomeId = t?.outcomeId || linkedOutp?.outcomeId || '';
+      const linkedOutc = resolvedOutcomeId ? outcomeByIdMap.get(resolvedOutcomeId) : undefined;
+      const resolvedProgramId =
+        t?.programId ||
+        (linkedAct as any)?.programId ||
+        (linkedOutp as any)?.programId ||
+        linkedOutc?.programId ||
+        '';
+      const linkedProg = resolvedProgramId ? programByIdMap.get(resolvedProgramId) : undefined;
+
       const approvedCas = parsed.cashAdvances!.filter(
         (ca) => ca.torId === t.id && (ca.status === 'Disetujui' || ca.status === 'Dicairkan')
       );
@@ -481,13 +463,57 @@ function normalizeSchema(
         (sum, ca) => sum + (Number(ca.realizedAmount ?? ca.totalAmount) || 0),
         0
       );
+      const resolvedSubmissionStatus =
+        t.submissionStatus || t.status || 'Draft';
+      const resolvedActivityStatus =
+        t.activityStatus ||
+        (resolvedSubmissionStatus === 'Disetujui' ? 'Sedang Berjalan' : 'Belum Dimulai');
+
       return {
         ...t,
+        torNumber: typeof t.torNumber === 'string' ? t.torNumber : '',
+        programId: resolvedProgramId,
+        programName: t.programName || linkedProg?.name || linkedOutc?.programName || '',
+        outcomeId: resolvedOutcomeId,
+        outcomeName: t.outcomeName || linkedOutc?.name || '',
+        outputId: resolvedOutputId,
+        outputName: t.outputName || linkedOutp?.name || '',
+        activityId: t.activityId || '',
+        activityName: t.activityName || linkedAct?.name || t.title || '',
+        picId: t.picId || t.createdById || '',
+        picName: t.picName || t.createdByName || '',
+        createdById: t.createdById || t.picId || '',
+        createdByName: t.createdByName || t.picName || '',
+        submissionStatus: resolvedSubmissionStatus,
+        activityStatus: resolvedActivityStatus,
         budgetRequested:
           approvedCas.length > 0 ? computedRequested : (t.budgetRequested ?? 0),
         budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
         budgetActualSpent:
           verifiedCas.length > 0 ? computedActualSpent : (t.budgetActualSpent ?? 0),
+      };
+    });
+
+    const torByIdMap = new Map<string, Tor>();
+    for (const tr of parsed.tors) {
+      if (tr && tr.id) torByIdMap.set(tr.id, tr);
+    }
+
+    parsed.cashAdvances = parsed.cashAdvances.map((ca: any) => {
+      const parentTor = ca?.torId ? torByIdMap.get(ca.torId) : undefined;
+      const resolvedAdvanceNumber =
+        ca?.advanceNumber || ca?.caNumber || ca?.documentNumber || '';
+      return {
+        ...ca,
+        advanceNumber: resolvedAdvanceNumber,
+        torNumber: ca?.torNumber || parentTor?.torNumber || '',
+        programId: ca?.programId || parentTor?.programId || '',
+        programName: ca?.programName || parentTor?.programName || '',
+        activityId: ca?.activityId || parentTor?.activityId || '',
+        activityTitle: ca?.activityTitle || parentTor?.activityName || parentTor?.title || '',
+        requesterId: ca?.requesterId || parentTor?.picId || '',
+        requesterName: ca?.requesterName || parentTor?.picName || '',
+        items: Array.isArray(ca?.items) ? ca.items : [],
       };
     });
   }

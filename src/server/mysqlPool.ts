@@ -11,7 +11,9 @@ for (const envCandidate of [
   path.resolve(process.cwd(), '.env'),
   path.resolve(process.cwd(), '.env.production'),
   path.resolve(process.cwd(), '.env.local'),
+  path.resolve(process.cwd(), '..', '.env'),
   path.resolve(__poolDir, '.env'),
+  path.resolve(__poolDir, '..', '.env'),
   path.resolve(__poolDir, '..', '..', '.env'),
   path.resolve(__poolDir, '..', '..', '.env.production'),
 ]) {
@@ -59,7 +61,17 @@ export function isProductionHostingerEnvironment(): boolean {
     process.env.NODE_ENV === 'production' ||
     Boolean(process.env.IN_PASSENGER) ||
     Boolean(process.env.PASSENGER_APP_ENV) ||
-    Boolean(process.env.MYSQL_HOST || process.env.MYSQL_DATABASE || process.env.MYSQL_USER)
+    Boolean(
+      process.env.MYSQL_HOST ||
+        process.env.MYSQL_DATABASE ||
+        process.env.MYSQL_DB ||
+        process.env.MYSQL_USER ||
+        process.env.MYSQL_URL ||
+        process.env.DB_HOST ||
+        process.env.DB_DATABASE ||
+        process.env.DB_NAME ||
+        process.env.DB_USER
+    )
   );
 }
 
@@ -85,17 +97,58 @@ function isPlaceholderValue(val: string): boolean {
 }
 
 /**
- * Membaca konfigurasi MySQL dari MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE.
+ * Membaca konfigurasi MySQL dari MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+ * serta mendukung alias standar hosting (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_DATABASE/DB_NAME, MYSQL_URL).
  */
 export function resolveMysqlConfig(): ResolvedMysqlConfig {
-  const mysqlHost = String(process.env.MYSQL_HOST || '').trim();
-  const mysqlUser = String(process.env.MYSQL_USER || '').trim();
-  const mysqlName = String(process.env.MYSQL_DATABASE || '').trim();
+  let urlHost = '';
+  let urlPort = 0;
+  let urlUser = '';
+  let urlPass = '';
+  let urlDb = '';
 
-  const rawPort = process.env.MYSQL_PORT || '3306';
+  const rawConnUrl = String(process.env.MYSQL_URL || process.env.DATABASE_URL || '').trim();
+  if (rawConnUrl && /^mysql2?:\/\//i.test(rawConnUrl)) {
+    try {
+      const parsed = new URL(rawConnUrl);
+      urlHost = parsed.hostname || '';
+      urlPort = parsed.port ? Number(parsed.port) : 0;
+      urlUser = decodeURIComponent(parsed.username || '');
+      urlPass = decodeURIComponent(parsed.password || '');
+      urlDb = decodeURIComponent((parsed.pathname || '').replace(/^\/+/, ''));
+    } catch {
+      // abaikan jika format URL tidak valid
+    }
+  }
+
+  const mysqlHost = String(
+    process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ''
+  ).trim();
+  const mysqlUser = String(
+    process.env.MYSQL_USER ||
+      process.env.DB_USER ||
+      process.env.DB_USERNAME ||
+      urlUser ||
+      ''
+  ).trim();
+  const mysqlName = String(
+    process.env.MYSQL_DATABASE ||
+      process.env.MYSQL_DB ||
+      process.env.DB_DATABASE ||
+      process.env.DB_NAME ||
+      urlDb ||
+      ''
+  ).trim();
+
+  const rawPort = process.env.MYSQL_PORT || process.env.DB_PORT || (urlPort ? String(urlPort) : '3306');
   const port = Number(rawPort) > 0 ? Number(rawPort) : 3306;
 
-  const rawPassword = process.env.MYSQL_PASSWORD ?? '';
+  const rawPassword =
+    process.env.MYSQL_PASSWORD ??
+    process.env.DB_PASSWORD ??
+    process.env.DB_PASS ??
+    urlPass ??
+    '';
   const password = isPlaceholderValue(String(rawPassword)) ? '' : String(rawPassword);
 
   const user = !isPlaceholderValue(mysqlUser) ? mysqlUser : '';
@@ -106,7 +159,9 @@ export function resolveMysqlConfig(): ResolvedMysqlConfig {
     host = '127.0.0.1';
   }
 
-  const socketPath = String(process.env.MYSQL_SOCKET_PATH || '').trim() || undefined;
+  const socketPath = String(
+    process.env.MYSQL_SOCKET_PATH || process.env.DB_SOCKET_PATH || ''
+  ).trim() || undefined;
 
   return {
     host,
@@ -462,67 +517,109 @@ export function hydrateMysqlUserRow(r: any): any {
  * Mengambil daftar pengguna langsung dari tabel `users` MySQL secara real-time.
  */
 export async function fetchUsersFromMysql(pool: MysqlPoolLike): Promise<any[]> {
-  const [userRows] = await pool.query('SELECT * FROM users');
-  if (!Array.isArray(userRows)) {
-    return [];
+  try {
+    const [userRows] = await pool.query('SELECT * FROM users');
+    if (!Array.isArray(userRows)) {
+      return [];
+    }
+    const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
+    hydrated.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+    return hydrated;
+  } catch (err: any) {
+    if (err?.code === 'ER_NO_SUCH_TABLE') {
+      try {
+        await ensureSingleMissingTableFromSchema(pool, 'users');
+      } catch {
+        // abaikan jika user tidak memiliki hak CREATE
+      }
+      return [];
+    }
+    throw err;
   }
-  const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
-  hydrated.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
-  return hydrated;
+}
+
+async function safeSelectTableRows(
+  pool: MysqlPoolLike,
+  tableName: string,
+  customSql?: string
+): Promise<any[]> {
+  const sql = customSql || `SELECT * FROM \`${tableName}\``;
+  try {
+    const [rows] = await pool.query(sql);
+    return Array.isArray(rows) ? rows : [];
+  } catch (err: any) {
+    if (err?.code === 'ER_NO_SUCH_TABLE') {
+      try {
+        await ensureSingleMissingTableFromSchema(pool, tableName);
+        const [retryRows] = await pool.query(sql);
+        return Array.isArray(retryRows) ? retryRows : [];
+      } catch {
+        return [];
+      }
+    }
+    throw err;
+  }
 }
 
 /**
- * Membaca seluruh data aplikasi dari tabel-tabel MySQL menggunakan query SELECT
+ * Membaca seluruh data aplikasi dari tabel-tabel MySQL menggunakan query SELECT secara non-destructive
  */
 export async function loadDatabaseFromMysql(
   pool: MysqlPoolLike,
   _fallbackSeed?: DatabaseSchema
 ): Promise<DatabaseSchema | null> {
-  await ensureMysqlSchema(pool);
-
-  const users = await fetchUsersFromMysql(pool);
-  const hasUsers = users.length > 0;
-
-  if (!hasUsers) {
-    const [countRows] = await pool.query(
-      `SELECT (
-        (SELECT COUNT(*) FROM programs) +
-        (SELECT COUNT(*) FROM outcomes) +
-        (SELECT COUNT(*) FROM outputs) +
-        (SELECT COUNT(*) FROM activities) +
-        (SELECT COUNT(*) FROM tors) +
-        (SELECT COUNT(*) FROM cash_advances) +
-        (SELECT COUNT(*) FROM meeting_minutes) +
-        (SELECT COUNT(*) FROM participants) +
-        (SELECT COUNT(*) FROM attendance_records) +
-        (SELECT COUNT(*) FROM system_kv_store)
-      ) AS total_cnt`
+  try {
+    await ensureMysqlSchema(pool);
+  } catch (schemaErr: any) {
+    console.warn(
+      `[DB] Non-destructive schema check skipped during MySQL load: ${String(schemaErr?.message || schemaErr)}`
     );
-    const totalExistingRecords = Number(countRows?.[0]?.total_cnt || 0);
-
-    if (totalExistingRecords === 0) {
-      return null; // Seluruh tabel aplikasi MySQL benar-benar kosong
-    }
   }
 
-  const [programRows] = await pool.query('SELECT * FROM programs');
-  const [outcomeRows] = await pool.query('SELECT * FROM outcomes');
-  const [outputRows] = await pool.query('SELECT * FROM outputs');
-  const [activityRows] = await pool.query('SELECT * FROM activities');
-  const [subActivityRows] = await pool.query('SELECT * FROM sub_activities');
-  const [torRows] = await pool.query('SELECT * FROM tors');
-  const [approvalRows] = await pool.query('SELECT * FROM approval_records');
-  const [caRows] = await pool.query('SELECT * FROM cash_advances');
-  const [minutesRows] = await pool.query('SELECT * FROM meeting_minutes');
-  const [participantRows] = await pool.query('SELECT * FROM participants');
-  const [attendanceRows] = await pool.query('SELECT * FROM attendance_records');
-  const [auditRows] = await pool.query('SELECT * FROM audit_logs');
-  const [kvRows] = await pool.query('SELECT store_key, store_value FROM system_kv_store');
+  const users = await fetchUsersFromMysql(pool);
+  const programRows = await safeSelectTableRows(pool, 'programs');
+  const outcomeRows = await safeSelectTableRows(pool, 'outcomes');
+  const outputRows = await safeSelectTableRows(pool, 'outputs');
+  const activityRows = await safeSelectTableRows(pool, 'activities');
+  const subActivityRows = await safeSelectTableRows(pool, 'sub_activities');
+  const torRows = await safeSelectTableRows(pool, 'tors');
+  const approvalRows = await safeSelectTableRows(pool, 'approval_records');
+  const caRows = await safeSelectTableRows(pool, 'cash_advances');
+  const minutesRows = await safeSelectTableRows(pool, 'meeting_minutes');
+  const participantRows = await safeSelectTableRows(pool, 'participants');
+  const attendanceRows = await safeSelectTableRows(pool, 'attendance_records');
+  const auditRows = await safeSelectTableRows(pool, 'audit_logs');
+  const kvRows = await safeSelectTableRows(
+    pool,
+    'system_kv_store',
+    'SELECT store_key, store_value FROM `system_kv_store`'
+  );
+
+  const totalExistingRecords =
+    users.length +
+    programRows.length +
+    outcomeRows.length +
+    outputRows.length +
+    activityRows.length +
+    subActivityRows.length +
+    torRows.length +
+    approvalRows.length +
+    caRows.length +
+    minutesRows.length +
+    participantRows.length +
+    attendanceRows.length +
+    kvRows.length;
+
+  if (totalExistingRecords === 0) {
+    return null; // Seluruh tabel aplikasi MySQL benar-benar kosong
+  }
 
   const kvMap: Record<string, any> = {};
   if (Array.isArray(kvRows)) {
     for (const row of kvRows) {
-      kvMap[row.store_key] = safeJsonParse(row.store_value, null);
+      if (row && row.store_key) {
+        kvMap[row.store_key] = safeJsonParse(row.store_value, null);
+      }
     }
   }
 
@@ -655,36 +752,57 @@ export async function loadDatabaseFromMysql(
     updatedAt: r?.updated_at || raw.updatedAt || undefined,
   }));
 
-  const tors = parseAndHydrateRows<any>(torRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    torNumber: r?.tor_number ?? raw.torNumber,
-    title: r?.title || raw.title || '',
-    programId: r?.program_id || raw.programId || '',
-    outcomeId: r?.outcome_id || raw.outcomeId || '',
-    outputId: r?.output_id || raw.outputId || '',
-    activityId: r?.activity_id || raw.activityId || '',
-    createdById: raw.createdById || r?.created_by_user_id || '',
-    createdByName: r?.created_by_name || raw.createdByName || '',
-    status: r?.status || raw.status || 'Draft',
-    currentWorkflowStage:
-      r?.current_stage !== undefined && r?.current_stage !== null
-        ? Number(r.current_stage)
-        : Number(raw.currentWorkflowStage ?? 1),
-    budgetRequested:
-      r?.budget_requested !== undefined && r?.budget_requested !== null
-        ? Number(r.budget_requested)
-        : Number(raw.budgetRequested ?? 0),
-    budgetActualSpent:
-      r?.budget_actual_spent !== undefined && r?.budget_actual_spent !== null
-        ? Number(r.budget_actual_spent)
-        : Number(raw.budgetActualSpent ?? 0),
-    startDate: r?.start_date || raw.startDate || '',
-    endDate: r?.end_date || raw.endDate || '',
-    location: r?.location || raw.location || '',
-    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
-  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const tors = parseAndHydrateRows<any>(torRows, (r, raw) => {
+    const resolvedSubmissionStatus =
+      raw.submissionStatus || r?.status || raw.status || 'Draft';
+    const resolvedActivityStatus =
+      raw.activityStatus ||
+      (resolvedSubmissionStatus === 'Disetujui' ? 'Sedang Berjalan' : 'Belum Dimulai');
+    const resolvedTorNumber =
+      (typeof r?.tor_number === 'string' && r.tor_number.trim()) ||
+      (typeof raw.torNumber === 'string' && raw.torNumber.trim()) ||
+      '';
+    const resolvedCreatedById =
+      raw.createdById || raw.createdByUserId || r?.created_by_user_id || raw.picId || '';
+    const resolvedCreatedByName =
+      r?.created_by_name || raw.createdByName || raw.picName || '';
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      torNumber: resolvedTorNumber,
+      title: r?.title || raw.title || '',
+      programId: r?.program_id || raw.programId || '',
+      outcomeId: r?.outcome_id || raw.outcomeId || '',
+      outputId: r?.output_id || raw.outputId || '',
+      activityId: r?.activity_id || raw.activityId || '',
+      activityName: raw.activityName || r?.title || raw.title || '',
+      picId: raw.picId || resolvedCreatedById,
+      picName: raw.picName || resolvedCreatedByName,
+      createdById: resolvedCreatedById,
+      createdByName: resolvedCreatedByName,
+      status: r?.status || resolvedSubmissionStatus,
+      submissionStatus: resolvedSubmissionStatus,
+      activityStatus: resolvedActivityStatus,
+      implementingTeam: Array.isArray(raw.implementingTeam) ? raw.implementingTeam : [],
+      currentWorkflowStage:
+        r?.current_stage !== undefined && r?.current_stage !== null
+          ? Number(r.current_stage)
+          : Number(raw.currentWorkflowStage ?? 1),
+      budgetRequested:
+        r?.budget_requested !== undefined && r?.budget_requested !== null
+          ? Number(r.budget_requested)
+          : Number(raw.budgetRequested ?? 0),
+      budgetActualSpent:
+        r?.budget_actual_spent !== undefined && r?.budget_actual_spent !== null
+          ? Number(r.budget_actual_spent)
+          : Number(raw.budgetActualSpent ?? 0),
+      startDate: r?.start_date || raw.startDate || '',
+      endDate: r?.end_date || raw.endDate || '',
+      location: r?.location || raw.location || '',
+      createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+    };
+  }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const approvalRecords = parseAndHydrateRows<any>(approvalRows, (r, raw) => ({
     ...raw,
@@ -700,58 +818,91 @@ export async function loadDatabaseFromMysql(
     timestamp: r?.timestamp || raw.timestamp || new Date().toISOString(),
   })).sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
 
-  const cashAdvances = parseAndHydrateRows<any>(caRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    caNumber: r?.ca_number || raw.caNumber || raw.documentNumber || '',
-    documentNumber: raw.documentNumber || r?.ca_number || raw.caNumber || '',
-    torId: r?.tor_id || raw.torId || '',
-    programId: r?.program_id || raw.programId || '',
-    activityId: r?.activity_id || raw.activityId || '',
-    requesterId: raw.requesterId || r?.requester_user_id || '',
-    requesterName: r?.requester_name || raw.requesterName || '',
-    totalAmount:
-      r?.total_amount !== undefined && r?.total_amount !== null
-        ? Number(r.total_amount)
-        : Number(raw.totalAmount ?? 0),
-    realizedAmount:
-      r?.realized_amount !== undefined && r?.realized_amount !== null
-        ? Number(r.realized_amount)
-        : raw.realizedAmount !== undefined
-        ? Number(raw.realizedAmount)
-        : undefined,
-    status: r?.status || raw.status || 'Draft',
-    reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
-    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
-  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const cashAdvances = parseAndHydrateRows<any>(caRows, (r, raw) => {
+    const resolvedCaNumber =
+      (typeof raw.advanceNumber === 'string' && raw.advanceNumber.trim()) ||
+      (typeof r?.ca_number === 'string' && r.ca_number.trim()) ||
+      (typeof raw.caNumber === 'string' && raw.caNumber.trim()) ||
+      (typeof raw.documentNumber === 'string' && raw.documentNumber.trim()) ||
+      '';
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      advanceNumber: resolvedCaNumber,
+      caNumber: resolvedCaNumber,
+      documentNumber: raw.documentNumber || resolvedCaNumber,
+      torId: r?.tor_id || raw.torId || '',
+      torNumber: raw.torNumber || '',
+      programId: r?.program_id || raw.programId || '',
+      activityId: r?.activity_id || raw.activityId || '',
+      activityTitle: raw.activityTitle || '',
+      requesterId: raw.requesterId || r?.requester_user_id || '',
+      requesterName: r?.requester_name || raw.requesterName || '',
+      items: Array.isArray(raw.items) ? raw.items : [],
+      totalAmount:
+        r?.total_amount !== undefined && r?.total_amount !== null
+          ? Number(r.total_amount)
+          : Number(raw.totalAmount ?? 0),
+      realizedAmount:
+        r?.realized_amount !== undefined && r?.realized_amount !== null
+          ? Number(r.realized_amount)
+          : raw.realizedAmount !== undefined
+          ? Number(raw.realizedAmount)
+          : undefined,
+      status: r?.status || raw.status || 'Draft',
+      reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
+      createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
+    };
+  }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const meetingMinutes = parseAndHydrateRows<any>(minutesRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ''),
     torId: r?.tor_id || raw.torId || '',
     activityId: r?.activity_id || raw.activityId || '',
+    documentNumber: raw.documentNumber || '',
     title: r?.title || raw.title || '',
     meetingDate: r?.meeting_date || raw.meetingDate || raw.date || '',
     date: raw.date || r?.meeting_date || raw.meetingDate || '',
     location: r?.location || raw.location || '',
+    meetingLocation: raw.meetingLocation || r?.location || raw.location || '',
     createdById: raw.createdById || r?.created_by_user_id || '',
     status: r?.status || raw.status || 'Draft',
     createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
-  const participantDatabase = parseAndHydrateRows<any>(participantRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    entityType: raw.entityType || r?.participant_type || 'INDIVIDUAL',
-    fullName: raw.fullName || r?.name || raw.name || '',
-    name: r?.name || raw.name || raw.fullName || '',
-    gender: r?.gender || raw.gender || undefined,
-    institutionName: raw.institutionName || r?.organization_or_group || undefined,
-    phoneNumber: raw.phoneNumber || r?.phone || undefined,
-    cityOrRegency: raw.cityOrRegency || r?.village_or_city || undefined,
-    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
-  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const participantDatabase = parseAndHydrateRows<any>(participantRows, (r, raw) => {
+    const rawPtType = String(
+      raw.participantType || r?.participant_type || raw.entityType || ''
+    ).toUpperCase();
+    const resolvedParticipantType =
+      rawPtType.includes('KELOMPOK') || rawPtType.includes('ORGANISASI') || rawPtType === 'GROUP'
+        ? 'KELOMPOK/ORGANISASI'
+        : 'INDIVIDU';
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      participantType: resolvedParticipantType,
+      entityType:
+        raw.entityType ||
+        (resolvedParticipantType === 'KELOMPOK/ORGANISASI' ? 'GROUP' : 'INDIVIDUAL'),
+      fullName: raw.fullName || r?.name || raw.name || '',
+      groupName:
+        raw.groupName ||
+        (resolvedParticipantType === 'KELOMPOK/ORGANISASI'
+          ? r?.name || raw.name || ''
+          : undefined),
+      name: r?.name || raw.name || raw.fullName || raw.groupName || '',
+      gender: r?.gender || raw.gender || undefined,
+      institutionName: raw.institutionName || r?.organization_or_group || undefined,
+      phoneNumber: raw.phoneNumber || r?.phone || undefined,
+      cityOrRegency: raw.cityOrRegency || r?.village_or_city || undefined,
+      regionCommunity: raw.regionCommunity || r?.village_or_city || raw.cityOrRegency || '',
+      programInvolvements: Array.isArray(raw.programInvolvements) ? raw.programInvolvements : [],
+      createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
+    };
+  }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const hydratedAttendanceRecords = parseAndHydrateRows<any>(attendanceRows, (r, raw) => {
     const rawHasActiveUnclosedClock =
@@ -1505,7 +1656,7 @@ function buildApprovalRecordCandidateRow(ar: any, nowIso: string): Record<string
 function buildCashAdvanceCandidateRow(ca: any, nowIso: string): Record<string, any> {
   return {
     id: String(ca.id).slice(0, 128),
-    ca_number: truncStr(ca.caNumber || ca.documentNumber, 128),
+    ca_number: truncStr(ca.advanceNumber || ca.caNumber || ca.documentNumber, 128),
     tor_id: truncStr(ca.torId, 128),
     program_id: truncStr(ca.programId, 128),
     activity_id: truncStr(ca.activityId, 128),

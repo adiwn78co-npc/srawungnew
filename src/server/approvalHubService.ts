@@ -110,6 +110,22 @@ function ensureWorkflowConfigs(
   return draft.approvalWorkflowConfigs;
 }
 
+function findUserByIdOrName(users: User[], userId?: string, userName?: string): User | undefined {
+  if (userId) {
+    const byId = users.find((u) => u.id === userId);
+    if (byId) return byId;
+  }
+  const normName = String(userName || '').trim().toLowerCase();
+  if (normName) {
+    return users.find(
+      (u) =>
+        String(u.name || '').trim().toLowerCase() === normName ||
+        String(u.email || '').trim().toLowerCase() === normName
+    );
+  }
+  return undefined;
+}
+
 function resolveDynamicRaciForOutput(
   draft: DatabaseSchema,
   outputId: string,
@@ -119,36 +135,42 @@ function resolveDynamicRaciForOutput(
   const raci = draft.outputRaciRecords?.[outputId];
   const output = (draft.outputs || []).find((o) => o.id === outputId);
   const outcome = (draft.outcomes || []).find((oc) => oc.id === output?.outcomeId);
-  const activeUsers = (draft.users || []).filter((u) => u.isActive);
+  const allUsers = draft.users || [];
+  const activeUsers = allUsers.filter((u) => u.isActive !== false);
 
   // Resolve A2 (Accountable Finance): from RACI or active Finance user with approval authority
   const designatedA2User =
-    (raci?.accountableFinanceUserId &&
-      activeUsers.find((u) => u.id === raci.accountableFinanceUserId)) ||
+    findUserByIdOrName(activeUsers, raci?.accountableFinanceUserId, raci?.accountableFinanceUserName) ||
     activeUsers.find((u) => u.role === 'finance' && u.permissions?.canApproveTor !== false) ||
     activeUsers.find((u) => u.role === 'finance') ||
-    (draft.users || []).find((u) => u.role === 'finance');
+    allUsers.find((u) => u.role === 'finance');
 
   // Resolve Direktur from active users with role === 'director'
   const directorUser =
     activeUsers.find((u) => u.role === 'director') ||
-    (draft.users || []).find((u) => u.role === 'director');
+    allUsers.find((u) => u.role === 'director');
 
   // Resolve Program Manager fallback if Output RACI has not yet set A1
   const pmUser =
     activeUsers.find((u) => u.role === 'program_manager') ||
-    (draft.users || []).find((u) => u.role === 'program_manager');
+    allUsers.find((u) => u.role === 'program_manager');
 
   const staffFallback =
     activeUsers.find((u) => u.role === 'staff' || u.role === 'meal') || activeUsers[0];
 
+  const matchedResponsibleUser =
+    findUserByIdOrName(allUsers, raci?.responsibleUserId, raci?.responsibleUserName) ||
+    findUserByIdOrName(allUsers, fallbackResponsibleId, fallbackResponsibleName) ||
+    findUserByIdOrName(allUsers, output?.picId, output?.picName);
+
   const responsibleUserId =
+    matchedResponsibleUser?.id ||
     raci?.responsibleUserId ||
     fallbackResponsibleId ||
     output?.picId ||
     staffFallback?.id ||
     '';
-  const responsibleUser = (draft.users || []).find((u) => u.id === responsibleUserId);
+  const responsibleUser = matchedResponsibleUser || allUsers.find((u) => u.id === responsibleUserId);
   const responsibleUserName =
     responsibleUser?.name ||
     raci?.responsibleUserName ||
@@ -156,11 +178,18 @@ function resolveDynamicRaciForOutput(
     output?.picName ||
     'Responsible (R)';
 
+  const matchedAccountableProgramUser =
+    findUserByIdOrName(allUsers, raci?.accountableUserId, raci?.accountableUserName) ||
+    findUserByIdOrName(allUsers, outcome?.picId, outcome?.picName);
+
   const accountableProgramUserId =
-    raci?.accountableUserId || outcome?.picId || pmUser?.id || '';
-  const accountableProgramUser = (draft.users || []).find(
-    (u) => u.id === accountableProgramUserId
-  );
+    matchedAccountableProgramUser?.id ||
+    raci?.accountableUserId ||
+    outcome?.picId ||
+    pmUser?.id ||
+    '';
+  const accountableProgramUser =
+    matchedAccountableProgramUser || allUsers.find((u) => u.id === accountableProgramUserId);
   const accountableProgramUserName =
     accountableProgramUser?.name ||
     raci?.accountableUserName ||
@@ -168,11 +197,15 @@ function resolveDynamicRaciForOutput(
     pmUser?.name ||
     'Accountable Program (A1)';
 
-  const accountableFinanceUserId =
-    raci?.accountableFinanceUserId || designatedA2User?.id || '';
-  const accountableFinanceUser = (draft.users || []).find(
-    (u) => u.id === accountableFinanceUserId
+  const matchedAccountableFinanceUser = findUserByIdOrName(
+    allUsers,
+    raci?.accountableFinanceUserId,
+    raci?.accountableFinanceUserName
   );
+  const accountableFinanceUserId =
+    matchedAccountableFinanceUser?.id || raci?.accountableFinanceUserId || designatedA2User?.id || '';
+  const accountableFinanceUser =
+    matchedAccountableFinanceUser || allUsers.find((u) => u.id === accountableFinanceUserId);
   const accountableFinanceUserName =
     accountableFinanceUser?.name ||
     raci?.accountableFinanceUserName ||
@@ -581,12 +614,14 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       };
     }
 
+    const torRefNumber = String(tor.torNumber || tor.id || '');
+
     draft.approvalHubItems[itemId] = {
       id: itemId,
       sourceEntityId: tor.id,
       sourceTorId: tor.id,
-      referenceNumber: tor.torNumber,
-      title: tor.title,
+      referenceNumber: torRefNumber,
+      title: tor.title || hier.activityName || 'Dokumen ToR',
       groupType: 'program_documents',
       categoryCode: 'tor',
       categoryLabel: CATEGORY_META.tor.label,
@@ -622,9 +657,9 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         activityPeriod: `${tor.startDate} s/d ${tor.endDate}`,
         attachments: [
           {
-            label: `Dokumen Utama ToR (${tor.torNumber})`,
+            label: `Dokumen Utama ToR (${torRefNumber})`,
             url: `#tor-preview-${tor.id}`,
-            refCode: tor.torNumber,
+            refCode: torRefNumber,
           },
           ...hier.monitoringTools
             .filter((t) => t.toolUrl)
@@ -662,9 +697,13 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
 
   // 2. Sync Cash Advance Request (Pengajuan Uang Muka) -> R -> A2 -> Direktur (Persetujuan Akhir)
   for (const ca of cashAdvances) {
-    const parentTor = tors.find((t) => t.id === ca.torId) || tors[0];
+    const parentTor = tors.find(
+      (t) => t.id === ca.torId || (Boolean(ca.torNumber) && t.torNumber === ca.torNumber)
+    );
     if (!parentTor) continue;
     const itemId = `apv-ca-${ca.id}`;
+    const caAdvanceNumber = String(ca.advanceNumber || (ca as any).caNumber || ca.id || '');
+    const caTorNumber = String(ca.torNumber || parentTor.torNumber || parentTor.id || '');
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
     const raci = resolveDynamicRaciForOutput(
       draft,
@@ -800,7 +839,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       sourceEntityId: ca.id,
       sourceTorId: parentTor.id,
       sourceCashAdvanceId: ca.id,
-      referenceNumber: ca.advanceNumber,
+      referenceNumber: caAdvanceNumber,
       title: `Cash Advance: ${ca.activityTitle || parentTor.title}`,
       groupType: 'financial_documents',
       categoryCode: 'cash_advance',
@@ -826,12 +865,12 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       previewData: {
         summaryText:
           ca.implementationTimelineSummary ||
-          `Pengajuan dana operasional untuk kegiatan ${ca.activityTitle} (${ca.location}).`,
-        location: ca.location,
+          `Pengajuan dana operasional untuk kegiatan ${ca.activityTitle || parentTor.title} (${ca.location || parentTor.location || '-'}).`,
+        location: ca.location || parentTor.location,
         activityPeriod: `${ca.activityStartDate} s/d ${ca.activityEndDate}`,
         purposeOfFunds:
           ca.implementationTimelineSummary ||
-          `Pembiayaan pelaksanaan aktivitas lapangan pada ${ca.activityTitle} sesuai ToR ${ca.torNumber}.`,
+          `Pembiayaan pelaksanaan aktivitas lapangan pada ${ca.activityTitle || parentTor.title} sesuai ToR ${caTorNumber}.`,
         budgetLines: (ca.items || []).map((it) => ({
           code: it.budgetCode || '1.1.1',
           description: `${it.description} (${it.volume} ${it.unit} × ${it.frequency} ${it.frequencyUnit || 'Kali'})`,
@@ -848,14 +887,14 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         bankSource: isDisbursed ? bankSource : undefined,
         attachments: [
           {
-            label: `Referensi Dokumen ToR (${ca.torNumber})`,
+            label: `Referensi Dokumen ToR (${caTorNumber})`,
             url: `#tor-ref-${parentTor.id}`,
-            refCode: ca.torNumber,
+            refCode: caTorNumber,
           },
           {
             label: `Rincian Anggaran & Rekening Tujuan (${ca.bankName} - ${ca.bankAccountNumber})`,
             url: `#ca-items-${ca.id}`,
-            refCode: ca.advanceNumber,
+            refCode: caAdvanceNumber,
           },
         ],
       },
@@ -899,7 +938,9 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       }
 
       const finWfConfig = configs['laporan_keuangan_akhir'];
-      const finRefNumber = ca.advanceNumber.replace(/^CA\//, 'LPJ-FIN/');
+      const finRefNumber = caAdvanceNumber
+        ? caAdvanceNumber.replace(/^CA\//, 'LPJ-FIN/')
+        : `LPJ-FIN/${ca.id}`;
       const finStepInfo = buildStepsForStatus({
         categoryCode: 'laporan_keuangan_akhir',
         status: finStatus,
@@ -1053,8 +1094,9 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
 
   // 4. Sync Notulen Rapat (Meeting Minutes) -> R -> A1 -> Direktur (Pelaporan)
   for (const mm of meetingMinutes) {
-    const parentTor =
-      tors.find((t) => t.id === mm.torId || t.torNumber === mm.torNumber) || tors[0];
+    const parentTor = tors.find(
+      (t) => t.id === mm.torId || (Boolean(mm.torNumber) && t.torNumber === mm.torNumber)
+    );
     if (!parentTor) continue;
     const itemId = `apv-notulen-${mm.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -1162,7 +1204,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
   // 5. Sync Dokumentasi Kegiatan -> R -> A1 -> Direktur (Pelaporan)
   for (const doc of docList) {
     if (!doc || !doc.torId) continue;
-    const parentTor = tors.find((t) => t.id === doc.torId) || tors[0];
+    const parentTor = tors.find((t) => t.id === doc.torId);
     if (!parentTor) continue;
     const itemId = `apv-doc-${doc.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -1179,7 +1221,8 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       existing?.status || (isSeededDoc ? 'Approved' : 'Pending Verification');
     const wfConfig = configs['dokumentasi'];
     const refNumber =
-      doc.documentNumber || parentTor.torNumber.replace(/^TOR\//, 'DOK/');
+      doc.documentNumber ||
+      String(parentTor.torNumber || parentTor.id || '').replace(/^TOR\//, 'DOK/');
     const stepInfo = buildStepsForStatus({
       categoryCode: 'dokumentasi',
       status: mappedStatus,
@@ -1300,7 +1343,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
   // 6. Sync Executive Summary (Ringkasan Eksekutif) -> R -> A1 -> Direktur (Pelaporan)
   const execItems = monReports.filter((m) => m.toolId === 'EXEC-SUMMARY');
   for (const exec of execItems) {
-    const parentTor = tors.find((t) => t.id === exec.torId) || tors[0];
+    const parentTor = tors.find((t) => t.id === exec.torId);
     if (!parentTor) continue;
     const itemId = `apv-exec-${exec.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -1320,7 +1363,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
     }
 
     const wfConfig = configs['executive_summary'];
-    const refNumber = parentTor.torNumber.replace(/^TOR\//, 'EXEC/');
+    const refNumber = String(parentTor.torNumber || parentTor.id || '').replace(/^TOR\//, 'EXEC/');
     const stepInfo = buildStepsForStatus({
       categoryCode: 'executive_summary',
       status: mappedStatus,
@@ -1749,18 +1792,50 @@ export function canUserViewApprovalItem(
     return true;
   }
 
+  const normUserName = String(user.name || '').trim().toLowerCase();
   const isProgramDoc = item.groupType === 'program_documents';
   const isFinanceDoc = item.groupType === 'financial_documents';
 
-  if (isProgramDoc && access.isA1 && item.accountableProgramUserId === user.id) {
+  if (
+    isProgramDoc &&
+    access.isA1 &&
+    (item.accountableProgramUserId === user.id ||
+      (Boolean(normUserName) &&
+        String(item.accountableProgramUserName || '').trim().toLowerCase() === normUserName))
+  ) {
     return true;
   }
 
-  if (isFinanceDoc && access.isA2 && item.accountableFinanceUserId === user.id) {
+  if (
+    isFinanceDoc &&
+    access.isA2 &&
+    (item.accountableFinanceUserId === user.id ||
+      (Boolean(normUserName) &&
+        String(item.accountableFinanceUserName || '').trim().toLowerCase() === normUserName))
+  ) {
     return true;
   }
 
   if (isFinanceDoc && access.isFinance) {
+    return true;
+  }
+
+  // Responsible (R) dapat melihat tiket dokumen miliknya sendiri untuk pemantauan progres
+  if (
+    access.isR &&
+    (item.responsibleUserId === user.id ||
+      (Boolean(normUserName) &&
+        String(item.responsibleUserName || '').trim().toLowerCase() === normUserName))
+  ) {
+    return true;
+  }
+
+  // Peran manajemen program / MEAL dengan hak lihat seluruh ToR dapat memantau dokumen program secara baca-saja
+  if (
+    isProgramDoc &&
+    (user.role === 'program_manager' || user.role === 'meal') &&
+    user.permissions?.canViewAllTors !== false
+  ) {
     return true;
   }
 

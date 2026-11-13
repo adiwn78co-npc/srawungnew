@@ -795,40 +795,6 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
 
   return (
     <div className="space-y-4">
-      {/* Pengingat Ganti Password Default System Administrator */}
-      {currentUser?.mustChangePassword && (
-        <div className="bg-amber-50/95 border border-amber-300 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-          <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-lg bg-amber-500 text-white flex items-center justify-center shrink-0 mt-0.5">
-              <KeyRound className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-xs sm:text-sm font-bold text-amber-950">
-                  Pengingat Keamanan: Akun System Administrator Masih Menggunakan Password Default
-                </h3>
-                <span className="px-2 py-0.5 rounded bg-amber-200/80 text-amber-950 text-[10px] font-bold uppercase tracking-wider">
-                  Wajib Diganti
-                </span>
-              </div>
-              <p className="text-xs text-amber-900/90 mt-0.5 leading-relaxed">
-                Demi keamanan produksi, segera ganti password default System Administrator (
-                <code className="font-mono font-bold">admin</code> /{' '}
-                <code className="font-mono font-bold">admin@ngo-harmoni.org</code>) dengan password baru pilihan Anda.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => handleOpenResetPassword(currentUser)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer shrink-0"
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>Ganti Password Admin Sekarang</span>
-          </button>
-        </div>
-      )}
-
       {/* Pengaturan Nama Organisasi Terpusat (System Organisator) — Gambar 3 & Gambar 4 */}
       <form
         onSubmit={handleSaveOrgSettings}

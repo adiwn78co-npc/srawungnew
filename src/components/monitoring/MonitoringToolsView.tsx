@@ -477,17 +477,25 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   const [programSearch, setProgramSearch] = useState<string>('');
   const [outputSearch, setOutputSearch] = useState<string>('');
 
-  // Scope filter: regular users only see their assigned Outputs; PM/Director/Admin can toggle 'ALL' vs 'ASSIGNED'
-  const canViewAllScope = isProgramManager || isDirector || isAdmin;
+  // Scope filter: all active users can toggle 'ALL' vs 'ASSIGNED'; management/MEAL/Finance/HR default to 'ALL'
+  const isGlobalViewerRole =
+    isProgramManager ||
+    isDirector ||
+    isAdmin ||
+    currentUser?.role === 'meal' ||
+    currentUser?.role === 'finance' ||
+    currentUser?.role === 'hr' ||
+    Boolean(currentUser?.permissions?.canViewAllTors || currentUser?.permissions?.canManagePrograms);
+  const canViewAllScope = Boolean(currentUser && currentUser.isActive !== false);
   const [viewScope, setViewScope] = useState<'ALL' | 'ASSIGNED'>(() =>
-    isProgramManager || isDirector || isAdmin ? 'ALL' : 'ASSIGNED'
+    isGlobalViewerRole ? 'ALL' : 'ASSIGNED'
   );
 
   useEffect(() => {
-    if (!canViewAllScope) {
-      setViewScope('ASSIGNED');
+    if (isGlobalViewerRole) {
+      setViewScope('ALL');
     }
-  }, [canViewAllScope]);
+  }, [isGlobalViewerRole]);
 
   // Show / Hide Activity per Output (keyed by output.id)
   const [expandedOutputActivityMap, setExpandedOutputActivityMap] = useState<
@@ -743,13 +751,23 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     (output: Output): 'Responsible' | 'Accountable Program' | 'Accountable Finance' | null => {
       if (!currentUser || currentUser.isActive === false) return null;
       const raci = getOutputRaci(output);
-      if (raci.responsibleUserId === currentUser.id) {
+      const normUserName = String(currentUser.name || '').trim().toLowerCase();
+      if (
+        raci.responsibleUserId === currentUser.id ||
+        (Boolean(normUserName) &&
+          String(raci.responsibleUserName || '').trim().toLowerCase() === normUserName)
+      ) {
         return 'Responsible';
       }
-      if (raci.accountableUserId === currentUser.id && raci.accountableUserId !== '') {
+      if (
+        (raci.accountableUserId === currentUser.id && raci.accountableUserId !== '') ||
+        (Boolean(normUserName) &&
+          String(raci.accountableUserName || '').trim().toLowerCase() === normUserName)
+      ) {
         return 'Accountable Program';
       }
       if (
+        raci.accountableFinanceUserId === currentUser.id ||
         currentUser.role === 'finance' ||
         (currentUser.roleTitle || '').toLowerCase().includes('finance')
       ) {
@@ -760,12 +778,43 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     [currentUser, getOutputRaci]
   );
 
-  // Whether an Output is assigned to the current user (R, A1, or A2)
+  // Whether an Output is assigned/related to the current user (R, A1, A2, C, I, Output PIC, or ToR PIC/creator)
   const isOutputAssignedToCurrentUser = useCallback(
     (output: Output): boolean => {
-      return getUserRaciRoleForOutput(output) !== null;
+      if (!currentUser || currentUser.isActive === false) return false;
+      if (getUserRaciRoleForOutput(output) !== null) return true;
+      const normUserName = String(currentUser.name || '').trim().toLowerCase();
+      if (
+        output.picId === currentUser.id ||
+        (Boolean(normUserName) &&
+          String(output.picName || '').trim().toLowerCase() === normUserName)
+      ) {
+        return true;
+      }
+      const raci = getOutputRaci(output);
+      if (
+        Boolean(normUserName) &&
+        ((raci.consultedUsers || []).some(
+          (n) => String(n || '').trim().toLowerCase() === normUserName
+        ) ||
+          (raci.informedUsers || []).some(
+            (n) => String(n || '').trim().toLowerCase() === normUserName
+          ))
+      ) {
+        return true;
+      }
+      const hasRelatedTor = tors.some(
+        (t) =>
+          t.outputId === output.id &&
+          (t.picId === currentUser.id ||
+            t.createdById === currentUser.id ||
+            (Boolean(normUserName) &&
+              (String(t.picName || '').trim().toLowerCase() === normUserName ||
+                String(t.createdByName || '').trim().toLowerCase() === normUserName)))
+      );
+      return hasRelatedTor;
     },
-    [getUserRaciRoleForOutput]
+    [currentUser, getOutputRaci, getUserRaciRoleForOutput, tors]
   );
 
   // Access control for Managing Monitoring Tools & Creating ToR on an Output:
@@ -818,8 +867,14 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     [tors]
   );
 
-  // Effective scope: if !canViewAllScope or viewScope === 'ASSIGNED', filter strictly to user's assigned Outputs
-  const isStrictAssignedView = !canViewAllScope || viewScope === 'ASSIGNED';
+  // Effective scope: if user has at least one assigned output and selects 'ASSIGNED', filter to assigned Outputs;
+  // if zero outputs are assigned yet in the system for this user, show all programs/outputs in read-only mode so data never appears missing.
+  const hasAnyAssignedOutput = useMemo(
+    () => outputs.some((op) => isOutputAssignedToCurrentUser(op)),
+    [outputs, isOutputAssignedToCurrentUser]
+  );
+  const isStrictAssignedView =
+    (!canViewAllScope || viewScope === 'ASSIGNED') && hasAnyAssignedOutput;
 
   // Filtered Programs for Initial List View
   const filteredPrograms = useMemo(() => {

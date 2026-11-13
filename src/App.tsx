@@ -113,11 +113,26 @@ function MainAppContent() {
     try {
       setLoading(true);
       const [torsRes, statsRes, progRes, auditRes, apvRes, finBudgetsRes] = await Promise.all([
-        api.getTors(),
-        api.getStats(),
-        api.getPrograms(),
-        api.getAuditLogs(),
-        api.getApprovalHub().catch(() => null),
+        api.getTors().catch((err) => {
+          console.error('Failed to load ToRs:', err);
+          return null;
+        }),
+        api.getStats().catch((err) => {
+          console.error('Failed to load stats:', err);
+          return null;
+        }),
+        api.getPrograms().catch((err) => {
+          console.error('Failed to load programs:', err);
+          return null;
+        }),
+        api.getAuditLogs().catch((err) => {
+          console.error('Failed to load audit logs:', err);
+          return null;
+        }),
+        api.getApprovalHub().catch((err) => {
+          console.error('Failed to load approval hub:', err);
+          return null;
+        }),
         api.getFinanceProgramBudgets().catch(() => null),
         hydrateOrganizationSettingsFromServer().catch(() => null),
       ]);

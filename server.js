@@ -21,7 +21,9 @@ for (const envCandidate of [
   path.resolve(process.cwd(), ".env"),
   path.resolve(process.cwd(), ".env.production"),
   path.resolve(process.cwd(), ".env.local"),
+  path.resolve(process.cwd(), "..", ".env"),
   path.resolve(__poolDir, ".env"),
+  path.resolve(__poolDir, "..", ".env"),
   path.resolve(__poolDir, "..", "..", ".env"),
   path.resolve(__poolDir, "..", "..", ".env.production")
 ]) {
@@ -39,7 +41,9 @@ function isProductionHostingerEnvironment() {
   if (isCloudRunEnvironment()) {
     return false;
   }
-  return process.env.NODE_ENV === "production" || Boolean(process.env.IN_PASSENGER) || Boolean(process.env.PASSENGER_APP_ENV) || Boolean(process.env.MYSQL_HOST || process.env.MYSQL_DATABASE || process.env.MYSQL_USER);
+  return process.env.NODE_ENV === "production" || Boolean(process.env.IN_PASSENGER) || Boolean(process.env.PASSENGER_APP_ENV) || Boolean(
+    process.env.MYSQL_HOST || process.env.MYSQL_DATABASE || process.env.MYSQL_DB || process.env.MYSQL_USER || process.env.MYSQL_URL || process.env.DB_HOST || process.env.DB_DATABASE || process.env.DB_NAME || process.env.DB_USER
+  );
 }
 function isLoopbackMysqlHost(rawHost) {
   const host = String(rawHost || "").trim().toLowerCase();
@@ -50,12 +54,35 @@ function isPlaceholderValue(val) {
   return !clean || clean === "your_mysql_user" || clean === "your_mysql_database" || clean === "your_mysql_password";
 }
 function resolveMysqlConfig() {
-  const mysqlHost = String(process.env.MYSQL_HOST || "").trim();
-  const mysqlUser = String(process.env.MYSQL_USER || "").trim();
-  const mysqlName = String(process.env.MYSQL_DATABASE || "").trim();
-  const rawPort = process.env.MYSQL_PORT || "3306";
+  let urlHost = "";
+  let urlPort = 0;
+  let urlUser = "";
+  let urlPass = "";
+  let urlDb = "";
+  const rawConnUrl = String(process.env.MYSQL_URL || process.env.DATABASE_URL || "").trim();
+  if (rawConnUrl && /^mysql2?:\/\//i.test(rawConnUrl)) {
+    try {
+      const parsed = new URL(rawConnUrl);
+      urlHost = parsed.hostname || "";
+      urlPort = parsed.port ? Number(parsed.port) : 0;
+      urlUser = decodeURIComponent(parsed.username || "");
+      urlPass = decodeURIComponent(parsed.password || "");
+      urlDb = decodeURIComponent((parsed.pathname || "").replace(/^\/+/, ""));
+    } catch {
+    }
+  }
+  const mysqlHost = String(
+    process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ""
+  ).trim();
+  const mysqlUser = String(
+    process.env.MYSQL_USER || process.env.DB_USER || process.env.DB_USERNAME || urlUser || ""
+  ).trim();
+  const mysqlName = String(
+    process.env.MYSQL_DATABASE || process.env.MYSQL_DB || process.env.DB_DATABASE || process.env.DB_NAME || urlDb || ""
+  ).trim();
+  const rawPort = process.env.MYSQL_PORT || process.env.DB_PORT || (urlPort ? String(urlPort) : "3306");
   const port = Number(rawPort) > 0 ? Number(rawPort) : 3306;
-  const rawPassword = process.env.MYSQL_PASSWORD ?? "";
+  const rawPassword = process.env.MYSQL_PASSWORD ?? process.env.DB_PASSWORD ?? process.env.DB_PASS ?? urlPass ?? "";
   const password = isPlaceholderValue(String(rawPassword)) ? "" : String(rawPassword);
   const user = !isPlaceholderValue(mysqlUser) ? mysqlUser : "";
   const database = !isPlaceholderValue(mysqlName) ? mysqlName : "";
@@ -63,7 +90,9 @@ function resolveMysqlConfig() {
   if (!host && user && database && !isCloudRunEnvironment()) {
     host = "127.0.0.1";
   }
-  const socketPath = String(process.env.MYSQL_SOCKET_PATH || "").trim() || void 0;
+  const socketPath = String(
+    process.env.MYSQL_SOCKET_PATH || process.env.DB_SOCKET_PATH || ""
+  ).trim() || void 0;
   return {
     host,
     port,
@@ -299,55 +328,79 @@ function hydrateMysqlUserRow(r) {
   };
 }
 async function fetchUsersFromMysql(pool) {
-  const [userRows] = await pool.query("SELECT * FROM users");
-  if (!Array.isArray(userRows)) {
-    return [];
+  try {
+    const [userRows] = await pool.query("SELECT * FROM users");
+    if (!Array.isArray(userRows)) {
+      return [];
+    }
+    const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
+    hydrated.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+    return hydrated;
+  } catch (err) {
+    if (err?.code === "ER_NO_SUCH_TABLE") {
+      try {
+        await ensureSingleMissingTableFromSchema(pool, "users");
+      } catch {
+      }
+      return [];
+    }
+    throw err;
   }
-  const hydrated = userRows.map(hydrateMysqlUserRow).filter((u) => Boolean(u.id));
-  hydrated.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
-  return hydrated;
+}
+async function safeSelectTableRows(pool, tableName, customSql) {
+  const sql = customSql || `SELECT * FROM \`${tableName}\``;
+  try {
+    const [rows] = await pool.query(sql);
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    if (err?.code === "ER_NO_SUCH_TABLE") {
+      try {
+        await ensureSingleMissingTableFromSchema(pool, tableName);
+        const [retryRows] = await pool.query(sql);
+        return Array.isArray(retryRows) ? retryRows : [];
+      } catch {
+        return [];
+      }
+    }
+    throw err;
+  }
 }
 async function loadDatabaseFromMysql(pool, _fallbackSeed) {
-  await ensureMysqlSchema(pool);
-  const users = await fetchUsersFromMysql(pool);
-  const hasUsers = users.length > 0;
-  if (!hasUsers) {
-    const [countRows] = await pool.query(
-      `SELECT (
-        (SELECT COUNT(*) FROM programs) +
-        (SELECT COUNT(*) FROM outcomes) +
-        (SELECT COUNT(*) FROM outputs) +
-        (SELECT COUNT(*) FROM activities) +
-        (SELECT COUNT(*) FROM tors) +
-        (SELECT COUNT(*) FROM cash_advances) +
-        (SELECT COUNT(*) FROM meeting_minutes) +
-        (SELECT COUNT(*) FROM participants) +
-        (SELECT COUNT(*) FROM attendance_records) +
-        (SELECT COUNT(*) FROM system_kv_store)
-      ) AS total_cnt`
+  try {
+    await ensureMysqlSchema(pool);
+  } catch (schemaErr) {
+    console.warn(
+      `[DB] Non-destructive schema check skipped during MySQL load: ${String(schemaErr?.message || schemaErr)}`
     );
-    const totalExistingRecords = Number(countRows?.[0]?.total_cnt || 0);
-    if (totalExistingRecords === 0) {
-      return null;
-    }
   }
-  const [programRows] = await pool.query("SELECT * FROM programs");
-  const [outcomeRows] = await pool.query("SELECT * FROM outcomes");
-  const [outputRows] = await pool.query("SELECT * FROM outputs");
-  const [activityRows] = await pool.query("SELECT * FROM activities");
-  const [subActivityRows] = await pool.query("SELECT * FROM sub_activities");
-  const [torRows] = await pool.query("SELECT * FROM tors");
-  const [approvalRows] = await pool.query("SELECT * FROM approval_records");
-  const [caRows] = await pool.query("SELECT * FROM cash_advances");
-  const [minutesRows] = await pool.query("SELECT * FROM meeting_minutes");
-  const [participantRows] = await pool.query("SELECT * FROM participants");
-  const [attendanceRows] = await pool.query("SELECT * FROM attendance_records");
-  const [auditRows] = await pool.query("SELECT * FROM audit_logs");
-  const [kvRows] = await pool.query("SELECT store_key, store_value FROM system_kv_store");
+  const users = await fetchUsersFromMysql(pool);
+  const programRows = await safeSelectTableRows(pool, "programs");
+  const outcomeRows = await safeSelectTableRows(pool, "outcomes");
+  const outputRows = await safeSelectTableRows(pool, "outputs");
+  const activityRows = await safeSelectTableRows(pool, "activities");
+  const subActivityRows = await safeSelectTableRows(pool, "sub_activities");
+  const torRows = await safeSelectTableRows(pool, "tors");
+  const approvalRows = await safeSelectTableRows(pool, "approval_records");
+  const caRows = await safeSelectTableRows(pool, "cash_advances");
+  const minutesRows = await safeSelectTableRows(pool, "meeting_minutes");
+  const participantRows = await safeSelectTableRows(pool, "participants");
+  const attendanceRows = await safeSelectTableRows(pool, "attendance_records");
+  const auditRows = await safeSelectTableRows(pool, "audit_logs");
+  const kvRows = await safeSelectTableRows(
+    pool,
+    "system_kv_store",
+    "SELECT store_key, store_value FROM `system_kv_store`"
+  );
+  const totalExistingRecords = users.length + programRows.length + outcomeRows.length + outputRows.length + activityRows.length + subActivityRows.length + torRows.length + approvalRows.length + caRows.length + minutesRows.length + participantRows.length + attendanceRows.length + kvRows.length;
+  if (totalExistingRecords === 0) {
+    return null;
+  }
   const kvMap = {};
   if (Array.isArray(kvRows)) {
     for (const row of kvRows) {
-      kvMap[row.store_key] = safeJsonParse(row.store_value, null);
+      if (row && row.store_key) {
+        kvMap[row.store_key] = safeJsonParse(row.store_value, null);
+      }
     }
   }
   const parseAndHydrateRows = (rows, hydrator) => {
@@ -441,27 +494,40 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     createdAt: r?.created_at || raw.createdAt || void 0,
     updatedAt: r?.updated_at || raw.updatedAt || void 0
   }));
-  const tors = parseAndHydrateRows(torRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    torNumber: r?.tor_number ?? raw.torNumber,
-    title: r?.title || raw.title || "",
-    programId: r?.program_id || raw.programId || "",
-    outcomeId: r?.outcome_id || raw.outcomeId || "",
-    outputId: r?.output_id || raw.outputId || "",
-    activityId: r?.activity_id || raw.activityId || "",
-    createdById: raw.createdById || r?.created_by_user_id || "",
-    createdByName: r?.created_by_name || raw.createdByName || "",
-    status: r?.status || raw.status || "Draft",
-    currentWorkflowStage: r?.current_stage !== void 0 && r?.current_stage !== null ? Number(r.current_stage) : Number(raw.currentWorkflowStage ?? 1),
-    budgetRequested: r?.budget_requested !== void 0 && r?.budget_requested !== null ? Number(r.budget_requested) : Number(raw.budgetRequested ?? 0),
-    budgetActualSpent: r?.budget_actual_spent !== void 0 && r?.budget_actual_spent !== null ? Number(r.budget_actual_spent) : Number(raw.budgetActualSpent ?? 0),
-    startDate: r?.start_date || raw.startDate || "",
-    endDate: r?.end_date || raw.endDate || "",
-    location: r?.location || raw.location || "",
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const tors = parseAndHydrateRows(torRows, (r, raw) => {
+    const resolvedSubmissionStatus = raw.submissionStatus || r?.status || raw.status || "Draft";
+    const resolvedActivityStatus = raw.activityStatus || (resolvedSubmissionStatus === "Disetujui" ? "Sedang Berjalan" : "Belum Dimulai");
+    const resolvedTorNumber = typeof r?.tor_number === "string" && r.tor_number.trim() || typeof raw.torNumber === "string" && raw.torNumber.trim() || "";
+    const resolvedCreatedById = raw.createdById || raw.createdByUserId || r?.created_by_user_id || raw.picId || "";
+    const resolvedCreatedByName = r?.created_by_name || raw.createdByName || raw.picName || "";
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      torNumber: resolvedTorNumber,
+      title: r?.title || raw.title || "",
+      programId: r?.program_id || raw.programId || "",
+      outcomeId: r?.outcome_id || raw.outcomeId || "",
+      outputId: r?.output_id || raw.outputId || "",
+      activityId: r?.activity_id || raw.activityId || "",
+      activityName: raw.activityName || r?.title || raw.title || "",
+      picId: raw.picId || resolvedCreatedById,
+      picName: raw.picName || resolvedCreatedByName,
+      createdById: resolvedCreatedById,
+      createdByName: resolvedCreatedByName,
+      status: r?.status || resolvedSubmissionStatus,
+      submissionStatus: resolvedSubmissionStatus,
+      activityStatus: resolvedActivityStatus,
+      implementingTeam: Array.isArray(raw.implementingTeam) ? raw.implementingTeam : [],
+      currentWorkflowStage: r?.current_stage !== void 0 && r?.current_stage !== null ? Number(r.current_stage) : Number(raw.currentWorkflowStage ?? 1),
+      budgetRequested: r?.budget_requested !== void 0 && r?.budget_requested !== null ? Number(r.budget_requested) : Number(raw.budgetRequested ?? 0),
+      budgetActualSpent: r?.budget_actual_spent !== void 0 && r?.budget_actual_spent !== null ? Number(r.budget_actual_spent) : Number(raw.budgetActualSpent ?? 0),
+      startDate: r?.start_date || raw.startDate || "",
+      endDate: r?.end_date || raw.endDate || "",
+      location: r?.location || raw.location || "",
+      createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const approvalRecords = parseAndHydrateRows(approvalRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
@@ -475,48 +541,67 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     comment: raw.comment ?? r?.notes ?? raw.notes ?? "",
     timestamp: r?.timestamp || raw.timestamp || (/* @__PURE__ */ new Date()).toISOString()
   })).sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
-  const cashAdvances = parseAndHydrateRows(caRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    caNumber: r?.ca_number || raw.caNumber || raw.documentNumber || "",
-    documentNumber: raw.documentNumber || r?.ca_number || raw.caNumber || "",
-    torId: r?.tor_id || raw.torId || "",
-    programId: r?.program_id || raw.programId || "",
-    activityId: r?.activity_id || raw.activityId || "",
-    requesterId: raw.requesterId || r?.requester_user_id || "",
-    requesterName: r?.requester_name || raw.requesterName || "",
-    totalAmount: r?.total_amount !== void 0 && r?.total_amount !== null ? Number(r.total_amount) : Number(raw.totalAmount ?? 0),
-    realizedAmount: r?.realized_amount !== void 0 && r?.realized_amount !== null ? Number(r.realized_amount) : raw.realizedAmount !== void 0 ? Number(raw.realizedAmount) : void 0,
-    status: r?.status || raw.status || "Draft",
-    reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const cashAdvances = parseAndHydrateRows(caRows, (r, raw) => {
+    const resolvedCaNumber = typeof raw.advanceNumber === "string" && raw.advanceNumber.trim() || typeof r?.ca_number === "string" && r.ca_number.trim() || typeof raw.caNumber === "string" && raw.caNumber.trim() || typeof raw.documentNumber === "string" && raw.documentNumber.trim() || "";
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      advanceNumber: resolvedCaNumber,
+      caNumber: resolvedCaNumber,
+      documentNumber: raw.documentNumber || resolvedCaNumber,
+      torId: r?.tor_id || raw.torId || "",
+      torNumber: raw.torNumber || "",
+      programId: r?.program_id || raw.programId || "",
+      activityId: r?.activity_id || raw.activityId || "",
+      activityTitle: raw.activityTitle || "",
+      requesterId: raw.requesterId || r?.requester_user_id || "",
+      requesterName: r?.requester_name || raw.requesterName || "",
+      items: Array.isArray(raw.items) ? raw.items : [],
+      totalAmount: r?.total_amount !== void 0 && r?.total_amount !== null ? Number(r.total_amount) : Number(raw.totalAmount ?? 0),
+      realizedAmount: r?.realized_amount !== void 0 && r?.realized_amount !== null ? Number(r.realized_amount) : raw.realizedAmount !== void 0 ? Number(raw.realizedAmount) : void 0,
+      status: r?.status || raw.status || "Draft",
+      reportApprovalStatus: r?.report_approval_status ?? raw.reportApprovalStatus,
+      createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const meetingMinutes = parseAndHydrateRows(minutesRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
     torId: r?.tor_id || raw.torId || "",
     activityId: r?.activity_id || raw.activityId || "",
+    documentNumber: raw.documentNumber || "",
     title: r?.title || raw.title || "",
     meetingDate: r?.meeting_date || raw.meetingDate || raw.date || "",
     date: raw.date || r?.meeting_date || raw.meetingDate || "",
     location: r?.location || raw.location || "",
+    meetingLocation: raw.meetingLocation || r?.location || raw.location || "",
     createdById: raw.createdById || r?.created_by_user_id || "",
     status: r?.status || raw.status || "Draft",
     createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
   })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-  const participantDatabase = parseAndHydrateRows(participantRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    entityType: raw.entityType || r?.participant_type || "INDIVIDUAL",
-    fullName: raw.fullName || r?.name || raw.name || "",
-    name: r?.name || raw.name || raw.fullName || "",
-    gender: r?.gender || raw.gender || void 0,
-    institutionName: raw.institutionName || r?.organization_or_group || void 0,
-    phoneNumber: raw.phoneNumber || r?.phone || void 0,
-    cityOrRegency: raw.cityOrRegency || r?.village_or_city || void 0,
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const participantDatabase = parseAndHydrateRows(participantRows, (r, raw) => {
+    const rawPtType = String(
+      raw.participantType || r?.participant_type || raw.entityType || ""
+    ).toUpperCase();
+    const resolvedParticipantType = rawPtType.includes("KELOMPOK") || rawPtType.includes("ORGANISASI") || rawPtType === "GROUP" ? "KELOMPOK/ORGANISASI" : "INDIVIDU";
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      participantType: resolvedParticipantType,
+      entityType: raw.entityType || (resolvedParticipantType === "KELOMPOK/ORGANISASI" ? "GROUP" : "INDIVIDUAL"),
+      fullName: raw.fullName || r?.name || raw.name || "",
+      groupName: raw.groupName || (resolvedParticipantType === "KELOMPOK/ORGANISASI" ? r?.name || raw.name || "" : void 0),
+      name: r?.name || raw.name || raw.fullName || raw.groupName || "",
+      gender: r?.gender || raw.gender || void 0,
+      institutionName: raw.institutionName || r?.organization_or_group || void 0,
+      phoneNumber: raw.phoneNumber || r?.phone || void 0,
+      cityOrRegency: raw.cityOrRegency || r?.village_or_city || void 0,
+      regionCommunity: raw.regionCommunity || r?.village_or_city || raw.cityOrRegency || "",
+      programInvolvements: Array.isArray(raw.programInvolvements) ? raw.programInvolvements : [],
+      createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const hydratedAttendanceRecords = parseAndHydrateRows(attendanceRows, (r, raw) => {
     const rawHasActiveUnclosedClock = Boolean(raw && typeof raw.clockInTime === "string" && raw.clockInTime.trim() && !raw.clockInTime.startsWith("0000-00-00")) && (!raw.clockOutTime || String(raw.clockOutTime).trim() === "" || String(raw.clockOutTime).startsWith("0000-00-00"));
     const normalizedClockIn = normalizeHydratedAttendanceTimestamp(r?.clock_in_time, raw?.clockInTime, false);
@@ -1104,7 +1189,7 @@ function buildApprovalRecordCandidateRow(ar, nowIso) {
 function buildCashAdvanceCandidateRow(ca, nowIso) {
   return {
     id: String(ca.id).slice(0, 128),
-    ca_number: truncStr(ca.caNumber || ca.documentNumber, 128),
+    ca_number: truncStr(ca.advanceNumber || ca.caNumber || ca.documentNumber, 128),
     tor_id: truncStr(ca.torId, 128),
     program_id: truncStr(ca.programId, 128),
     activity_id: truncStr(ca.activityId, 128),
@@ -1631,1051 +1716,10 @@ async function saveDatabaseToMysql(pool, data) {
   }
 }
 
-// src/server/integratedSeedData.ts
-var SEED_PROGRAMS = [
-  {
-    id: "prog-wijna-01",
-    name: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    code: "PRJ3581",
-    location: "Kabupaten Demak, Kabupaten Pekalongan & Kota Semarang, Jawa Tengah",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    description: "Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia (1 April 2026 \u2013 31 Maret 2027).",
-    folderUrl: "https://drive.google.com/drive/folders/wijna-prj3581-2026",
-    picId: "",
-    picName: "",
-    status: "Aktif",
-    createdAt: "2026-04-01T08:00:00Z",
-    updatedAt: "2026-10-15T10:30:00Z"
-  }
-];
-var SEED_OUTCOMES = [
-  {
-    id: "outc-srw-1",
-    programId: "prog-wijna-01",
-    programName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    outcomeNumber: "Outcome 1",
-    name: "Outcome 1: WIJNA has increased its organization structure, Governance and Operational Capacity.",
-    description: "WIJNA has increased its organization structure, Governance and Operational Capacity.",
-    picId: "",
-    picName: "",
-    projectName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outc-srw-1a",
-        name: "WIJNA has expanded its organizational structure and strengthened its governance through clearer roles, updated policies, and increased board engagement.",
-        description: "WIJNA board minutes, board resolutions/memoranda, approved institutional policies, and strategic planning documents and organizational sustainability strategy.",
-        dataSource: "WIJNA board minutes, board resolutions/memoranda, approved institutional policies, and strategic planning documents and organizational sustainability strategy.",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "1 board minutes & 1 board resolution each year ; 10 policies by the end of project ; 6 board member (3 M & 3 F) ; 6 Wijna's staff (3M & 3F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: `WIJNA has strengthened its organizational governance and developed robust policies to support its sustainability goals. The board has demonstrated strong engagement in enhancing WIJNA's capacity, building its independence, and identifying opportunities to access additional funding to ensure sustainability."`,
-        endOfProjectGoal: `WIJNA has strengthened its organizational governance and developed robust policies to support its sustainability goals. The board has demonstrated strong engagement in enhancing WIJNA's capacity, building its independence, and identifying opportunities to access additional funding to ensure sustainability."`,
-        unit: "Dokumen & Kebijakan",
-        verificationMethod: "WIJNA board minutes, board resolutions/memoranda, approved institutional policies, and strategic planning documents and organizational sustainability strategy."
-      }
-    ],
-    createdAt: "2026-01-08T08:00:00Z"
-  },
-  {
-    id: "outc-srw-2",
-    programId: "prog-wijna-01",
-    programName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    outcomeNumber: "Outcome 2",
-    name: "Outcome 2: WIJNA has increased its capacity to access grants beyond MCC",
-    description: "WIJNA has increased its capacity to access grants beyond MCC",
-    picId: "",
-    picName: "",
-    projectName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outc-srw-2a",
-        name: "# of staff trained in grant writing and donor compliance.",
-        description: "Training certificate, and pre and post test, training reports",
-        dataSource: "Training certificate, and pre and post test, training reports",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "3 staff (2M 1F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "3 staffs trained in grant writing and donor compliance.",
-        endOfProjectGoal: "3 staffs trained in grant writing and donor compliance.",
-        unit: "Staff",
-        verificationMethod: "Training certificate, and pre and post test, training reports"
-      },
-      {
-        id: "ind-outc-srw-2b",
-        name: "# of new donor engagements or partnerships established.",
-        description: "Partnership agreement, colaboration agreement",
-        dataSource: "Partnership agreement, colaboration agreement",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "3 new donors or partners by WIJNA staff (2M 3F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "at least 3 new donor engagements or partnerships established.",
-        endOfProjectGoal: "at least 3 new donor engagements or partnerships established.",
-        unit: "Partnerships",
-        verificationMethod: "Partnership agreement, colaboration agreement"
-      },
-      {
-        id: "ind-outc-srw-2c",
-        name: "# of grant proposals submitted to non-MCC donors.",
-        description: "Proposal submited",
-        dataSource: "Proposal submited",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "2 grant proposal by WIJNA staff (2M 3F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "at least 2 grant proposals submitted to non-MCC donors.",
-        endOfProjectGoal: "at least 2 grant proposals submitted to non-MCC donors.",
-        unit: "Proposals",
-        verificationMethod: "Proposal submited"
-      },
-      {
-        id: "ind-outc-srw-2d",
-        name: "# of successful grants awarded from new funding sources.",
-        description: "Award letter, and project contract",
-        dataSource: "Award letter, and project contract",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "2 awards",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "at least 2 successful grants awarded from new funding sources.",
-        endOfProjectGoal: "at least 2 successful grants awarded from new funding sources.",
-        unit: "Awards",
-        verificationMethod: "Award letter, and project contract"
-      }
-    ],
-    createdAt: "2026-01-09T08:00:00Z"
-  },
-  {
-    id: "outc-srw-3",
-    programId: "prog-wijna-01",
-    programName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    outcomeNumber: "Outcome 3",
-    name: "Outcome 3: Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.",
-    description: "Enhanced accompaniment and technical support delivered to implementing partners in Indonesia to strengthen program quality and effectiveness.",
-    picId: "",
-    picName: "",
-    projectName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outc-srw-3a",
-        name: "# of accompaniment and technical support sessions conducted with implementing partners.",
-        description: "Technical support report, attendance",
-        dataSource: "Technical support report, attendance",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 20 accompaniment and technical support sessions conducted with implementing partners each year",
-        endOfProjectGoal: "at least 20 accompaniment and technical support sessions conducted with implementing partners each year",
-        unit: "Sessions",
-        verificationMethod: "Technical support report, attendance"
-      },
-      {
-        id: "ind-outc-srw-3b",
-        name: "% of implementing partners reporting improved capacity due to accompaniment support.",
-        description: "Partner feedback form, and partner implementation performance",
-        dataSource: "Partner feedback form, and partner implementation performance",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 90% of implementing partners reporting improved capacity due to accompaniment support.",
-        endOfProjectGoal: "at least 90% of implementing partners reporting improved capacity due to accompaniment support.",
-        unit: "Persen (%)",
-        verificationMethod: "Partner feedback form, and partner implementation performance"
-      },
-      {
-        id: "ind-outc-srw-3c",
-        name: "% of implementing partners meeting MCC program quality standards after receiving support.",
-        description: "MCC feedback to implementing partner",
-        dataSource: "MCC feedback to implementing partner",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 90% of implementing partners meeting MCC program quality standards after receiving support.",
-        endOfProjectGoal: "at least 90% of implementing partners meeting MCC program quality standards after receiving support.",
-        unit: "Persen (%)",
-        verificationMethod: "MCC feedback to implementing partner"
-      }
-    ],
-    createdAt: "2026-01-09T09:00:00Z"
-  },
-  {
-    id: "outc-srw-4",
-    programId: "prog-wijna-01",
-    programName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    outcomeNumber: "Outcome 4",
-    name: "Outcome 4: Improved implementation quality and impact of Global Service Learning (GSL) Program co-implemented by WIJNA and MCC",
-    description: "Improved implementation quality and impact of Global Service Learning (GSL) Program co-implemented by WIJNA and MCC",
-    picId: "",
-    picName: "",
-    projectName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outc-srw-4a",
-        name: "% of participants reporting a meaningful experience as GSL participants serving in Indonesia.",
-        description: "Participant feedback form and reflection document",
-        dataSource: "Participant feedback form and reflection document",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "24 GSL participant (12 sent and 12 recived) (12 M 12F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "100 % of participants reporting a meaningful experience as GSL participants serving in Indonesia.",
-        endOfProjectGoal: "100 % of participants reporting a meaningful experience as GSL participants serving in Indonesia.",
-        unit: "Persen (%)",
-        verificationMethod: "Participant feedback form and reflection document"
-      },
-      {
-        id: "ind-outc-srw-4b",
-        name: "# of Indonesian participants successfully recruited into the GSL Program and placed in other countries.",
-        description: "Official placement document or official invitation from MCC (Signed ROA)",
-        dataSource: "Official placement document or official invitation from MCC (Signed ROA)",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "12 GSL participants (6M 6F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "12 Indonesian participants successfully recruited into the GSL Program and placed in other countries.",
-        endOfProjectGoal: "12 Indonesian participants successfully recruited into the GSL Program and placed in other countries.",
-        unit: "Participants",
-        verificationMethod: "Official placement document or official invitation from MCC (Signed ROA)"
-      }
-    ],
-    createdAt: "2026-01-09T10:00:00Z"
-  },
-  {
-    id: "outc-srw-5",
-    programId: "prog-wijna-01",
-    programName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    outcomeNumber: "Outcome 5",
-    name: "Outcome 5: Improve strategic engagement between MCC and Mennonite and Papua Synod",
-    description: "Improve strategic engagement between MCC and Mennonite and Papua Synod",
-    picId: "",
-    picName: "",
-    projectName: "PRJ3581 Organizational Strengthening and Operational Support for WIJNA to accompany MCC partners and to implement the GSL Program in Indonesia.",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outc-srw-5a",
-        name: "# of meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        description: "Activity report, attendance, documentation",
-        dataSource: "Activity report, attendance, documentation",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 MCC representatives (male and female), 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female), 6 persons from Synods (3 male & 3 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "6 meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        endOfProjectGoal: "6 meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        unit: "Sessions",
-        verificationMethod: "Activity report, attendance, documentation"
-      }
-    ],
-    createdAt: "2026-01-09T11:00:00Z"
-  }
-];
-var SEED_OUTPUTS = [
-  {
-    id: "outp-srw-1-1",
-    outcomeId: "outc-srw-1",
-    outputNumber: "Output 1.1",
-    name: "Output 1.1: Conduct regular board meeting",
-    description: "Conduct regular board meeting",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-1-1a",
-        name: "# of regular Board meetings conducted according to the approved governance schedule",
-        description: "Board minutes and attendance",
-        dataSource: "Board minutes and attendance",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "3 Board' minutes and 3 attendance list ; 6 board member (3 M & 3 F) ; 6 Wijna's staff (3M & 3F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "Three board meetings are conducted over the project period, at a rate of one per year from 2026 to 2028.",
-        endOfProjectGoal: "Three board meetings are conducted over the project period, at a rate of one per year from 2026 to 2028.",
-        unit: "Meetings",
-        verificationMethod: "Board minutes and attendance"
-      }
-    ],
-    createdAt: "2026-01-10T08:00:00Z"
-  },
-  {
-    id: "outp-srw-1-2",
-    outcomeId: "outc-srw-1",
-    outputNumber: "Output 1.2",
-    name: "Output 1.2: Organizational policies are developed, updated, and approved by the Board.",
-    description: "Organizational policies are developed, updated, and approved by the Board.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-1-2a",
-        name: "% of organizational policies developed/updated and approved by the Board.",
-        description: "Policies develop, improved and approved by the Board",
-        dataSource: "Policies develop, improved and approved by the Board",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "10 policies by the end of project",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "100% of the organizational policies prioritized in the project are developed/updated and formally approved by the Board by the end of the project.",
-        endOfProjectGoal: "100% of the organizational policies prioritized in the project are developed/updated and formally approved by the Board by the end of the project.",
-        unit: "Persen (%)",
-        verificationMethod: "Policies develop, improved and approved by the Board"
-      }
-    ],
-    createdAt: "2026-01-10T09:00:00Z"
-  },
-  {
-    id: "outp-srw-1-3",
-    outcomeId: "outc-srw-1",
-    outputNumber: "Output 1.3",
-    name: "Output 1.3: Key staff positions are filled with qualified and competent personnel, with staff retention maintained.",
-    description: "Key staff positions are filled with qualified and competent personnel, with staff retention maintained.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-1-3a",
-        name: "% of key staff positions filled; retention rate at 90%.",
-        description: "Staff JD, and contract, updated organizational chart",
-        dataSource: "Staff JD, and contract, updated organizational chart",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "6 WIJNA staff (3M 3F) & the 3rd year recruited 2 new staffs (1M 1F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "100% key staff positions are filled with qualified and competent personnel, and overall staff retention is maintained at least 90%",
-        endOfProjectGoal: "100% key staff positions are filled with qualified and competent personnel, and overall staff retention is maintained at least 90%",
-        unit: "Persen (%)",
-        verificationMethod: "Staff JD, and contract, updated organizational chart"
-      }
-    ],
-    createdAt: "2026-01-10T09:30:00Z"
-  },
-  {
-    id: "outp-srw-1-4",
-    outcomeId: "outc-srw-1",
-    outputNumber: "Output 1.4",
-    name: "Output 1.4: Staff receive development training that enhances their skills and improves overall institutional effectiveness.",
-    description: "Staff receive development training that enhances their skills and improves overall institutional effectiveness.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-1-4a",
-        name: "% of staff who complete development training aligned with institutional capacity needs.",
-        description: "Training certificate, and pre and post test, training reports",
-        dataSource: "Training certificate, and pre and post test, training reports",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "3 staff (2M 1F)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 80% of staff have completed development training that is aligned with institutional capacity needs.",
-        endOfProjectGoal: "at least 80% of staff have completed development training that is aligned with institutional capacity needs.",
-        unit: "Persen (%)",
-        verificationMethod: "Training certificate, and pre and post test, training reports"
-      }
-    ],
-    createdAt: "2026-01-10T10:00:00Z"
-  },
-  {
-    id: "outp-srw-2-1",
-    outcomeId: "outc-srw-2",
-    outputNumber: "Output 2.1",
-    name: "Output 2.1: Donor networking activities strengthened to expand engagement and partnership opportunities.",
-    description: "Donor networking activities strengthened to expand engagement and partnership opportunities.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-2-1a",
-        name: "# of new or strengthened donor relationships established through networking activities.",
-        description: "Activity report",
-        dataSource: "Activity report",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "3 new donors or partners by WIJNA staff (2M 3F)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 3 new or strengthened donor relationships have been established through WIJNA\u2019s networking activities.",
-        endOfProjectGoal: "at least 3 new or strengthened donor relationships have been established through WIJNA\u2019s networking activities.",
-        unit: "Donor Relationships",
-        verificationMethod: "Activity report"
-      }
-    ],
-    createdAt: "2026-01-11T08:00:00Z"
-  },
-  {
-    id: "outp-srw-2-2",
-    outcomeId: "outc-srw-2",
-    outputNumber: "Output 2.2",
-    name: "Output 2.2: Relevant WIJNA staff trained in grants management and proposal development.",
-    description: "Relevant WIJNA staff trained in grants management and proposal development.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-2-2a",
-        name: "# of WIJNA staff who completed training in grants management and proposal development.",
-        description: "Training certificate, and pre and post test, training reports",
-        dataSource: "Training certificate, and pre and post test, training reports",
-        cumulativeType: "Non cumulative",
-        plannedDataBreakdown: "3 staff (2M 1F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "3 WIJNA staff who completed training in grants management and proposal development.",
-        endOfProjectGoal: "3 WIJNA staff who completed training in grants management and proposal development.",
-        unit: "Staff",
-        verificationMethod: "Training certificate, and pre and post test, training reports"
-      }
-    ],
-    createdAt: "2026-01-11T08:30:00Z"
-  },
-  {
-    id: "outp-srw-2-3",
-    outcomeId: "outc-srw-2",
-    outputNumber: "Output 2.3",
-    name: "Output 2.3: Project proposals are developed and submitted to potential funding sources.",
-    description: "Project proposals are developed and submitted to potential funding sources.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-2-3a",
-        name: "# of project proposals developed and submitted to potential funding sources",
-        description: "Proposal submited",
-        dataSource: "Proposal submited",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 project proposal by WIJNA staff (2M 3F)",
-        reportingFrequency: "Annual",
-        baseline: "TBA",
-        target: "2 project proposals developed and submitted to potential funding sources",
-        endOfProjectGoal: "2 project proposals developed and submitted to potential funding sources",
-        unit: "Project Proposals",
-        verificationMethod: "Proposal submited"
-      }
-    ],
-    createdAt: "2026-01-11T09:00:00Z"
-  },
-  {
-    id: "outp-srw-3-1",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.1",
-    name: "Output 3.1: Partner assessments conducted to evaluate appropriateness, capacity, safeguarding, and financial alignment with MCC standards.",
-    description: "Partner assessments conducted to evaluate appropriateness, capacity, safeguarding, and financial alignment with MCC standards.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-1a",
-        name: "# of partner assessments completed according to MCC standards.",
-        description: "Actual partner assessments",
-        dataSource: "Actual partner assessments",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 partner assesment ; 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "2 partner assessments completed according to MCC standards.",
-        endOfProjectGoal: "2 partner assessments completed according to MCC standards.",
-        unit: "Assessments",
-        verificationMethod: "Actual partner assessments"
-      }
-    ],
-    createdAt: "2026-01-12T08:00:00Z"
-  },
-  {
-    id: "outp-srw-3-2",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.2",
-    name: "Output 3.2: Partners receive technical support in project planning, implementation, reporting, and monitoring to ensure quality and effectiveness.",
-    description: "Partners receive technical support in project planning, implementation, reporting, and monitoring to ensure quality and effectiveness.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-2a",
-        name: "# of partners receiving technical support in project planning, implementation, reporting, or monitoring.",
-        description: "Improve report, proposal, CN development, submited human intrest stories, and quality documentation",
-        dataSource: "Improve report, proposal, CN development, submited human intrest stories, and quality documentation",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 partner ; 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "2 partners receiving technical support in project planning, implementation, reporting, or monitoring.",
-        endOfProjectGoal: "2 partners receiving technical support in project planning, implementation, reporting, or monitoring.",
-        unit: "Partners",
-        verificationMethod: "Improve report, proposal, CN development, submited human intrest stories, and quality documentation"
-      }
-    ],
-    createdAt: "2026-01-12T08:30:00Z"
-  },
-  {
-    id: "outp-srw-3-3",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.3",
-    name: "Output 3.3: Conduct orientations and training to strengthen partners' capacity for compliance with MCC standards and guidance.",
-    description: "Conduct orientations and training to strengthen partners' capacity for compliance with MCC standards and guidance.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-3a",
-        name: "# of partners receiving orientations and trainings on MCC standards and guidance.",
-        description: "Training report, attendance",
-        dataSource: "Training report, attendance",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 partner ; 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "2 partners receiving orientations and trainings on MCC standards and guidance.",
-        endOfProjectGoal: "2 partners receiving orientations and trainings on MCC standards and guidance.",
-        unit: "Partners",
-        verificationMethod: "Training report, attendance"
-      }
-    ],
-    createdAt: "2026-01-12T09:00:00Z"
-  },
-  {
-    id: "outp-srw-3-4",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.4",
-    name: "Output 3.4: Partners' peacebuilding skills and knowledge enhanced through MPI participation.",
-    description: "Partners' peacebuilding skills and knowledge enhanced through MPI participation.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-4a",
-        name: "# of partners participating in the Mindanao Peacebuilding Institute (MPI)",
-        description: "Training completion certificate from MPI, participant reflection",
-        dataSource: "Training completion certificate from MPI, participant reflection",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 person (1M ; 1F)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 2 person from WIJNA's partners participating in the Mindanao Peacebuilding Institute (MPI) each year",
-        endOfProjectGoal: "at least 2 person from WIJNA's partners participating in the Mindanao Peacebuilding Institute (MPI) each year",
-        unit: "Persons",
-        verificationMethod: "Training completion certificate from MPI, participant reflection"
-      }
-    ],
-    createdAt: "2026-01-12T09:30:00Z"
-  },
-  {
-    id: "outp-srw-3-5",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.5",
-    name: "Output 3.5: Annual partner gatherings and learning events conducted to foster collaboration and knowledge exchange",
-    description: "Annual partner gatherings and learning events conducted to foster collaboration and knowledge exchange",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-5a",
-        name: "# of partner gatherings and learning events conducted annually.",
-        description: "Activity Report and documentation",
-        dataSource: "Activity Report and documentation",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "20 staff of partners (10 female and 10 male), 2 Wijna Board members (1 male and 1 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "1 time partner gatherings and learning events conducted annually.",
-        endOfProjectGoal: "1 time partner gatherings and learning events conducted annually.",
-        unit: "Events",
-        verificationMethod: "Activity Report and documentation"
-      }
-    ],
-    createdAt: "2026-01-12T10:00:00Z"
-  },
-  {
-    id: "outp-srw-3-6",
-    outcomeId: "outc-srw-3",
-    outputNumber: "Output 3.6",
-    name: "Output 3.6: Regular monitoring and evaluation activities conducted to track project progress and outcomes (baseline and endline)",
-    description: "Regular monitoring and evaluation activities conducted to track project progress and outcomes (baseline and endline)",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-3-6a",
-        name: "# of monitoring and evaluation activities conducted",
-        description: "Monitoring and evalution report, baseline report",
-        dataSource: "Monitoring and evalution report, baseline report",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 partner ; 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "at least 20 monitoring and evaluation activities conducted annualy",
-        endOfProjectGoal: "at least 20 monitoring and evaluation activities conducted annualy",
-        unit: "Activities",
-        verificationMethod: "Monitoring and evalution report, baseline report"
-      }
-    ],
-    createdAt: "2026-01-12T10:30:00Z"
-  },
-  {
-    id: "outp-srw-4-1",
-    outcomeId: "outc-srw-4",
-    outputNumber: "Output 4.1",
-    name: "Output 4.1: Indonesian GSL participants are recruited, selected, and vetted.",
-    description: "Indonesian GSL participants are recruited, selected, and vetted.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-4-1a",
-        name: "# of Indonesian participants successfully recruited, selected, and vetted.",
-        description: "Official placement document or official invitation from MCC",
-        dataSource: "Official placement document or official invitation from MCC",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "12 GSL participants (6M 6F)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "12 Indonesian participants successfully recruited, selected, and vetted.",
-        endOfProjectGoal: "12 Indonesian participants successfully recruited, selected, and vetted.",
-        unit: "Participants",
-        verificationMethod: "Official placement document or official invitation from MCC"
-      }
-    ],
-    createdAt: "2026-01-13T08:00:00Z"
-  },
-  {
-    id: "outp-srw-4-2",
-    outcomeId: "outc-srw-4",
-    outputNumber: "Output 4.2",
-    name: "Output 4.2: Indonesian GSL participants deployed in Indonesia are supported through coordination, monitoring, and logistics.",
-    description: "Indonesian GSL participants deployed in Indonesia are supported through coordination, monitoring, and logistics.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-4-2a",
-        name: "# of participants receiving coordination, monitoring, and logistic support.",
-        description: "visa payment document, language training document, activity reports",
-        dataSource: "visa payment document, language training document, activity reports",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "12 GSL participants (6M 6F)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "12 participants receiving coordination, monitoring, and logistic support.",
-        endOfProjectGoal: "12 participants receiving coordination, monitoring, and logistic support.",
-        unit: "Participants",
-        verificationMethod: "visa payment document, language training document, activity reports"
-      }
-    ],
-    createdAt: "2026-01-13T08:30:00Z"
-  },
-  {
-    id: "outp-srw-4-3",
-    outcomeId: "outc-srw-4",
-    outputNumber: "Output 4.3",
-    name: "Output 4.3: Placements and host families are developed and prepared to support the Indonesia GSL Program.",
-    description: "Placements and host families are developed and prepared to support the Indonesia GSL Program.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-4-3a",
-        name: "# of placements and host families developed and prepared.",
-        description: "List of placement and host families",
-        dataSource: "List of placement and host families",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "12 host family-household (12 male 12 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "12 placements and 12 host families developed and prepared.",
-        endOfProjectGoal: "12 placements and 12 host families developed and prepared.",
-        unit: "Placements & Host Families",
-        verificationMethod: "List of placement and host families"
-      }
-    ],
-    createdAt: "2026-01-13T09:00:00Z"
-  },
-  {
-    id: "outp-srw-4-4",
-    outcomeId: "outc-srw-4",
-    outputNumber: "Output 4.4",
-    name: "Output 4.4: Related activities are conducted to support the GSL Program.",
-    description: "Related activities are conducted to support the GSL Program.",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-4-4a",
-        name: "# of GSL support activities implemented.",
-        description: "Activity report, attendance",
-        dataSource: "Activity report, attendance",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "12 host family-household (12 male 12 female) 20 alumni (10 male 10 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "12 GSL support activities implemented.",
-        endOfProjectGoal: "12 GSL support activities implemented.",
-        unit: "Activities",
-        verificationMethod: "Activity report, attendance"
-      }
-    ],
-    createdAt: "2026-01-13T09:30:00Z"
-  },
-  {
-    id: "outp-srw-5-1",
-    outcomeId: "outc-srw-5",
-    outputNumber: "Output 5.1",
-    name: "Output 5.1: Strengthened engagement and relationships between MCC and the Mennonite and Papua synods through networking and coordination support",
-    description: "Strengthened engagement and relationships between MCC and the Mennonite and Papua synods through networking and coordination support",
-    picId: "",
-    picName: "",
-    status: "Sedang Berjalan",
-    indicators: [
-      {
-        id: "ind-outp-srw-5-1a",
-        name: "# of meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        description: "Activity report, attendance, documentation",
-        dataSource: "Activity report, attendance, documentation",
-        cumulativeType: "Cumulative",
-        plannedDataBreakdown: "2 MCC representatives (male and female), 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female), 6 persons from Synods (3 male & 3 female)",
-        reportingFrequency: "Semi-annual",
-        baseline: "TBA",
-        target: "6 meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        endOfProjectGoal: "6 meetings, consultations, or coordination sessions facilitated by Wijna between MCC and the Mennonite and Papua synods",
-        unit: "Sessions",
-        verificationMethod: "Activity report, attendance, documentation"
-      }
-    ],
-    createdAt: "2026-01-14T08:00:00Z"
-  }
-];
-var SEED_ACTIVITIES = [
-  {
-    id: "act-srw-1-1-1",
-    outputId: "outp-srw-1-1",
-    activityNumber: "Activity 1.1",
-    code: "1.1.1",
-    name: "Activity 1.1 Conduct regular Board meetings to ensure accountability, effective governance and decision-making.",
-    description: "Regular board meetings will be conducted once a year. During these meetings, WIJNA will present the organization\u2019s financial status and key accomplishments within the period. Important decisions will be made, and policies reviewed and approved. Key discussions on WIJNA\u2019s sustainability, challenges, and opportunities will be held, and appropriate plans for execution by the WIJNA team will be developed.",
-    anticipatedInputs: "Venue, transportation, key documents, documenter",
-    plannedParticipantsBreakdown: "6 board member (3 male and 3 female) and 6 Wijna staff (3 male and 3 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-12T08:00:00Z"
-  },
-  {
-    id: "act-srw-1-2-1",
-    outputId: "outp-srw-1-2",
-    activityNumber: "Activity 1.2",
-    code: "1.2.1",
-    name: "Activity 1.2 Develop and update organizational policies and procedures to strengthen institutional systems and compliance.",
-    description: "WIJNA will develop and maintain its core organizational policies and conduct periodic updates to the supporting SOPs in strategic areas such as Safeguarding & PSEAH, Data Protection & Digital Security, Anti-Fraud and Anti-Corruption, Financial Integrity, MEAL, Climate & Environmental Risk, Security & Field Safety, Partnership & Local Coordination, HR, Communication & Ethical Media, and the complaint mechanism. These SOPs will be evaluated and revised annually to ensure relevance, quality, and compliance with national regulations and best-practice standards. All approved updates will be communicated to staff to ensure consistent implementation across the organization.",
-    anticipatedInputs: "Policy development materials, consultant or reviewer fees, staff time, software for document management, meeting facilitation, printing and dissemination costs.",
-    plannedParticipantsBreakdown: "5 Wijna staff (3 female and 2 male)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-12T08:30:00Z"
-  },
-  {
-    id: "act-srw-1-1-2",
-    outputId: "outp-srw-1-3",
-    activityNumber: "Activity 1.3",
-    code: "1.3.1",
-    name: "Activity 1.3 Recruit and retain qualified WIJNA staff to maintain organizational capacity and continuity.",
-    description: "WIJNA will recruit two qualified staff (a Finance Officer and a Program Manager in year 3) to maintain organizational capacity as two current staff retire. A structured knowledge-transfer process will ensure continuity. Recruitment will follow transparent, competency-based standards, supported by supervision, capacity-building, and a positive work environment to retain staff.",
-    anticipatedInputs: "Training venue, trainer or consultant fees, modules and training materials, transportation, meals, accommodation (if needed), monitoring tools.",
-    plannedParticipantsBreakdown: "2 Wijna staff (1 male and 1 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-12T09:00:00Z"
-  },
-  {
-    id: "act-srw-1-4-1",
-    outputId: "outp-srw-1-4",
-    activityNumber: "Activity 1.4",
-    code: "1.4.1",
-    name: "Activity 1.4 Conduct staff and organizational development training to enhance skills, performance, and institutional effectiveness.",
-    description: "WIJNA will implement targeted staff and organizational development trainings to strengthen skills, address capacity gaps, and ensure compliance with best-practice standards. Priority areas include program quality, safeguarding, risk management, and operational sustainability, supporting WIJNA's effectiveness and alignment with donor expectations.",
-    anticipatedInputs: "Travel and transportation, accommodation, networking event fees, communication materials, documentation support.",
-    plannedParticipantsBreakdown: "5 Wijna staff (3 female and 2 male)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-12T09:30:00Z"
-  },
-  {
-    id: "act-srw-2-1-1",
-    outputId: "outp-srw-2-1",
-    activityNumber: "Activity 2.1",
-    code: "2.1.1",
-    name: "Activity 2.1 Conduct networking activities with partners, donors, and relevant stakeholders to strengthen collaboration and WIJNA\u2019s visibility.",
-    description: "WIJNA will engage in strategic networking with partners, donors, government actors, and relevant stakeholders to strengthen collaboration, expand resource opportunities, and increase WIJNA\u2019s visibility. These engagements will support partnerships for program delivery, coordination, and long-term sustainability.",
-    anticipatedInputs: "Consultant fees, training venue, training materials, staff time, transportation, meals, documentation tools.",
-    plannedParticipantsBreakdown: "5 Wijna staff (3 female and 2 male), 6 partners (2 male, 4 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-14T08:00:00Z"
-  },
-  {
-    id: "act-srw-2-2-1",
-    outputId: "outp-srw-2-2",
-    activityNumber: "Activity 2.2",
-    code: "2.2.1",
-    name: "Activity 2.2 Conduct grants management and proposal development training for relevant WIJNA staff to enhance fundraising capacity.",
-    description: "To build stronger institutional capacity, WIJNA will contract a qualified consultant to provide structured training in grants management and proposal development. The training will equip staff with the skills needed to meet donor standards, prepare competitive proposals, and manage awarded funds responsibly and effectively.",
-    anticipatedInputs: "Consultant fees, training venue, training materials, staff time, transportation, meals, documentation tools.",
-    plannedParticipantsBreakdown: "3 Wijna staff (1 female and 2 male)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-14T10:00:00Z"
-  },
-  {
-    id: "act-srw-2-3-1",
-    outputId: "outp-srw-2-3",
-    activityNumber: "Activity 2.3",
-    code: "2.3.1",
-    name: "Activity 2.3 Develop and submit project proposals to potential funding sources to diversify and expand WIJNA\u2019s resource base.",
-    description: "WIJNA will develop and submit high-quality project proposals to diverse funding sources to expand its resource base, strengthen financial sustainability, and support the organization\u2019s long-term program growth.",
-    anticipatedInputs: "Consultant fees, staff time, meeting facilitation, data collection tools, communication expenses.",
-    plannedParticipantsBreakdown: "3 Wijna staff (1 female and 2 male)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-14T11:00:00Z"
-  },
-  {
-    id: "act-srw-3-1-1",
-    outputId: "outp-srw-3-1",
-    activityNumber: "Activity 3.1",
-    code: "3.1.1",
-    name: "Activity 3.1 Conduct partner assessments to evaluate partners' partnership appropriateness, capacity building, safeguarding and financial capacity alignment with MCC accompaniment approach.",
-    description: "WIJNA will conduct partner assessments to evaluate partnership suitability, organizational capacity, safeguarding practices, and financial management systems, ensuring alignment with WIJNA\u2019s accompaniment approach and standards for responsible partnership.",
-    anticipatedInputs: "Assessment tools and templates, transportation, accommodation, staff time, documentation materials, communication support.",
-    plannedParticipantsBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T08:00:00Z"
-  },
-  {
-    id: "act-srw-3-2-1",
-    outputId: "outp-srw-3-2",
-    activityNumber: "Activity 3.2",
-    code: "3.2.1",
-    name: "Activity 3.2 Provide technical support to partners in project planning, development, implementation, reporting, and monitoring to ensure quality and effectiveness.",
-    description: "WIJNA will provide technical support to partners in project planning, development, implementation, reporting, and monitoring to strengthen program quality, enhance accountability, and ensure effective delivery of project outcomes.",
-    anticipatedInputs: "Training and mentoring materials, facilitator time, transportation, venue (if needed), communication tools, documentation.",
-    plannedParticipantsBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T08:30:00Z"
-  },
-  {
-    id: "act-srw-3-3-1",
-    outputId: "outp-srw-3-3",
-    activityNumber: "Activity 3.3",
-    code: "3.3.1",
-    name: "Activity 3.3 Conduct orientations and training to strengthen partners\u2019 capacity for compliance with MCC standards and guidance.",
-    description: "WIJNA will conduct orientations and training to strengthen partners\u2019 capacity to comply with MCC standards and guidance, ensuring consistent quality, accountability, and alignment across all partnership activities.",
-    anticipatedInputs: "Training venue, learning materials, transportation, meals, monitoring and evaluation tools.",
-    plannedParticipantsBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T09:00:00Z"
-  },
-  {
-    id: "act-srw-3-4-1",
-    outputId: "outp-srw-3-4",
-    activityNumber: "Activity 3.4",
-    code: "3.4.1",
-    name: "Activity 3.4 Facilitate the participation of partners in the Mindanao Peacebuilding Institute (MPI) to enhance their skills and knowledge in peacebuilding.",
-    description: "WIJNA will send strategically selected partner representatives to the Mindanao Peacebuilding Institute (MPI) to build the competencies of future key actors who will strengthen WIJNA\u2019s long-term peacebuilding work.",
-    anticipatedInputs: "Travel, accommodation, meals, MPI tuition fees, visa processing, insurance, coordination and documentation costs.",
-    plannedParticipantsBreakdown: "7 persons (4 male and 3 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T09:30:00Z"
-  },
-  {
-    id: "act-srw-3-5-1",
-    outputId: "outp-srw-3-5",
-    activityNumber: "Activity 3.5",
-    code: "3.5.1",
-    name: "Activity 3.5 Conduct annual partner gatherings and learning events to promote collaboration, reflection, and knowledge exchange.",
-    description: "WIJNA will organize annual partner gatherings and learning events to strengthen collaboration, encourage joint reflection, and facilitate knowledge exchange that supports improved program quality and shared learning across partners.",
-    anticipatedInputs: "Event venue, facilitation costs, transportation, meals, learning materials, documentation support.",
-    plannedParticipantsBreakdown: "20 partners (10 female and 10 male), 2 Wijna Board members (1 male and 1 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T10:00:00Z"
-  },
-  {
-    id: "act-srw-3-6-1",
-    outputId: "outp-srw-3-6",
-    activityNumber: "Activity 3.6",
-    code: "3.6.1",
-    name: "Activity 3.6 Conduct regular monitoring and evaluation activities to assess project progress, outcomes, and learning.",
-    description: "WIJNA will implement a strategic monitoring and learning process that includes project inception, baseline survey, financial and progress check-ins aligned with SOP, semi-annual and annual reporting, After Action Reviews, continuous monitoring of indicators and risks, an endline survey, and final reporting. All outputs will be systematically distributed to strengthen decision-making and partner coordination.",
-    anticipatedInputs: "Monitoring tools, data collection instruments, staff time, transportation for site visits, meeting facilitation, reporting software.",
-    plannedParticipantsBreakdown: "6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-15T10:30:00Z"
-  },
-  {
-    id: "act-srw-4-1-1",
-    outputId: "outp-srw-4-1",
-    activityNumber: "Activity 4.1",
-    code: "4.1.1",
-    name: "Activity 4.1 Conduct recruitment selection and vetting of GSL participants from Indonesia.",
-    description: "WIJNA will conduct recruitment, selection, and vetting of GSL participants, ensuring suitability, safeguarding compliance, and readiness for cross-cultural placement. WIJNA will also prepare all required visa documentation to meet program and host-country requirements, ensuring strong participant readiness in line with GSL standards.",
-    anticipatedInputs: "Recruitment materials, communication costs, Visa processing fees, staff time, documentation tools, transportation for interviews.",
-    plannedParticipantsBreakdown: "12 participants deployed (6 male and 6 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-16T08:00:00Z"
-  },
-  {
-    id: "act-srw-4-2-1",
-    outputId: "outp-srw-4-2",
-    activityNumber: "Activity 4.2",
-    code: "4.2.1",
-    name: "Activity 4.2 Conduct recruitment, coordination, monitoring and provision of logistic support to GSL Participants deployed in Indonesia",
-    description: "WIJNA will manage the recruitment, coordination, monitoring, and logistical support of GSL participants in Indonesia, including all required visa documentation and administrative processing to ensure smooth placement and readiness.",
-    anticipatedInputs: "Visa processing fees, administrative materials, transportation, accommodation support, monitoring tools, staff time.",
-    plannedParticipantsBreakdown: "12 participants deployed (6 male and 6 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-16T08:30:00Z"
-  },
-  {
-    id: "act-srw-4-3-1",
-    outputId: "outp-srw-4-3",
-    activityNumber: "Activity 4.3",
-    code: "4.3.1",
-    name: "Activity 4.3 Development of placement and host families to support the Indonesia GSL Program.",
-    description: "WIJNA will conduct the identification and preparation of suitable placement sites and host families, ensuring they understand and apply safeguarding requirements in accordance with MCC standards to support the Indonesia GSL Program.",
-    anticipatedInputs: "Transportation for site visits, safeguarding materials, host family orientation tools, staff time, documentation.",
-    plannedParticipantsBreakdown: "12 host family-household (12 male 12 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-16T09:00:00Z"
-  },
-  {
-    id: "act-srw-4-4-1",
-    outputId: "outp-srw-4-4",
-    activityNumber: "Activity 4.4",
-    code: "4.4.1",
-    name: "Activity 4.4 Conduct related activities to support the GSL Program",
-    description: "WIJNA will conduct related activities to strengthen the GSL Program, including routine check-ins with participants and host families to ensure alignment and gather feedback for improvement. In addition, WIJNA will organize alumni gatherings activity to maintain connections.",
-    anticipatedInputs: "Event materials, transportation for check-ins, communication costs, alumni activity facilitation, documentation tools.",
-    plannedParticipantsBreakdown: "12 host family-household (12 male 12 female) 20 alumni (10 male 10 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-16T09:30:00Z"
-  },
-  {
-    id: "act-srw-5-1-1",
-    outputId: "outp-srw-5-1",
-    activityNumber: "Activity 5.1",
-    code: "5.1.1",
-    name: "Activity 5.1 Conduct networking and coordination support for MCC to strengthen its engagement and relationship with the Mennonite and Papua synod:",
-    description: "WIJNA will provide networking and coordination support for MCC to strengthen its engagement and relationship with the Mennonite and Papua synod. This includes facilitating communication, arranging strategic meetings, and supporting collaborative activities that enhance mutual understanding, partnership alignment, and long-term engagement between MCC and synod leadership.",
-    anticipatedInputs: "Travel and transportation, meeting facilitation, communication and documentation materials, staff time, coordination tools.",
-    plannedParticipantsBreakdown: "2 MCC representatives (male and female), 6 MDS staff (4 male and 2 female), 5 STAKWW staff (3 male and 2 female), 6 persons from Synods (3 male & 3 female)",
-    picId: "",
-    picName: "",
-    startDate: "2026-04-01",
-    endDate: "2027-03-31",
-    status: "Sedang Berjalan",
-    createdAt: "2026-01-17T08:00:00Z"
-  }
-];
-var SEED_SUB_ACTIVITIES = [];
-var SEED_OUTPUT_RACI_RECORDS = {};
-var SEED_ACTIVITY_MONITORING_RECORDS = {};
-var SEED_MONITORING_REPORTS = {};
-var SEED_PARTICIPANT_DATABASE = [];
-var SEED_TORS = [];
-var SEED_CASH_ADVANCES = [];
-var SEED_MEETING_MINUTES = [];
-var SEED_ACTIVITY_DOCUMENTATIONS = {};
-var SEED_ACTIVITY_DOCUMENTATION_LIST = [];
-var SEED_APPROVAL_RECORDS = [];
-var SEED_PROGRAM_BUDGETS = {};
-
 // src/server/db.ts
 var DATA_DIR = path2.resolve(process.cwd(), "data");
 var DB_FILE = path2.resolve(DATA_DIR, "db.json");
 var DB_BACKUP_FILE = path2.resolve(DATA_DIR, "db.backup.json");
-var INITIAL_PROGRAMS = SEED_PROGRAMS;
 var INITIAL_USERS = [
   {
     id: "user-admin",
@@ -2797,22 +1841,6 @@ var INITIAL_USERS = [
     createdAt: "2026-02-05T08:00:00Z"
   }
 ];
-var INITIAL_OUTCOMES = SEED_OUTCOMES;
-var INITIAL_OUTPUTS = SEED_OUTPUTS;
-var INITIAL_ACTIVITIES = SEED_ACTIVITIES;
-var INITIAL_SUB_ACTIVITIES = SEED_SUB_ACTIVITIES;
-var INITIAL_TORS = SEED_TORS;
-var INITIAL_APPROVAL_RECORDS = SEED_APPROVAL_RECORDS;
-var INITIAL_AUDIT_LOGS = [];
-var INITIAL_CASH_ADVANCES = SEED_CASH_ADVANCES;
-var INITIAL_ACTIVITY_DOCUMENTATIONS = SEED_ACTIVITY_DOCUMENTATIONS;
-var INITIAL_ACTIVITY_DOCUMENTATION_LIST = SEED_ACTIVITY_DOCUMENTATION_LIST;
-var INITIAL_MEETING_MINUTES = SEED_MEETING_MINUTES;
-var INITIAL_OUTPUT_RACI_RECORDS = SEED_OUTPUT_RACI_RECORDS;
-var INITIAL_ACTIVITY_MONITORING_RECORDS = SEED_ACTIVITY_MONITORING_RECORDS;
-var INITIAL_MONITORING_REPORTS = SEED_MONITORING_REPORTS;
-var INITIAL_PARTICIPANT_DATABASE = SEED_PARTICIPANT_DATABASE;
-var INITIAL_PROGRAM_BUDGETS = SEED_PROGRAM_BUDGETS;
 function cloneInitialUsers() {
   return INITIAL_USERS.map((u) => ({
     ...u,
@@ -2823,27 +1851,28 @@ function createDefaultSeed() {
   return {
     users: cloneInitialUsers(),
     currentUserId: "user-director",
-    programs: [...INITIAL_PROGRAMS],
-    outcomes: [...INITIAL_OUTCOMES],
-    outputs: [...INITIAL_OUTPUTS],
-    activities: [...INITIAL_ACTIVITIES],
-    subActivities: [...INITIAL_SUB_ACTIVITIES],
-    tors: [...INITIAL_TORS],
-    approvalRecords: [...INITIAL_APPROVAL_RECORDS],
-    auditLogs: [...INITIAL_AUDIT_LOGS],
-    cashAdvances: [...INITIAL_CASH_ADVANCES],
+    programs: [],
+    outcomes: [],
+    outputs: [],
+    activities: [],
+    subActivities: [],
+    tors: [],
+    approvalRecords: [],
+    auditLogs: [],
+    cashAdvances: [],
     cashAdvanceSummaries: {},
     cashAdvanceAuditLogs: {},
-    meetingMinutes: [...INITIAL_MEETING_MINUTES],
-    activityDocumentations: { ...INITIAL_ACTIVITY_DOCUMENTATIONS },
-    activityDocumentationList: [...INITIAL_ACTIVITY_DOCUMENTATION_LIST],
-    outputRaciRecords: { ...INITIAL_OUTPUT_RACI_RECORDS },
-    activityMonitoringRecords: { ...INITIAL_ACTIVITY_MONITORING_RECORDS },
-    monitoringReports: { ...INITIAL_MONITORING_REPORTS },
+    meetingMinutes: [],
+    activityDocumentations: {},
+    activityDocumentationList: [],
+    outputRaciRecords: {},
+    activityMonitoringRecords: {},
+    monitoringReports: {},
     approvalHubItems: {},
+    approvalWorkflowConfigs: {},
     approvalNotifications: [],
-    programBudgets: { ...INITIAL_PROGRAM_BUDGETS },
-    participantDatabase: [...INITIAL_PARTICIPANT_DATABASE],
+    programBudgets: {},
+    participantDatabase: [],
     cleanResetPrj3581V1: true,
     cleanResetPrj3581V2: true
   };
@@ -3009,7 +2038,18 @@ function normalizeSchema(parsed, options) {
     parsed.cashAdvanceAuditLogs = {};
   }
   if (Array.isArray(parsed.tors) && Array.isArray(parsed.cashAdvances)) {
+    const programByIdMap = /* @__PURE__ */ new Map();
+    for (const pr of parsed.programs) {
+      if (pr && pr.id) programByIdMap.set(pr.id, pr);
+    }
     parsed.tors = parsed.tors.map((t) => {
+      const linkedAct = t?.activityId ? activityByIdMap.get(t.activityId) : void 0;
+      const resolvedOutputId = t?.outputId || linkedAct?.outputId || "";
+      const linkedOutp = resolvedOutputId ? outputByIdMap.get(resolvedOutputId) : void 0;
+      const resolvedOutcomeId = t?.outcomeId || linkedOutp?.outcomeId || "";
+      const linkedOutc = resolvedOutcomeId ? outcomeByIdMap.get(resolvedOutcomeId) : void 0;
+      const resolvedProgramId = t?.programId || linkedAct?.programId || linkedOutp?.programId || linkedOutc?.programId || "";
+      const linkedProg = resolvedProgramId ? programByIdMap.get(resolvedProgramId) : void 0;
       const approvedCas = parsed.cashAdvances.filter(
         (ca) => ca.torId === t.id && (ca.status === "Disetujui" || ca.status === "Dicairkan")
       );
@@ -3024,11 +2064,48 @@ function normalizeSchema(parsed, options) {
         (sum, ca) => sum + (Number(ca.realizedAmount ?? ca.totalAmount) || 0),
         0
       );
+      const resolvedSubmissionStatus = t.submissionStatus || t.status || "Draft";
+      const resolvedActivityStatus = t.activityStatus || (resolvedSubmissionStatus === "Disetujui" ? "Sedang Berjalan" : "Belum Dimulai");
       return {
         ...t,
+        torNumber: typeof t.torNumber === "string" ? t.torNumber : "",
+        programId: resolvedProgramId,
+        programName: t.programName || linkedProg?.name || linkedOutc?.programName || "",
+        outcomeId: resolvedOutcomeId,
+        outcomeName: t.outcomeName || linkedOutc?.name || "",
+        outputId: resolvedOutputId,
+        outputName: t.outputName || linkedOutp?.name || "",
+        activityId: t.activityId || "",
+        activityName: t.activityName || linkedAct?.name || t.title || "",
+        picId: t.picId || t.createdById || "",
+        picName: t.picName || t.createdByName || "",
+        createdById: t.createdById || t.picId || "",
+        createdByName: t.createdByName || t.picName || "",
+        submissionStatus: resolvedSubmissionStatus,
+        activityStatus: resolvedActivityStatus,
         budgetRequested: approvedCas.length > 0 ? computedRequested : t.budgetRequested ?? 0,
         budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
         budgetActualSpent: verifiedCas.length > 0 ? computedActualSpent : t.budgetActualSpent ?? 0
+      };
+    });
+    const torByIdMap = /* @__PURE__ */ new Map();
+    for (const tr of parsed.tors) {
+      if (tr && tr.id) torByIdMap.set(tr.id, tr);
+    }
+    parsed.cashAdvances = parsed.cashAdvances.map((ca) => {
+      const parentTor = ca?.torId ? torByIdMap.get(ca.torId) : void 0;
+      const resolvedAdvanceNumber = ca?.advanceNumber || ca?.caNumber || ca?.documentNumber || "";
+      return {
+        ...ca,
+        advanceNumber: resolvedAdvanceNumber,
+        torNumber: ca?.torNumber || parentTor?.torNumber || "",
+        programId: ca?.programId || parentTor?.programId || "",
+        programName: ca?.programName || parentTor?.programName || "",
+        activityId: ca?.activityId || parentTor?.activityId || "",
+        activityTitle: ca?.activityTitle || parentTor?.activityName || parentTor?.title || "",
+        requesterId: ca?.requesterId || parentTor?.picId || "",
+        requesterName: ca?.requesterName || parentTor?.picName || "",
+        items: Array.isArray(ca?.items) ? ca.items : []
       };
     });
   }
@@ -3974,27 +3051,44 @@ function ensureWorkflowConfigs(draft) {
   }
   return draft.approvalWorkflowConfigs;
 }
+function findUserByIdOrName(users, userId, userName) {
+  if (userId) {
+    const byId = users.find((u) => u.id === userId);
+    if (byId) return byId;
+  }
+  const normName = String(userName || "").trim().toLowerCase();
+  if (normName) {
+    return users.find(
+      (u) => String(u.name || "").trim().toLowerCase() === normName || String(u.email || "").trim().toLowerCase() === normName
+    );
+  }
+  return void 0;
+}
 function resolveDynamicRaciForOutput(draft, outputId, fallbackResponsibleId, fallbackResponsibleName) {
   const raci = draft.outputRaciRecords?.[outputId];
   const output = (draft.outputs || []).find((o) => o.id === outputId);
   const outcome = (draft.outcomes || []).find((oc) => oc.id === output?.outcomeId);
-  const activeUsers = (draft.users || []).filter((u) => u.isActive);
-  const designatedA2User = raci?.accountableFinanceUserId && activeUsers.find((u) => u.id === raci.accountableFinanceUserId) || activeUsers.find((u) => u.role === "finance" && u.permissions?.canApproveTor !== false) || activeUsers.find((u) => u.role === "finance") || (draft.users || []).find((u) => u.role === "finance");
-  const directorUser = activeUsers.find((u) => u.role === "director") || (draft.users || []).find((u) => u.role === "director");
-  const pmUser = activeUsers.find((u) => u.role === "program_manager") || (draft.users || []).find((u) => u.role === "program_manager");
+  const allUsers = draft.users || [];
+  const activeUsers = allUsers.filter((u) => u.isActive !== false);
+  const designatedA2User = findUserByIdOrName(activeUsers, raci?.accountableFinanceUserId, raci?.accountableFinanceUserName) || activeUsers.find((u) => u.role === "finance" && u.permissions?.canApproveTor !== false) || activeUsers.find((u) => u.role === "finance") || allUsers.find((u) => u.role === "finance");
+  const directorUser = activeUsers.find((u) => u.role === "director") || allUsers.find((u) => u.role === "director");
+  const pmUser = activeUsers.find((u) => u.role === "program_manager") || allUsers.find((u) => u.role === "program_manager");
   const staffFallback = activeUsers.find((u) => u.role === "staff" || u.role === "meal") || activeUsers[0];
-  const responsibleUserId = raci?.responsibleUserId || fallbackResponsibleId || output?.picId || staffFallback?.id || "";
-  const responsibleUser = (draft.users || []).find((u) => u.id === responsibleUserId);
+  const matchedResponsibleUser = findUserByIdOrName(allUsers, raci?.responsibleUserId, raci?.responsibleUserName) || findUserByIdOrName(allUsers, fallbackResponsibleId, fallbackResponsibleName) || findUserByIdOrName(allUsers, output?.picId, output?.picName);
+  const responsibleUserId = matchedResponsibleUser?.id || raci?.responsibleUserId || fallbackResponsibleId || output?.picId || staffFallback?.id || "";
+  const responsibleUser = matchedResponsibleUser || allUsers.find((u) => u.id === responsibleUserId);
   const responsibleUserName = responsibleUser?.name || raci?.responsibleUserName || fallbackResponsibleName || output?.picName || "Responsible (R)";
-  const accountableProgramUserId = raci?.accountableUserId || outcome?.picId || pmUser?.id || "";
-  const accountableProgramUser = (draft.users || []).find(
-    (u) => u.id === accountableProgramUserId
-  );
+  const matchedAccountableProgramUser = findUserByIdOrName(allUsers, raci?.accountableUserId, raci?.accountableUserName) || findUserByIdOrName(allUsers, outcome?.picId, outcome?.picName);
+  const accountableProgramUserId = matchedAccountableProgramUser?.id || raci?.accountableUserId || outcome?.picId || pmUser?.id || "";
+  const accountableProgramUser = matchedAccountableProgramUser || allUsers.find((u) => u.id === accountableProgramUserId);
   const accountableProgramUserName = accountableProgramUser?.name || raci?.accountableUserName || outcome?.picName || pmUser?.name || "Accountable Program (A1)";
-  const accountableFinanceUserId = raci?.accountableFinanceUserId || designatedA2User?.id || "";
-  const accountableFinanceUser = (draft.users || []).find(
-    (u) => u.id === accountableFinanceUserId
+  const matchedAccountableFinanceUser = findUserByIdOrName(
+    allUsers,
+    raci?.accountableFinanceUserId,
+    raci?.accountableFinanceUserName
   );
+  const accountableFinanceUserId = matchedAccountableFinanceUser?.id || raci?.accountableFinanceUserId || designatedA2User?.id || "";
+  const accountableFinanceUser = matchedAccountableFinanceUser || allUsers.find((u) => u.id === accountableFinanceUserId);
   const accountableFinanceUserName = accountableFinanceUser?.name || raci?.accountableFinanceUserName || designatedA2User?.name || "Accountable Finance (A2)";
   const directorUserId = directorUser?.id || "";
   const directorUserName = directorUser?.name || "Direktur";
@@ -4289,12 +3383,13 @@ function syncApprovalHubData(draft) {
         notes: `Permintaan Akses Edit ToR dari ${tor.editRequestedByName || raci.responsibleUserName}: "${tor.editRequestReason || "-"}"`
       };
     }
+    const torRefNumber = String(tor.torNumber || tor.id || "");
     draft.approvalHubItems[itemId] = {
       id: itemId,
       sourceEntityId: tor.id,
       sourceTorId: tor.id,
-      referenceNumber: tor.torNumber,
-      title: tor.title,
+      referenceNumber: torRefNumber,
+      title: tor.title || hier.activityName || "Dokumen ToR",
       groupType: "program_documents",
       categoryCode: "tor",
       categoryLabel: CATEGORY_META.tor.label,
@@ -4319,9 +3414,9 @@ function syncApprovalHubData(draft) {
         activityPeriod: `${tor.startDate} s/d ${tor.endDate}`,
         attachments: [
           {
-            label: `Dokumen Utama ToR (${tor.torNumber})`,
+            label: `Dokumen Utama ToR (${torRefNumber})`,
             url: `#tor-preview-${tor.id}`,
-            refCode: tor.torNumber
+            refCode: torRefNumber
           },
           ...hier.monitoringTools.filter((t) => t.toolUrl).map((t) => ({
             label: `Monitoring Tool: [${t.toolId}] ${t.toolName}`,
@@ -4355,9 +3450,13 @@ function syncApprovalHubData(draft) {
     };
   }
   for (const ca of cashAdvances) {
-    const parentTor = tors.find((t) => t.id === ca.torId) || tors[0];
+    const parentTor = tors.find(
+      (t) => t.id === ca.torId || Boolean(ca.torNumber) && t.torNumber === ca.torNumber
+    );
     if (!parentTor) continue;
     const itemId = `apv-ca-${ca.id}`;
+    const caAdvanceNumber = String(ca.advanceNumber || ca.caNumber || ca.id || "");
+    const caTorNumber = String(ca.torNumber || parentTor.torNumber || parentTor.id || "");
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
     const raci = resolveDynamicRaciForOutput(
       draft,
@@ -4466,7 +3565,7 @@ function syncApprovalHubData(draft) {
       sourceEntityId: ca.id,
       sourceTorId: parentTor.id,
       sourceCashAdvanceId: ca.id,
-      referenceNumber: ca.advanceNumber,
+      referenceNumber: caAdvanceNumber,
       title: `Cash Advance: ${ca.activityTitle || parentTor.title}`,
       groupType: "financial_documents",
       categoryCode: "cash_advance",
@@ -4487,10 +3586,10 @@ function syncApprovalHubData(draft) {
       completedAt: mappedStatus === "Approved" ? ca.signatures?.approvedBy?.date || ca.updatedAt : existing?.completedAt,
       isArchived: mappedStatus === "Archived",
       previewData: {
-        summaryText: ca.implementationTimelineSummary || `Pengajuan dana operasional untuk kegiatan ${ca.activityTitle} (${ca.location}).`,
-        location: ca.location,
+        summaryText: ca.implementationTimelineSummary || `Pengajuan dana operasional untuk kegiatan ${ca.activityTitle || parentTor.title} (${ca.location || parentTor.location || "-"}).`,
+        location: ca.location || parentTor.location,
         activityPeriod: `${ca.activityStartDate} s/d ${ca.activityEndDate}`,
-        purposeOfFunds: ca.implementationTimelineSummary || `Pembiayaan pelaksanaan aktivitas lapangan pada ${ca.activityTitle} sesuai ToR ${ca.torNumber}.`,
+        purposeOfFunds: ca.implementationTimelineSummary || `Pembiayaan pelaksanaan aktivitas lapangan pada ${ca.activityTitle || parentTor.title} sesuai ToR ${caTorNumber}.`,
         budgetLines: (ca.items || []).map((it) => ({
           code: it.budgetCode || "1.1.1",
           description: `${it.description} (${it.volume} ${it.unit} \xD7 ${it.frequency} ${it.frequencyUnit || "Kali"})`,
@@ -4506,14 +3605,14 @@ function syncApprovalHubData(draft) {
         bankSource: isDisbursed ? bankSource : void 0,
         attachments: [
           {
-            label: `Referensi Dokumen ToR (${ca.torNumber})`,
+            label: `Referensi Dokumen ToR (${caTorNumber})`,
             url: `#tor-ref-${parentTor.id}`,
-            refCode: ca.torNumber
+            refCode: caTorNumber
           },
           {
             label: `Rincian Anggaran & Rekening Tujuan (${ca.bankName} - ${ca.bankAccountNumber})`,
             url: `#ca-items-${ca.id}`,
-            refCode: ca.advanceNumber
+            refCode: caAdvanceNumber
           }
         ]
       },
@@ -4546,7 +3645,7 @@ function syncApprovalHubData(draft) {
         finStatus = existingFin?.status || "Approved";
       }
       const finWfConfig = configs["laporan_keuangan_akhir"];
-      const finRefNumber = ca.advanceNumber.replace(/^CA\//, "LPJ-FIN/");
+      const finRefNumber = caAdvanceNumber ? caAdvanceNumber.replace(/^CA\//, "LPJ-FIN/") : `LPJ-FIN/${ca.id}`;
       const finStepInfo = buildStepsForStatus({
         categoryCode: "laporan_keuangan_akhir",
         status: finStatus,
@@ -4657,7 +3756,9 @@ function syncApprovalHubData(draft) {
     }
   }
   for (const mm of meetingMinutes) {
-    const parentTor = tors.find((t) => t.id === mm.torId || t.torNumber === mm.torNumber) || tors[0];
+    const parentTor = tors.find(
+      (t) => t.id === mm.torId || Boolean(mm.torNumber) && t.torNumber === mm.torNumber
+    );
     if (!parentTor) continue;
     const itemId = `apv-notulen-${mm.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -4753,7 +3854,7 @@ function syncApprovalHubData(draft) {
   }
   for (const doc of docList) {
     if (!doc || !doc.torId) continue;
-    const parentTor = tors.find((t) => t.id === doc.torId) || tors[0];
+    const parentTor = tors.find((t) => t.id === doc.torId);
     if (!parentTor) continue;
     const itemId = `apv-doc-${doc.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -4767,7 +3868,7 @@ function syncApprovalHubData(draft) {
     const isSeededDoc = doc.id === "doc-act-tor-1" || doc.id.startsWith("doc-seed-");
     const mappedStatus = existing?.status || (isSeededDoc ? "Approved" : "Pending Verification");
     const wfConfig = configs["dokumentasi"];
-    const refNumber = doc.documentNumber || parentTor.torNumber.replace(/^TOR\//, "DOK/");
+    const refNumber = doc.documentNumber || String(parentTor.torNumber || parentTor.id || "").replace(/^TOR\//, "DOK/");
     const stepInfo = buildStepsForStatus({
       categoryCode: "dokumentasi",
       status: mappedStatus,
@@ -4865,7 +3966,7 @@ function syncApprovalHubData(draft) {
   }
   const execItems = monReports.filter((m) => m.toolId === "EXEC-SUMMARY");
   for (const exec of execItems) {
-    const parentTor = tors.find((t) => t.id === exec.torId) || tors[0];
+    const parentTor = tors.find((t) => t.id === exec.torId);
     if (!parentTor) continue;
     const itemId = `apv-exec-${exec.id}`;
     const hier = resolveHierarchyAndMonitoring(draft, parentTor);
@@ -4883,7 +3984,7 @@ function syncApprovalHubData(draft) {
       else if (exec.status === "Completed") mappedStatus = "Reported to Director";
     }
     const wfConfig = configs["executive_summary"];
-    const refNumber = parentTor.torNumber.replace(/^TOR\//, "EXEC/");
+    const refNumber = String(parentTor.torNumber || parentTor.id || "").replace(/^TOR\//, "EXEC/");
     const stepInfo = buildStepsForStatus({
       categoryCode: "executive_summary",
       status: mappedStatus,
@@ -5182,15 +4283,22 @@ function canUserViewApprovalItem(item, user, access) {
   if (access.isDirector) {
     return true;
   }
+  const normUserName = String(user.name || "").trim().toLowerCase();
   const isProgramDoc = item.groupType === "program_documents";
   const isFinanceDoc = item.groupType === "financial_documents";
-  if (isProgramDoc && access.isA1 && item.accountableProgramUserId === user.id) {
+  if (isProgramDoc && access.isA1 && (item.accountableProgramUserId === user.id || Boolean(normUserName) && String(item.accountableProgramUserName || "").trim().toLowerCase() === normUserName)) {
     return true;
   }
-  if (isFinanceDoc && access.isA2 && item.accountableFinanceUserId === user.id) {
+  if (isFinanceDoc && access.isA2 && (item.accountableFinanceUserId === user.id || Boolean(normUserName) && String(item.accountableFinanceUserName || "").trim().toLowerCase() === normUserName)) {
     return true;
   }
   if (isFinanceDoc && access.isFinance) {
+    return true;
+  }
+  if (access.isR && (item.responsibleUserId === user.id || Boolean(normUserName) && String(item.responsibleUserName || "").trim().toLowerCase() === normUserName)) {
+    return true;
+  }
+  if (isProgramDoc && (user.role === "program_manager" || user.role === "meal") && user.permissions?.canViewAllTors !== false) {
     return true;
   }
   return false;
@@ -8080,11 +7188,33 @@ async function startServer() {
     if (user.role !== "staff" || user.permissions?.canViewAllTors) {
       return true;
     }
-    if (tor.picId === user.id || tor.createdById === user.id) {
+    const normUserName = String(user.name || "").trim().toLowerCase();
+    if (tor.picId === user.id || tor.createdById === user.id || Boolean(normUserName) && (String(tor.picName || "").trim().toLowerCase() === normUserName || String(tor.createdByName || "").trim().toLowerCase() === normUserName)) {
       return true;
     }
-    const raci = data.outputRaciRecords?.[tor.outputId];
-    if (raci && (raci.responsibleUserId === user.id || raci.accountableUserId === user.id || raci.accountableFinanceUserId === user.id || (raci.consultedUsers || []).includes(user.name) || (raci.informedUsers || []).includes(user.name))) {
+    if (Boolean(normUserName) && Array.isArray(tor.implementingTeam) && tor.implementingTeam.some(
+      (m) => m?.userId === user.id || String(m?.name || m?.fullName || "").trim().toLowerCase() === normUserName
+    )) {
+      return true;
+    }
+    const activity = (data.activities || []).find((a) => a.id === tor.activityId);
+    const resolvedOutputId = tor.outputId || activity?.outputId || "";
+    const output = (data.outputs || []).find((o) => o.id === resolvedOutputId);
+    if (output && (output.picId === user.id || Boolean(normUserName) && String(output.picName || "").trim().toLowerCase() === normUserName)) {
+      return true;
+    }
+    const raci = resolvedOutputId ? data.outputRaciRecords?.[resolvedOutputId] : void 0;
+    if (raci && (raci.responsibleUserId === user.id || raci.accountableUserId === user.id || raci.accountableFinanceUserId === user.id || Boolean(normUserName) && (String(raci.responsibleUserName || "").trim().toLowerCase() === normUserName || String(raci.accountableUserName || "").trim().toLowerCase() === normUserName || (raci.consultedUsers || []).some(
+      (n) => String(n || "").trim().toLowerCase() === normUserName
+    ) || (raci.informedUsers || []).some(
+      (n) => String(n || "").trim().toLowerCase() === normUserName
+    )))) {
+      return true;
+    }
+    const hasLinkedCa = (data.cashAdvances || []).some(
+      (ca) => ca.torId === tor.id && (ca.requesterId === user.id || Boolean(normUserName) && String(ca.requesterName || "").trim().toLowerCase() === normUserName)
+    );
+    if (hasLinkedCa) {
       return true;
     }
     return false;
@@ -9999,13 +9129,13 @@ async function startServer() {
       budgetRequested: getConnectedBudgetRequested(t, data.cashAdvances)
     }));
     if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
-      tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
+      tors = tors.filter((t) => canUserAccessTorRecord(currentUser, t, data));
     }
     const { search, picId, status, activityStatus } = req.query;
     if (search && typeof search === "string") {
       const q = search.toLowerCase();
       tors = tors.filter(
-        (t) => t.title.toLowerCase().includes(q) || t.torNumber.toLowerCase().includes(q) || t.activityName.toLowerCase().includes(q) || t.picName.toLowerCase().includes(q)
+        (t) => String(t.title || "").toLowerCase().includes(q) || String(t.torNumber || "").toLowerCase().includes(q) || String(t.activityName || "").toLowerCase().includes(q) || String(t.picName || "").toLowerCase().includes(q)
       );
     }
     if (picId && typeof picId === "string") {
@@ -10019,10 +9149,12 @@ async function startServer() {
     }
     tors.sort((a, b) => {
       const score = (t) => {
-        if (t.activityStatus === "Sedang Berjalan") return 1;
-        if (t.submissionStatus.includes("Menunggu Persetujuan")) return 2;
-        if (t.activityStatus === "Belum Dimulai") return 3;
-        if (t.activityStatus === "Selesai") return 4;
+        const actStatus = String(t.activityStatus || "");
+        const subStatus = String(t.submissionStatus || "");
+        if (actStatus === "Sedang Berjalan") return 1;
+        if (subStatus.includes("Menunggu Persetujuan") || subStatus === "Diajukan") return 2;
+        if (actStatus === "Belum Dimulai") return 3;
+        if (actStatus === "Selesai") return 4;
         return 5;
       };
       return score(a) - score(b);
@@ -10981,8 +10113,12 @@ async function startServer() {
     const data = db.getData();
     let records = data.cashAdvances || [];
     if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
+      const normUserName = String(currentUser.name || "").trim().toLowerCase();
       records = records.filter((ca) => {
         if (ca.requesterId === currentUser.id) return true;
+        if (Boolean(normUserName) && String(ca.requesterName || "").trim().toLowerCase() === normUserName) {
+          return true;
+        }
         const linkedTor = data.tors.find((t) => t.id === ca.torId);
         return linkedTor ? canUserAccessTorRecord(currentUser, linkedTor, data) : false;
       });
@@ -10996,10 +10132,12 @@ async function startServer() {
     if (search && typeof search === "string" && search.trim().length > 0) {
       const q = search.toLowerCase();
       records = records.filter(
-        (ca) => ca.advanceNumber.toLowerCase().includes(q) || ca.torNumber.toLowerCase().includes(q) || ca.activityTitle.toLowerCase().includes(q) || ca.requesterName.toLowerCase().includes(q)
+        (ca) => String(ca.advanceNumber || "").toLowerCase().includes(q) || String(ca.torNumber || "").toLowerCase().includes(q) || String(ca.activityTitle || "").toLowerCase().includes(q) || String(ca.requesterName || "").toLowerCase().includes(q)
       );
     }
-    records.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    records = [...records].sort(
+      (a, b) => (new Date(b.createdAt || 0).getTime() || 0) - (new Date(a.createdAt || 0).getTime() || 0)
+    );
     res.json(records);
   });
   app.get("/api/cash-advances/:id", (req, res) => {
@@ -11914,13 +11052,11 @@ async function startServer() {
   });
   app.get("/api/stats", (req, res) => {
     const currentUser = getCurrentUser(req);
-    db.update((draft) => {
-      syncApprovalHubData(draft);
-    });
     const data = db.getData();
+    syncApprovalHubData(data);
     let tors = [...data.tors];
     if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
-      tors = tors.filter((t) => t.picId === currentUser.id || t.createdById === currentUser.id);
+      tors = tors.filter((t) => canUserAccessTorRecord(currentUser, t, data));
     }
     const now = /* @__PURE__ */ new Date();
     const todayStr = now.toISOString().slice(0, 10);
@@ -13169,32 +12305,32 @@ async function startServer() {
     const allItems = Object.values(draft.monitoringReports || {});
     const filtered = targetTorId ? allItems.filter((item) => item.torId === targetTorId && validIdsForScope.has(item.id)) : allItems.filter((item) => validIdsForScope.has(item.id));
     return filtered.sort((a, b) => {
-      const caCmp = a.cashAdvanceNumber.localeCompare(b.cashAdvanceNumber);
+      const caCmp = String(a.cashAdvanceNumber || "").localeCompare(
+        String(b.cashAdvanceNumber || "")
+      );
       if (caCmp !== 0) return caCmp;
       if (a.toolId === "EXEC-SUMMARY" && b.toolId !== "EXEC-SUMMARY") return 1;
       if (b.toolId === "EXEC-SUMMARY" && a.toolId !== "EXEC-SUMMARY") return -1;
-      return a.toolId.localeCompare(b.toolId);
+      return String(a.toolId || "").localeCompare(String(b.toolId || ""));
     });
   }
   app.get("/api/monitoring-reports", (req, res) => {
     const torId = typeof req.query.torId === "string" ? req.query.torId : void 0;
-    let syncedItems = [];
+    const draft = db.getData();
+    const syncedItems = syncMonitoringReportsForTor(draft, torId);
     let plannedTools = [];
     let plannedToolsCount = 0;
     let cashAdvanceCount = 0;
-    db.update((draft) => {
-      syncedItems = syncMonitoringReportsForTor(draft, torId);
-      if (torId) {
-        const targetTor = (draft.tors || []).find((t) => t.id === torId);
-        if (targetTor) {
-          plannedTools = draft.activityMonitoringRecords?.[targetTor.activityId]?.tools || [];
-          plannedToolsCount = plannedTools.length;
-          cashAdvanceCount = (draft.cashAdvances || []).filter(
-            (ca) => ca.torId === torId && ca.status !== "Ditolak"
-          ).length;
-        }
+    if (torId) {
+      const targetTor = (draft.tors || []).find((t) => t.id === torId);
+      if (targetTor) {
+        plannedTools = draft.activityMonitoringRecords?.[targetTor.activityId]?.tools || [];
+        plannedToolsCount = plannedTools.length;
+        cashAdvanceCount = (draft.cashAdvances || []).filter(
+          (ca) => ca.torId === torId && ca.status !== "Ditolak"
+        ).length;
       }
-    });
+    }
     res.json({
       items: syncedItems,
       plannedTools,
@@ -13543,8 +12679,7 @@ async function startServer() {
       const programId = String(item.programId || "").trim();
       if (!programId || seen.has(programId)) continue;
       const matchedProg = (programs || []).find((p) => p.id === programId);
-      const programName = matchedProg?.name || String(item.programName || "").trim();
-      if (!programName) continue;
+      const programName = matchedProg?.name || String(item.programName || "").trim() || programId;
       seen.add(programId);
       const rolesArr = Array.isArray(item.rolesInProgram) ? item.rolesInProgram.map((r) => String(r || "").trim()).filter(Boolean) : item.roleInProgram ? String(item.roleInProgram).split(",").map((s) => s.trim()).filter(Boolean) : [];
       const outcomeIds = Array.isArray(item.outcomeIds) ? Array.from(new Set(item.outcomeIds.map((x) => String(x || "").trim()).filter(Boolean))) : void 0;
@@ -14008,14 +13143,7 @@ async function startServer() {
     return user.role === "director" || user.role === "admin";
   }
   function buildAttendanceBundleForUser(currentUser) {
-    let bundle = db.getData().attendanceSystem;
-    if (!bundle) {
-      db.update((draft) => {
-        bundle = ensureAttendanceSystemInitialized(draft);
-      });
-    } else {
-      bundle = ensureAttendanceSystemInitialized(db.getData());
-    }
+    const bundle = ensureAttendanceSystemInitialized(db.getData());
     const canViewAll = isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser);
     if (!canViewAll && bundle) {
       const redactedRecords = (bundle.records || []).map(

@@ -13,7 +13,6 @@ import {
   LogOut,
   X,
   KeyRound,
-  AlertTriangle,
   Eye,
   EyeOff,
   Check,
@@ -146,20 +145,8 @@ export const Topbar: React.FC<TopbarProps> = ({
           </div>
         </div>
 
-        {/* Right Zone: Password Reminder, Notifications, Refresh, and User Controls */}
+        {/* Right Zone: Notifications, Refresh, and User Controls */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-          {currentUser?.mustChangePassword && (
-            <button
-              type="button"
-              onClick={openChangePasswordModal}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 text-[11px] font-semibold transition-colors cursor-pointer shadow-2xs"
-              title="Anda masih menggunakan password default. Klik untuk segera mengganti password."
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              <span className="hidden sm:inline">Ganti Password Default</span>
-              <span className="sm:hidden">Ganti Sandi</span>
-            </button>
-          )}
 
           {onRefreshData && (
             <button
@@ -412,19 +399,6 @@ export const Topbar: React.FC<TopbarProps> = ({
                     </div>
                   </div>
 
-                  {/* Password Reminder Banner inside Dropdown if mustChangePassword */}
-                  {currentUser?.mustChangePassword && (
-                    <div className="px-3.5 py-2.5 bg-amber-50/90 text-amber-900 text-[11px] leading-relaxed">
-                      <div className="font-bold flex items-center gap-1.5 text-amber-800">
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                        <span>Pengingat Keamanan Password</span>
-                      </div>
-                      <p className="mt-0.5 text-amber-800/90">
-                        Akun Anda masih menggunakan password awal/default. Segera ganti password Anda untuk menjaga keamanan sistem.
-                      </p>
-                    </div>
-                  )}
-
                   {/* Quick Actions */}
                   <div className="px-3 py-2 bg-white space-y-1.5">
                     {onOpenEmployeeProfile && (
@@ -449,11 +423,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                     <button
                       type="button"
                       onClick={openChangePasswordModal}
-                      className={`w-full px-3 py-2 rounded-md border text-left flex items-center justify-between text-xs font-semibold transition-colors cursor-pointer ${
-                        currentUser?.mustChangePassword
-                          ? 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900'
-                          : 'bg-[#FAF9F6] hover:bg-[#EFECE6] border-[#E5E3DC] text-[#252525]'
-                      }`}
+                      className="w-full px-3 py-2 rounded-md border bg-[#FAF9F6] hover:bg-[#EFECE6] border-[#E5E3DC] text-[#252525] text-left flex items-center justify-between text-xs font-semibold transition-colors cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-2">
                         <KeyRound className="w-4 h-4 text-[#0F766E]" />
@@ -549,12 +519,6 @@ export const Topbar: React.FC<TopbarProps> = ({
             </div>
 
             <form onSubmit={handleSaveNewPassword} className="p-5 space-y-3.5 text-xs">
-              {currentUser?.mustChangePassword && (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 leading-relaxed">
-                  <strong>Pengingat Keamanan:</strong> Anda saat ini menggunakan password default (
-                  <code className="font-mono font-bold">Wijna@2026</code>). Mohon ganti dengan password baru yang kuat dan hanya Anda yang mengetahuinya.
-                </div>
-              )}
 
               {passwordError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-medium">
