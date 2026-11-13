@@ -138,7 +138,16 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   onNavigateToFinanceTab,
 }) => {
   const { currentUser, isDirector, isProgramManager, isFinance, allUsers } = useAuth();
-  const canManage = true;
+  const canManage = Boolean(
+    isDirector ||
+      isProgramManager ||
+      isFinance ||
+      currentUser?.role === 'meal' ||
+      currentUser?.permissions?.canManagePrograms
+  );
+  const canDeleteProgram = Boolean(
+    isDirector || isProgramManager || currentUser?.permissions?.canManagePrograms
+  );
   // Hanya Director dan Finance yang dapat melihat dan mengelola kolom Pengaturan Finance Program
   const canEditFinance = isDirector || isFinance;
 
@@ -709,6 +718,14 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const [showAddActivity, setShowAddActivity] = useState<{ outputId: string } | null>(null);
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [showAddSubActivity, setShowAddSubActivity] = useState<{ activityId: string } | null>(null);
+  const [editingSubActivity, setEditingSubActivity] = useState<SubActivity | null>(null);
+  const [pendingDeleteConfirm, setPendingDeleteConfirm] = useState<{
+    type: 'program' | 'outcome' | 'output' | 'activity' | 'subActivity';
+    id: string;
+    label: string;
+    description: string;
+  } | null>(null);
+  const [isDeletingConfirm, setIsDeletingConfirm] = useState(false);
 
   // Form states
   const [outcomeForm, setOutcomeForm] = useState({
@@ -747,9 +764,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   });
 
   const [subActivityForm, setSubActivityForm] = useState({
+    code: '',
     name: '',
     description: '',
     picName: '',
+    status: 'Belum Dimulai' as 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai',
   });
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -1623,11 +1642,6 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         ...prog,
         folderUrl: cleanUrl,
       });
-      try {
-        localStorage.setItem(`meal_prog_folder_${prog.id}`, cleanUrl);
-      } catch {
-        // ignore storage errors
-      }
       setEditingInlineFolderProgId(null);
       setSuccessMessage('Link Folder Program berhasil disimpan.');
       onRefresh();
@@ -1671,23 +1685,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     try {
       if (editingProgram) {
         await api.updateProgram(editingProgram.id, payload);
-        try {
-          localStorage.setItem(`meal_prog_folder_${editingProgram.id}`, payload.folderUrl);
-        } catch {
-          // ignore
-        }
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
         setSuccessMessage('Program berhasil diperbarui.');
       } else {
         const created = await api.createProgram(payload);
-        try {
-          if (payload.folderUrl) {
-            localStorage.setItem(`meal_prog_folder_${created.id}`, payload.folderUrl);
-          }
-        } catch {
-          // ignore
-        }
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
         setSuccessMessage('Program baru berhasil dibuat.');
@@ -1701,62 +1703,101 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     }
   };
 
-  const handleDeleteProgram = async (progId: string, e?: React.MouseEvent) => {
+  const handleDeleteProgram = (progId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    if (!canDeleteProgram) {
+      setErrorMessage('Hanya Director atau Program Manager yang memiliki kewenangan menghapus Program.');
+      return;
+    }
     const targetProg = programs.find((p) => p.id === progId);
     if (!targetProg) return;
     if (targetProg.status !== 'Selesai') {
       setErrorMessage('Hanya Program yang sudah berstatus Selesai yang dapat dihapus.');
       return;
     }
+    setPendingDeleteConfirm({
+      type: 'program',
+      id: progId,
+      label: `Program "${targetProg.name}"`,
+      description:
+        'Penghapusan Program bersifat permanen. Sistem akan memverifikasi bahwa tidak ada Outcome, Dokumen ToR, atau Cash Advance yang masih terhubung.',
+    });
+  };
+
+  // Delete handlers with confirmation modal & backend relational checks
+  const handleDeleteOutcome = (id: string) => {
+    const target = outcomes.find((o) => o.id === id);
+    setPendingDeleteConfirm({
+      type: 'outcome',
+      id,
+      label: `Outcome "${target?.name || id}"`,
+      description:
+        'Outcome ini akan dihapus secara permanen apabila tidak memiliki Output turunan yang masih aktif.',
+    });
+  };
+
+  const handleDeleteOutput = (id: string) => {
+    const target = outputs.find((o) => o.id === id);
+    setPendingDeleteConfirm({
+      type: 'output',
+      id,
+      label: `Output "${target?.name || id}"`,
+      description:
+        'Output ini akan dihapus secara permanen apabila tidak memiliki Activity turunan yang masih aktif.',
+    });
+  };
+
+  const handleDeleteActivity = (id: string) => {
+    const target = activities.find((a) => a.id === id);
+    setPendingDeleteConfirm({
+      type: 'activity',
+      id,
+      label: `Activity "${target?.name || id}"`,
+      description:
+        'Activity ini akan dihapus secara permanen apabila belum memiliki Sub-Activity atau Dokumen ToR yang terhubung.',
+    });
+  };
+
+  const handleDeleteSubActivity = (id: string) => {
+    const target = subActivities.find((sa) => sa.id === id);
+    setPendingDeleteConfirm({
+      type: 'subActivity',
+      id,
+      label: `Sub-Activity "${target?.name || id}"`,
+      description:
+        'Sub-Activity ini akan dihapus secara permanen apabila belum digunakan pada Dokumen ToR mana pun.',
+    });
+  };
+
+  const executeConfirmedDelete = async () => {
+    if (!pendingDeleteConfirm) return;
+    setIsDeletingConfirm(true);
     try {
-      await api.deleteProgram(progId);
-      await Promise.resolve(onRefresh());
-      setErrorMessage(null);
-      setSuccessMessage(`Program "${targetProg.name}" berhasil dihapus.`);
-      if (selectedProgramId === progId) {
-        setSelectedProgramId(null);
+      const { type, id, label } = pendingDeleteConfirm;
+      if (type === 'program') {
+        await api.deleteProgram(id);
+        if (selectedProgramId === id) {
+          setSelectedProgramId(null);
+        }
+      } else if (type === 'outcome') {
+        await api.deleteOutcome(id);
+      } else if (type === 'output') {
+        await api.deleteOutput(id);
+      } else if (type === 'activity') {
+        await api.deleteActivity(id);
+      } else if (type === 'subActivity') {
+        await api.deleteSubActivity(id);
       }
-    } catch (err: any) {
-      setSuccessMessage(null);
-      setErrorMessage(err.message || 'Gagal menghapus program.');
-    }
-  };
-
-  // Delete handlers with relational checks
-  const handleDeleteOutcome = async (id: string) => {
-    try {
-      await api.deleteOutcome(id);
       await Promise.resolve(onRefresh());
       setErrorMessage(null);
-      setSuccessMessage('Outcome berhasil dihapus');
+      setSuccessMessage(`${label} berhasil dihapus.`);
+      setPendingDeleteConfirm(null);
     } catch (err: any) {
       setSuccessMessage(null);
-      setErrorMessage(err.message);
-    }
-  };
-
-  const handleDeleteOutput = async (id: string) => {
-    try {
-      await api.deleteOutput(id);
-      await Promise.resolve(onRefresh());
-      setErrorMessage(null);
-      setSuccessMessage('Output berhasil dihapus');
-    } catch (err: any) {
-      setSuccessMessage(null);
-      setErrorMessage(err.message);
-    }
-  };
-
-  const handleDeleteActivity = async (id: string) => {
-    try {
-      await api.deleteActivity(id);
-      await Promise.resolve(onRefresh());
-      setErrorMessage(null);
-      setSuccessMessage('Activity berhasil dihapus');
-    } catch (err: any) {
-      setSuccessMessage(null);
-      setErrorMessage(err.message);
+      setErrorMessage(err?.message || 'Gagal menghapus data karena masih terhubung dengan entitas lain.');
+      setPendingDeleteConfirm(null);
+    } finally {
+      setIsDeletingConfirm(false);
     }
   };
 
@@ -1924,23 +1965,46 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleCreateSubActivitySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!showAddSubActivity) return;
+    if (!showAddSubActivity && !editingSubActivity) return;
+    const wasEditing = Boolean(editingSubActivity);
     try {
-      await api.createSubActivity({
-        activityId: showAddSubActivity.activityId,
-        name: subActivityForm.name,
-        description: subActivityForm.description,
-        picName: subActivityForm.picName,
-        status: 'Belum Dimulai',
-      });
+      if (editingSubActivity) {
+        await api.updateSubActivity(editingSubActivity.id, {
+          code: subActivityForm.code.trim() || undefined,
+          name: subActivityForm.name.trim(),
+          description: subActivityForm.description.trim(),
+          picName: subActivityForm.picName.trim(),
+          status: subActivityForm.status,
+        });
+      } else if (showAddSubActivity) {
+        await api.createSubActivity({
+          activityId: showAddSubActivity.activityId,
+          code: subActivityForm.code.trim() || undefined,
+          name: subActivityForm.name.trim(),
+          description: subActivityForm.description.trim(),
+          picName: subActivityForm.picName.trim(),
+          status: subActivityForm.status || 'Belum Dimulai',
+        });
+      }
       await Promise.resolve(onRefresh());
       setShowAddSubActivity(null);
-      setSubActivityForm({ name: '', description: '', picName: '' });
+      setEditingSubActivity(null);
+      setSubActivityForm({
+        code: '',
+        name: '',
+        description: '',
+        picName: '',
+        status: 'Belum Dimulai',
+      });
       setErrorMessage(null);
-      setSuccessMessage('Sub-Activity berhasil ditambahkan dan tersimpan ke database.');
+      setSuccessMessage(
+        wasEditing
+          ? 'Sub-Activity berhasil diperbarui dan tersimpan ke database.'
+          : 'Sub-Activity berhasil ditambahkan dan tersimpan ke database.'
+      );
     } catch (err: any) {
       setSuccessMessage(null);
-      setErrorMessage(err.message);
+      setErrorMessage(err.message || 'Gagal menyimpan Sub-Activity.');
     }
   };
 
@@ -2451,14 +2515,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
                     {/* Compact Proportional Program Folder Link (Fillable by Program Manager / Director) */}
                     {(() => {
-                      const savedLocalFolder = (() => {
-                        try {
-                          return localStorage.getItem(`meal_prog_folder_${currentProg.id}`) || '';
-                        } catch {
-                          return '';
-                        }
-                      })();
-                      const activeFolderUrl = (currentProg.folderUrl || savedLocalFolder || '').trim();
+                      const activeFolderUrl = (currentProg.folderUrl || '').trim();
                       const isEditingFolder = editingInlineFolderProgId === currentProg.id;
 
                       return (
@@ -5947,6 +6004,124 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                   </tbody>
                 </table>
               </div>
+
+              {/* Daftar Sub-Activity Terintegrasi di Bawah Activity */}
+              <div className="border border-slate-200 rounded-md bg-slate-50/60 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-900">
+                      Daftar Sub-Activity ({subActivities.filter((sa) => sa.activityId === selectedActivityDetail.id).length})
+                    </h5>
+                    <p className="text-[11px] text-slate-500">
+                      Rincian sub-kegiatan operasional yang terhubung ke Activity ini dan dapat dipilih pada dokumen ToR.
+                    </p>
+                  </div>
+                  {canManage && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingSubActivity(null);
+                        setSubActivityForm({
+                          code: '',
+                          name: '',
+                          description: '',
+                          picName: '',
+                          status: 'Belum Dimulai',
+                        });
+                        setShowAddSubActivity({ activityId: selectedActivityDetail.id });
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-semibold rounded cursor-pointer shrink-0"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Tambah Sub-Activity</span>
+                    </button>
+                  )}
+                </div>
+
+                {(() => {
+                  const childSubs = subActivities.filter(
+                    (sa) => sa.activityId === selectedActivityDetail.id
+                  );
+                  if (childSubs.length === 0) {
+                    return (
+                      <div className="bg-white border border-dashed border-slate-200 rounded p-3 text-center text-[11.5px] text-slate-500">
+                        Belum ada Sub-Activity pada Activity ini.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="overflow-x-auto border border-slate-200 rounded bg-white">
+                      <table className="w-full text-left border-collapse text-[11.5px]">
+                        <thead>
+                          <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-semibold">
+                            <th className="py-2 px-2.5 w-[90px]">Kode</th>
+                            <th className="py-2 px-2.5">Nama Sub-Activity</th>
+                            <th className="py-2 px-2.5">Deskripsi</th>
+                            <th className="py-2 px-2.5 w-[130px]">PIC</th>
+                            <th className="py-2 px-2.5 w-[110px]">Status</th>
+                            {canManage && (
+                              <th className="py-2 px-2.5 w-[95px] text-right">Aksi</th>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {childSubs.map((sa) => (
+                            <tr key={sa.id} className="hover:bg-slate-50/70">
+                              <td className="py-2 px-2.5 font-mono text-[11px] text-slate-600">
+                                {sa.code || '-'}
+                              </td>
+                              <td className="py-2 px-2.5 font-medium text-slate-900">
+                                {sa.name}
+                              </td>
+                              <td className="py-2 px-2.5 text-slate-600">
+                                {sa.description || '-'}
+                              </td>
+                              <td className="py-2 px-2.5 text-slate-700">
+                                {sa.picName || '-'}
+                              </td>
+                              <td className="py-2 px-2.5">
+                                <ActivityStatusBadge status={sa.status} />
+                              </td>
+                              {canManage && (
+                                <td className="py-2 px-2.5 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setShowAddSubActivity(null);
+                                        setEditingSubActivity(sa);
+                                        setSubActivityForm({
+                                          code: sa.code || '',
+                                          name: sa.name || '',
+                                          description: sa.description || '',
+                                          picName: sa.picName || '',
+                                          status: sa.status || 'Belum Dimulai',
+                                        });
+                                      }}
+                                      className="p-1 text-slate-600 hover:text-amber-700 hover:bg-amber-50 rounded cursor-pointer"
+                                      title="Edit Sub-Activity"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteSubActivity(sa.id)}
+                                      className="p-1 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                      title="Hapus Sub-Activity"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
 
             <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
@@ -6378,24 +6553,65 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         </div>
       )}
 
-      {showAddSubActivity && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+      {(showAddSubActivity || editingSubActivity) && (
+        <div className="fixed inset-0 z-[60] bg-slate-900/50 flex items-center justify-center p-4">
           <form
             onSubmit={handleCreateSubActivitySubmit}
             className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden"
           >
             <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <h4 className="font-bold text-slate-900">Tambah Sub-Activity (Opsional)</h4>
+              <h4 className="font-bold text-slate-900">
+                {editingSubActivity ? 'Edit Sub-Activity' : 'Tambah Sub-Activity'}
+              </h4>
               <button
                 type="button"
-                onClick={() => setShowAddSubActivity(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded"
+                onClick={() => {
+                  setShowAddSubActivity(null);
+                  setEditingSubActivity(null);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-5 space-y-3 text-xs md:text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Kode (Opsional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Mis. 1.1.1.a"
+                    value={subActivityForm.code}
+                    onChange={(e) =>
+                      setSubActivityForm({ ...subActivityForm, code: e.target.value })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Status Pelaksanaan
+                  </label>
+                  <select
+                    value={subActivityForm.status}
+                    onChange={(e) =>
+                      setSubActivityForm({
+                        ...subActivityForm,
+                        status: e.target.value as 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai',
+                      })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded bg-white"
+                  >
+                    <option value="Belum Dimulai">Belum Dimulai</option>
+                    <option value="Sedang Berjalan">Sedang Berjalan</option>
+                    <option value="Selesai">Selesai</option>
+                  </select>
+                </div>
+              </div>
+
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
                   Nama Sub-Activity <span className="text-rose-500">*</span>
@@ -6444,16 +6660,19 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setShowAddSubActivity(null)}
-                className="px-3 py-1.5 border border-slate-300 rounded text-xs font-semibold text-slate-700"
+                onClick={() => {
+                  setShowAddSubActivity(null);
+                  setEditingSubActivity(null);
+                }}
+                className="px-3 py-1.5 border border-slate-300 rounded text-xs font-semibold text-slate-700 cursor-pointer"
               >
                 Batal
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded text-xs font-semibold"
+                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded text-xs font-semibold cursor-pointer"
               >
-                Simpan Sub-Activity
+                {editingSubActivity ? 'Simpan Perubahan' : 'Simpan Sub-Activity'}
               </button>
             </div>
           </form>
@@ -6663,6 +6882,53 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             onRefresh();
           }}
         />
+      )}
+
+      {pendingDeleteConfirm && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden border border-slate-200">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-rose-50/70">
+              <div className="flex items-center gap-2 text-rose-700">
+                <AlertCircle className="w-5 h-5 shrink-0" />
+                <h4 className="font-bold text-sm">Konfirmasi Penghapusan Data</h4>
+              </div>
+              <button
+                type="button"
+                disabled={isDeletingConfirm}
+                onClick={() => setPendingDeleteConfirm(null)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-2 text-xs text-slate-700">
+              <p className="font-semibold text-slate-900">
+                Apakah Anda yakin ingin menghapus {pendingDeleteConfirm.label}?
+              </p>
+              <p className="text-slate-600 leading-relaxed">
+                {pendingDeleteConfirm.description}
+              </p>
+            </div>
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDeletingConfirm}
+                onClick={() => setPendingDeleteConfirm(null)}
+                className="px-3.5 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 rounded text-xs font-semibold text-slate-700 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingConfirm}
+                onClick={executeConfirmedDelete}
+                className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white rounded text-xs font-semibold cursor-pointer"
+              >
+                {isDeletingConfirm ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

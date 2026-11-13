@@ -10,7 +10,11 @@ import {
   CashAdvanceRecord,
   ApprovalHubItem,
 } from '../types/index.js';
-import { saveMasterBudgetList, getMasterBudgetList } from './masterBudgetStorage.js';
+import {
+  saveMasterBudgetList,
+  getMasterBudgetList,
+  syncMasterBudgetLookupWithServerMap,
+} from './masterBudgetStorage.js';
 import { api } from './api.js';
 import { parseProgramHierarchyWorkbookBuffer } from './hierarchyExcelParser.js';
 
@@ -500,9 +504,20 @@ export function loadAllProgramBudgetDatasets(): Record<string, ProgramBudgetData
   }
 }
 
+export let authoritativeMemoryCache: Record<string, ProgramBudgetDataset> | null = null;
+
+export function getHydratedProgramBudgetDatasetsSnapshot(): Record<string, ProgramBudgetDataset> {
+  if (authoritativeMemoryCache) {
+    return authoritativeMemoryCache;
+  }
+  return loadAllProgramBudgetDatasets();
+}
+
 export function saveAllProgramBudgetDatasets(
   datasets: Record<string, ProgramBudgetDataset>
 ): void {
+  authoritativeMemoryCache = datasets;
+  syncMasterBudgetLookupWithServerMap(datasets);
   if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(datasets));
@@ -516,13 +531,13 @@ export function saveAllProgramBudgetDatasets(
 }
 
 /**
- * Hydrates localStorage with the authoritative ProgramBudgetDatasets from the backend server.
+ * Hydrates memory cache & localStorage with the authoritative ProgramBudgetDatasets from the backend server.
  */
 export function hydrateProgramBudgetDatasetsFromServer(
   remoteDatasets: Record<string, ProgramBudgetDataset> | null | undefined
 ): Record<string, ProgramBudgetDataset> {
   if (!remoteDatasets || typeof remoteDatasets !== 'object') {
-    return loadAllProgramBudgetDatasets();
+    return getHydratedProgramBudgetDatasetsSnapshot();
   }
   const authoritative: Record<string, ProgramBudgetDataset> = {};
   for (const [k, ds] of Object.entries(remoteDatasets)) {

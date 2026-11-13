@@ -44,6 +44,7 @@ interface MonitoringStageViewProps {
   onNavigateStage: (stage: number) => void;
   initialReportId?: string;
   initialViewMode?: 'preview' | 'form';
+  onRefresh?: () => void;
 }
 
 type SectionKey = keyof MonitoringReportSections;
@@ -227,6 +228,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
   onNavigateStage,
   initialReportId,
   initialViewMode = 'preview',
+  onRefresh,
 }) => {
   const [items, setItems] = useState<MonitoringReportItem[]>([]);
   const [autoOpenedReportId, setAutoOpenedReportId] = useState<string | null>(null);
@@ -349,6 +351,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
       });
       setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
       setEditingLinkItemId(null);
+      if (onRefresh) onRefresh();
       setSaveBannerMsg(
         trimmedUrl
           ? `Link untuk [${mItem.toolId}] ${mItem.toolName} berhasil disimpan.`
@@ -515,6 +518,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
       if (pRes && Array.isArray(pRes.records)) {
         setAllParticipants(pRes.records);
       }
+      if (onRefresh) onRefresh();
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menyimpan daftar peserta yang terlibat.');
     } finally {
@@ -565,6 +569,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
       setQuickAddName('');
       setQuickAddRegion('');
       setShowQuickAddParticipant(false);
+      if (onRefresh) onRefresh();
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menambahkan peserta baru.');
     } finally {
@@ -669,6 +674,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
       if (pRes && Array.isArray(pRes.records)) {
         setAllParticipants(pRes.records);
       }
+      if (onRefresh) onRefresh();
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menyimpan data monitoring.');
     } finally {

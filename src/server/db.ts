@@ -31,6 +31,7 @@ import {
   importProgramHierarchyToMysql,
   isCloudRunEnvironment,
   isMysqlConfigured,
+  isMysqlLoopbackInCloudRun,
   isProductionHostingerEnvironment,
   loadDatabaseFromMysql,
   type MysqlHierarchyImportBatchParams,
@@ -755,11 +756,16 @@ class Database {
 
   public getDiagnostics() {
     const envCheck = validateMysqlEnvConfiguration();
+    const loopbackInCloudRun = isMysqlLoopbackInCloudRun();
     return {
       provider: this.isStrictMysqlRequired() ? 'mysql' : 'preview-local',
       status: this.mysqlStatus,
       operational: this.isOperational(),
       mysqlConfigured: envCheck.configured,
+      loopbackInCloudRun,
+      connectionHint: loopbackInCloudRun
+        ? 'Cloud Run preview detected with loopback MYSQL_HOST (127.0.0.1); set MYSQL_REMOTE_HOST to connect Cloud Run directly to remote MySQL, or deploy on Hostinger where 127.0.0.1 connects to local MySQL.'
+        : undefined,
       missingEnvVars: envCheck.missingVars,
       privileges: this.privilegeSummary
         ? {

@@ -1132,6 +1132,9 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
         [editingActivity.activity.id]: saved,
       }));
       setEditingActivity(null);
+      if (onRaciChanged) {
+        onRaciChanged();
+      }
       setFeedbackBanner({
         type: 'success',
         message: `Monitoring Tools untuk Activity "${editingActivity.activity.name}" disimpan (${saved.status}).`,

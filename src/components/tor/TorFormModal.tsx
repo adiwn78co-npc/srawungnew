@@ -19,6 +19,7 @@ import {
   TorParticipantRow,
   TorParticipantCustomColumn,
   OutputRaciRecord,
+  MasterParticipantRecord,
 } from '../../types/index.js';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../lib/api.js';
@@ -30,6 +31,9 @@ import {
   RotateCcw,
   Eraser,
   Calendar,
+  Users,
+  Search,
+  Check,
 } from 'lucide-react';
 import {
   getTorDraftPreview,
@@ -1307,6 +1311,164 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const [newCustomColumnName, setNewCustomColumnName] = useState<string>('');
   const [newCustomColumnType, setNewCustomColumnType] = useState<'text' | 'number'>('text');
   const [showAddColumnInput, setShowAddColumnInput] = useState<boolean>(false);
+
+  // Integrasi Database Peserta Master -> Tabel Peserta ToR
+  const [showParticipantDbModal, setShowParticipantDbModal] = useState<boolean>(false);
+  const [participantDbRecords, setParticipantDbRecords] = useState<MasterParticipantRecord[]>([]);
+  const [participantDbLoading, setParticipantDbLoading] = useState<boolean>(false);
+  const [participantDbError, setParticipantDbError] = useState<string | null>(null);
+  const [participantDbSearch, setParticipantDbSearch] = useState<string>('');
+  const [participantDbOnlyProgram, setParticipantDbOnlyProgram] = useState<boolean>(false);
+  const [selectedParticipantDbIds, setSelectedParticipantDbIds] = useState<string[]>([]);
+
+  const handleOpenParticipantDbModal = async () => {
+    setShowParticipantDbModal(true);
+    setSelectedParticipantDbIds([]);
+    setParticipantDbError(null);
+    setParticipantDbLoading(true);
+    try {
+      const res = await api.getParticipantDatabase();
+      const records = Array.isArray(res?.records) ? res.records : [];
+      setParticipantDbRecords(records);
+      if (programId) {
+        const hasLinkedToProg = records.some((r) =>
+          (r.programInvolvements || []).some((inv) => inv.programId === programId)
+        );
+        setParticipantDbOnlyProgram(hasLinkedToProg);
+      } else {
+        setParticipantDbOnlyProgram(false);
+      }
+    } catch (err: any) {
+      setParticipantDbError(err?.message || 'Gagal memuat Database Peserta.');
+    } finally {
+      setParticipantDbLoading(false);
+    }
+  };
+
+  const filteredParticipantDbRecords = useMemo(() => {
+    const q = participantDbSearch.trim().toLowerCase();
+    return participantDbRecords.filter((rec) => {
+      if (participantDbOnlyProgram && programId) {
+        const linked = (rec.programInvolvements || []).some(
+          (inv) => inv.programId === programId
+        );
+        if (!linked) return false;
+      }
+      if (!q) return true;
+      const nameStr =
+        rec.participantType === 'INDIVIDU'
+          ? `${rec.fullName} ${rec.organizationInstitution || ''} ${rec.communityRole || ''}`
+          : `${rec.groupName} ${rec.groupCategory || ''} ${rec.contactPerson || ''} ${rec.programRole || ''}`;
+      return (
+        nameStr.toLowerCase().includes(q) ||
+        (rec.participantCode || '').toLowerCase().includes(q) ||
+        (rec.regionCommunity || '').toLowerCase().includes(q)
+      );
+    });
+  }, [participantDbRecords, participantDbOnlyProgram, programId, participantDbSearch]);
+
+  const handleToggleParticipantDbId = (id: string) => {
+    setSelectedParticipantDbIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleImportSelectedParticipants = () => {
+    if (selectedParticipantDbIds.length === 0) return;
+    const chosen = participantDbRecords.filter((r) =>
+      selectedParticipantDbIds.includes(r.id)
+    );
+    const importedRows: TorParticipantRow[] = chosen.map((rec, idx) => {
+      let targetLabel = '';
+      let maleNum = 0;
+      let femaleNum = 0;
+      let totalNum = 0;
+      let noteText = '';
+
+      if (rec.participantType === 'INDIVIDU') {
+        targetLabel = rec.organizationInstitution
+          ? `${rec.fullName} (${rec.organizationInstitution})`
+          : rec.fullName;
+        maleNum = rec.gender === 'Laki-laki' ? 1 : 0;
+        femaleNum = rec.gender === 'Perempuan' ? 1 : 0;
+        totalNum = 1;
+        noteText = [rec.participantCode, rec.communityRole, rec.regionCommunity]
+          .filter(Boolean)
+          .join(' • ');
+      } else {
+        targetLabel = `${rec.groupName} (${rec.groupCategory})`;
+        const matrixValues = Object.values(rec.memberComposition || {});
+        maleNum = matrixValues.reduce((sum, row) => sum + (Number(row?.lakiLaki) || 0), 0);
+        femaleNum = matrixValues.reduce((sum, row) => sum + (Number(row?.perempuan) || 0), 0);
+        totalNum = Number(rec.totalMembers) || maleNum + femaleNum;
+        noteText = [
+          rec.participantCode,
+          rec.programRole,
+          rec.regionCommunity,
+          rec.contactPerson ? `CP: ${rec.contactPerson}` : '',
+        ]
+          .filter(Boolean)
+          .join(' • ');
+      }
+
+      const customValues: Record<string, string> = {};
+      participantCustomColumns.forEach((col, colIdx) => {
+        const lbl = col.label.toLowerCase();
+        if (col.id === 'col-target' || colIdx === 0) {
+          customValues[col.id] = targetLabel;
+        } else if (
+          col.id === 'col-male' ||
+          lbl.includes('laki') ||
+          lbl.includes('pria') ||
+          lbl.includes('male')
+        ) {
+          customValues[col.id] = String(maleNum);
+        } else if (
+          col.id === 'col-female' ||
+          lbl.includes('perempuan') ||
+          lbl.includes('wanita') ||
+          lbl.includes('female')
+        ) {
+          customValues[col.id] = String(femaleNum);
+        } else if (
+          col.id === 'col-note' ||
+          lbl.includes('catatan') ||
+          lbl.includes('keterangan') ||
+          lbl.includes('kriteria') ||
+          lbl.includes('wilayah')
+        ) {
+          customValues[col.id] = noteText;
+        } else if (col.type === 'number' && lbl.includes('total')) {
+          customValues[col.id] = String(totalNum);
+        } else {
+          customValues[col.id] = '';
+        }
+      });
+
+      return {
+        id: `prow-db-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+        target: targetLabel,
+        maleCount: maleNum,
+        femaleCount: femaleNum,
+        totalCount: totalNum,
+        note: noteText,
+        customValues,
+      };
+    });
+
+    setParticipantRows((prev) => {
+      const nonEmptyExisting = prev.filter((r) => {
+        const hasTarget = Boolean((r.target || '').trim());
+        const hasAnyVal = Object.values(r.customValues || {}).some((v) =>
+          Boolean(String(v || '').trim())
+        );
+        return hasTarget || hasAnyVal;
+      });
+      return [...nonEmptyExisting, ...importedRows];
+    });
+    setShowParticipantDbModal(false);
+    setSelectedParticipantDbIds([]);
+  };
 
   const handleAddCustomRow = () => {
     const initVals: Record<string, string> = {};
@@ -3040,13 +3202,23 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                     Tabel peserta kegiatan beserta jenis dan kriteria sasaran peserta.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAddCustomRow}
-                  className="text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline"
-                >
-                  + Baris Peserta
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleOpenParticipantDbModal}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-stone-300 bg-white hover:bg-stone-50 text-xs text-stone-800 font-medium cursor-pointer"
+                  >
+                    <Users className="w-3.5 h-3.5 text-stone-600" />
+                    <span>Pilih dari Database Peserta</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddCustomRow}
+                    className="text-xs text-stone-700 hover:text-stone-900 font-medium hover:underline cursor-pointer"
+                  >
+                    + Baris Peserta
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
@@ -4082,6 +4254,166 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
           </div>
         </div>
       </div>
+
+      {showParticipantDbModal && (
+        <div className="fixed inset-0 z-[70] bg-stone-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl border border-stone-200 max-w-3xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-stone-700" />
+                <div>
+                  <h3 className="text-sm font-semibold text-stone-900">
+                    Pilih Peserta dari Database Peserta Master
+                  </h3>
+                  <p className="text-[11px] text-stone-500">
+                    Impor peserta Individu maupun Kelompok/Organisasi yang telah terdaftar ke dalam tabel peserta ToR.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowParticipantDbModal(false)}
+                className="p-1 text-stone-400 hover:text-stone-700 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 border-b border-stone-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={participantDbSearch}
+                  onChange={(e) => setParticipantDbSearch(e.target.value)}
+                  placeholder="Cari nama peserta, kelompok, kode ID, atau wilayah..."
+                  className="w-full h-8 pl-8 pr-3 text-xs border border-stone-200 rounded focus:outline-none focus:border-stone-400"
+                />
+              </div>
+              {programId && (
+                <label className="inline-flex items-center gap-1.5 text-xs text-stone-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={participantDbOnlyProgram}
+                    onChange={(e) => setParticipantDbOnlyProgram(e.target.checked)}
+                    className="rounded border-stone-300"
+                  />
+                  <span>Hanya peserta terhubung ke Program ini</span>
+                </label>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3.5">
+              {participantDbLoading ? (
+                <div className="py-10 text-center text-xs text-stone-500">
+                  Memuat data dari Database Peserta...
+                </div>
+              ) : participantDbError ? (
+                <div className="p-3 rounded bg-rose-50 border border-rose-200 text-xs text-rose-700">
+                  {participantDbError}
+                </div>
+              ) : filteredParticipantDbRecords.length === 0 ? (
+                <div className="py-10 text-center text-xs text-stone-500 space-y-1">
+                  <p className="font-medium text-stone-700">Tidak ada data peserta yang cocok.</p>
+                  {participantDbOnlyProgram && (
+                    <button
+                      type="button"
+                      onClick={() => setParticipantDbOnlyProgram(false)}
+                      className="text-stone-800 underline cursor-pointer"
+                    >
+                      Tampilkan seluruh peserta lintas program
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="border border-stone-200 rounded overflow-hidden">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-stone-100 border-b border-stone-200 text-stone-700 font-semibold">
+                        <th className="py-2 px-2.5 w-9 text-center">Pilih</th>
+                        <th className="py-2 px-2.5 w-24">Kode</th>
+                        <th className="py-2 px-2.5">Nama Peserta / Kelompok</th>
+                        <th className="py-2 px-2.5 w-28">Tipe</th>
+                        <th className="py-2 px-2.5">Wilayah &amp; Komposisi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-stone-100">
+                      {filteredParticipantDbRecords.map((rec) => {
+                        const isChecked = selectedParticipantDbIds.includes(rec.id);
+                        const displayName =
+                          rec.participantType === 'INDIVIDU'
+                            ? rec.fullName
+                            : rec.groupName;
+                        const subInfo =
+                          rec.participantType === 'INDIVIDU'
+                            ? `${rec.gender} • ${rec.communityRole || '-'}`
+                            : `${rec.groupCategory} • ${rec.totalMembers || 0} anggota`;
+                        return (
+                          <tr
+                            key={rec.id}
+                            onClick={() => handleToggleParticipantDbId(rec.id)}
+                            className={`cursor-pointer transition-colors ${
+                              isChecked ? 'bg-stone-100/90' : 'hover:bg-stone-50'
+                            }`}
+                          >
+                            <td className="py-2 px-2.5 text-center">
+                              <span
+                                className={`inline-flex items-center justify-center w-4 h-4 rounded border ${
+                                  isChecked
+                                    ? 'bg-stone-900 border-stone-900 text-white'
+                                    : 'bg-white border-stone-300'
+                                }`}
+                              >
+                                {isChecked && <Check className="w-3 h-3" />}
+                              </span>
+                            </td>
+                            <td className="py-2 px-2.5 font-mono text-[11px] text-stone-600">
+                              {rec.participantCode}
+                            </td>
+                            <td className="py-2 px-2.5 font-medium text-stone-900">
+                              {displayName}
+                            </td>
+                            <td className="py-2 px-2.5 text-[11px] text-stone-600">
+                              {rec.participantType}
+                            </td>
+                            <td className="py-2 px-2.5 text-[11px] text-stone-600">
+                              <div>{rec.regionCommunity || '-'}</div>
+                              <div className="text-stone-400">{subInfo}</div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="px-4 py-3 border-t border-stone-200 bg-stone-50 flex items-center justify-between gap-2">
+              <span className="text-xs text-stone-600">
+                {selectedParticipantDbIds.length} peserta dipilih
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowParticipantDbModal(false)}
+                  className="px-3 py-1.5 text-xs font-medium text-stone-700 bg-white border border-stone-300 rounded hover:bg-stone-50 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedParticipantDbIds.length === 0}
+                  onClick={handleImportSelectedParticipants}
+                  className="px-3.5 py-1.5 text-xs font-medium text-white bg-stone-900 hover:bg-stone-800 disabled:opacity-50 rounded cursor-pointer"
+                >
+                  Tambahkan ke Tabel Peserta ToR
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

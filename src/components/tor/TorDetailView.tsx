@@ -246,19 +246,19 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
   const [caDetailOpen, setCaDetailOpen] = useState<CashAdvanceRecord | null>(null);
   const [autoOpenedTargetKey, setAutoOpenedTargetKey] = useState<string | null>(null);
   const [torBudgetDraft, setTorBudgetDraft] = useState<string>(() =>
-    String(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000)
+    String(tor?.budgetApproved ?? tor?.budgetRequested ?? 0)
   );
   const [localApprovedTorBudget, setLocalApprovedTorBudget] = useState<number>(() =>
-    Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000)
+    Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 0)
   );
   const [isUpdatingTorBudget, setIsUpdatingTorBudget] = useState<boolean>(false);
   const [showTorBudgetAudit, setShowTorBudgetAudit] = useState<boolean>(false);
 
   useEffect(() => {
-    const resolved = Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 15000000);
+    const resolved = Number(tor?.budgetApproved ?? tor?.budgetRequested ?? 0);
     setTorBudgetDraft(String(resolved));
     setLocalApprovedTorBudget(resolved);
-  }, [tor?.id, tor?.budgetApproved]);
+  }, [tor?.id, tor?.budgetApproved, tor?.budgetRequested]);
 
   const loadTorCashAdvances = useCallback(async () => {
     if (!tor?.id) return;
@@ -972,7 +972,10 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
           onOpenCreateCa={() => setCaModalOpen(true)}
           onNavigateStage={(stg) => setActiveWorkflowStage(stg)}
           currentUser={currentUser}
-          onRefreshCashAdvances={loadTorCashAdvances}
+          onRefreshCashAdvances={() => {
+            loadTorCashAdvances();
+            onRefresh();
+          }}
         />
       ) : activeWorkflowStage === 4 ? (
         /* STAGE 04: NOTULEN (MEETING MINUTES GENERATOR) */
@@ -984,6 +987,10 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
           onNavigateStage={(stg) => setActiveWorkflowStage(stg)}
           initialRecordId={targetEntityId}
           initialViewMode={autoOpenEdit ? 'editor' : focusedSourceMode || targetEntityId ? 'preview' : undefined}
+          onRefresh={() => {
+            loadTorCashAdvances();
+            onRefresh();
+          }}
         />
       ) : activeWorkflowStage >= 5 && activeWorkflowStage <= 8 ? (
         /* STAGES 05-08: EXCLUSIVE DOWNSTREAM PROCESSES DERIVED FROM STAGE 1 TOR */
@@ -997,6 +1004,10 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
           }
           initialTargetId={targetEntityId}
           initialViewMode={autoOpenEdit ? 'form' : focusedSourceMode || targetEntityId ? 'preview' : undefined}
+          onRefresh={() => {
+            loadTorCashAdvances();
+            onRefresh();
+          }}
         />
       ) : (
         <div className="space-y-6">
@@ -2328,6 +2339,7 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
             setCaModalOpen(false);
             setCaEditingRecord(null);
             loadTorCashAdvances();
+            onRefresh();
             setCaDetailOpen(newCa);
           }}
         />
@@ -2350,6 +2362,7 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
               }
             }
             loadTorCashAdvances();
+            onRefresh();
           }}
           onEdit={(rec) => {
             setCaEditingRecord(rec || caDetailOpen);

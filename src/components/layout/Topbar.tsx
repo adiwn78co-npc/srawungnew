@@ -365,9 +365,6 @@ export const Topbar: React.FC<TopbarProps> = ({
                   .map((n) => n[0])
                   .slice(0, 2)
                   .join('') || 'U'}
-                {currentUser?.mustChangePassword && (
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border-2 border-white absolute -top-0.5 -right-0.5" />
-                )}
               </div>
               <div className="hidden sm:block text-left pr-0.5">
                 <div className="text-[13px] font-semibold text-[#252525] leading-tight">

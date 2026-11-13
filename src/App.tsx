@@ -295,6 +295,14 @@ function MainAppContent() {
     if (!loading && activeTab === 'work-recap' && !canSeeWorkRecap) {
       setActiveTab('attendance');
     }
+    const canSeeFinance =
+      currentUser?.role === 'finance' ||
+      currentUser?.role === 'director' ||
+      currentUser?.role === 'program_manager' ||
+      currentUser?.role === 'meal';
+    if (!loading && activeTab === 'finance' && !canSeeFinance) {
+      setActiveTab(isAdmin ? 'users' : 'dashboard');
+    }
   }, [loading, approvalAccessProfile, activeTab, isAdmin, currentUser?.role]);
 
   // Pending approvals count for current user based on Role & RACI authority

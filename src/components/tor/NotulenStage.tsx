@@ -36,6 +36,7 @@ interface NotulenStageProps {
   onNavigateStage?: (stageNum: number) => void;
   initialRecordId?: string;
   initialViewMode?: 'preview' | 'editor';
+  onRefresh?: () => void;
 }
 
 const PLATFORM_PRESETS = [
@@ -115,6 +116,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
   currentUser,
   initialRecordId,
   initialViewMode = 'preview',
+  onRefresh,
 }) => {
   // Primary view is 'list' (daftar notulen seperti daftar ToR list)
   const [subView, setSubView] = useState<'list' | 'editor' | 'preview'>('list');
@@ -743,6 +745,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
         actionPoints: Array.isArray(savedRecord?.actionPoints) ? savedRecord.actionPoints : [],
       });
       await loadMinutesList();
+      if (onRefresh) onRefresh();
       setFeedback({
         type: 'success',
         message: 'Notulen berhasil disimpan.',
@@ -762,6 +765,7 @@ export const NotulenStage: React.FC<NotulenStageProps> = ({
     try {
       await api.deleteMeetingMinutes(record.id);
       await loadMinutesList();
+      if (onRefresh) onRefresh();
       setFeedback({
         type: 'success',
         message: `Notulen telah dihapus.`,

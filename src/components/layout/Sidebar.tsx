@@ -14,6 +14,7 @@ import {
   ContactRound,
   Clock,
   Smartphone,
+  Wallet,
   X,
 } from 'lucide-react';
 
@@ -216,6 +217,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: ClipboardCheck,
       badge: monitoringFollowUpCount > 0 ? monitoringFollowUpCount : undefined,
       show: true,
+    },
+    {
+      id: 'finance' as NavTab,
+      label: 'Finance & Budget',
+      icon: Wallet,
+      show:
+        currentUser?.role === 'finance' ||
+        currentUser?.role === 'director' ||
+        currentUser?.role === 'program_manager' ||
+        currentUser?.role === 'meal',
     },
     {
       id: 'approvals' as NavTab,

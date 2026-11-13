@@ -300,6 +300,9 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
       }
       setUpdateNote('');
       setSaveMessage('Ringkasan realisasi Cash Advance berhasil disimpan.');
+      if (onRefreshCashAdvances) {
+        onRefreshCashAdvances();
+      }
       setTimeout(() => setSaveMessage(null), 4000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Gagal menyimpan ringkasan Cash Advance.');
@@ -507,6 +510,9 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
           ? 'Ringkasan Akhir telah diperiksa oleh Finance dan menunggu persetujuan Director.'
           : 'Ringkasan Akhir telah disetujui oleh Executive Director.'
       );
+      if (onRefreshCashAdvances) {
+        onRefreshCashAdvances();
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Gagal memproses persetujuan Ringkasan Akhir.');
     } finally {

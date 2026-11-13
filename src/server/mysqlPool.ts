@@ -121,8 +121,11 @@ export function resolveMysqlConfig(): ResolvedMysqlConfig {
     }
   }
 
+  const remoteHostOverride = isCloudRunEnvironment()
+    ? String(process.env.MYSQL_REMOTE_HOST || '').trim()
+    : '';
   const mysqlHost = String(
-    process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ''
+    remoteHostOverride || process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ''
   ).trim();
   const mysqlUser = String(
     process.env.MYSQL_USER ||
@@ -223,6 +226,16 @@ export function isMysqlConfigured(): boolean {
   }
 
   return true;
+}
+
+export function isMysqlLoopbackInCloudRun(): boolean {
+  const cfg = resolveMysqlConfig();
+  return Boolean(
+    isCloudRunEnvironment() &&
+      cfg.host &&
+      isLoopbackMysqlHost(cfg.host) &&
+      process.env.MYSQL_STRICT_REQUIRED !== 'true'
+  );
 }
 
 export async function resetMysqlPool(): Promise<void> {

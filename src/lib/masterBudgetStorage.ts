@@ -109,6 +109,14 @@ export interface ResolvedMasterBudgetInfo {
   formattedMasterLabel: string;
 }
 
+let serverBudgetMapRef: Record<string, any> | null = null;
+
+export function syncMasterBudgetLookupWithServerMap(datasets: Record<string, any> | null | undefined): void {
+  if (datasets && typeof datasets === 'object') {
+    serverBudgetMapRef = datasets;
+  }
+}
+
 const PROGRAM_BUDGET_STORAGE_KEY = 'wijna_finance_program_budgets_v3';
 
 function findProgramBudgetCategoryByCode(
@@ -116,11 +124,18 @@ function findProgramBudgetCategoryByCode(
   programId?: string,
   programName?: string
 ): { code: string; budgetCategory: string; programName?: string } | null {
-  if (typeof window === 'undefined' || !cleanCode || cleanCode === '-') return null;
+  if (!cleanCode || cleanCode === '-') return null;
   try {
-    const raw = localStorage.getItem(PROGRAM_BUDGET_STORAGE_KEY);
-    if (!raw) return null;
-    const all = JSON.parse(raw);
+    let all: Record<string, any> | null = serverBudgetMapRef;
+    if (!all && typeof window !== 'undefined') {
+      const raw = localStorage.getItem(PROGRAM_BUDGET_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          all = parsed;
+        }
+      }
+    }
     if (!all || typeof all !== 'object') return null;
 
     const normCode = cleanCode.trim().toLowerCase();

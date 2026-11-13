@@ -321,8 +321,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(sub),
     }),
+  updateSubActivity: (id: string, sub: Partial<SubActivity>) =>
+    request<SubActivity>(`/api/sub-activities/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(sub),
+    }),
   deleteSubActivity: (id: string) =>
-    request<{ message: string }>(`/api/sub-activities/${id}`, { method: 'DELETE' }),
+    request<{ message: string }>(`/api/sub-activities/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   // TOR
   previewTorNumber: (params: {
@@ -415,11 +422,21 @@ export const api = {
     request<{ message: string; id: string }>(`/api/tors/${id}`, {
       method: 'DELETE',
     }),
-  updateDocument: (docId: string, data: { title?: string; summary?: string; content?: string }) =>
-    request<any>(`/api/documents/${docId}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
+  saveTorContributionReport: (
+    id: string,
+    payload: {
+      contributionReportSummary: string;
+      contributionReportRecommendations?: string;
+      signOff?: boolean;
+    }
+  ) =>
+    request<{ message: string; tor: Tor }>(
+      `/api/tors/${encodeURIComponent(id)}/contribution-report`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    ),
 
   // Cash Advance (Kasbon Operasional)
   getCashAdvances: (params?: { torId?: string; search?: string; status?: string }) => {

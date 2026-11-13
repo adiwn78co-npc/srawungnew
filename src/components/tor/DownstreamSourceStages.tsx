@@ -304,6 +304,7 @@ interface DownstreamStagesViewProps {
   onRequestTorUpdate: () => void;
   initialTargetId?: string;
   initialViewMode?: 'form' | 'preview';
+  onRefresh?: () => void;
 }
 
 const ROMAN_MONTHS = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
@@ -335,6 +336,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
   onRequestTorUpdate,
   initialTargetId,
   initialViewMode,
+  onRefresh,
 }) => {
   const [minutes, setMinutes] = useState<MeetingMinutesRecord[]>([]);
   const { organizationName } = useOrganizationSettings();
@@ -359,6 +361,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
       if (res?.summary) {
         setSummaryData(res.summary);
       }
+      if (onRefresh) onRefresh();
     } catch {
       // ignore
     } finally {
@@ -445,6 +448,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
     try {
       await api.deleteDocumentationItem(rec.id);
       setDocList((prev) => prev.filter((d) => d.id !== rec.id));
+      if (onRefresh) onRefresh();
       setDocSaveMessage(
         `Dokumentasi "${rec.bestPhotosStoryTopic || rec.documentNumber || rec.id}" berhasil dihapus.`
       );
@@ -659,6 +663,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           return [res, ...prev];
         });
       }
+      if (onRefresh) onRefresh();
       setDocSaveMessage(
         `Dokumentasi "${res.bestPhotosStoryTopic}" (${res.documentNumber || ''}) berhasil disimpan.`
       );
@@ -1723,6 +1728,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
         onNavigateStage={onNavigateStage}
         initialReportId={initialTargetId}
         initialViewMode={initialViewMode}
+        onRefresh={onRefresh}
       />
     );
   }
@@ -1736,6 +1742,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
         tor={tor}
         cashAdvances={cashAdvances}
         onNavigateStage={onNavigateStage}
+        onRefresh={onRefresh}
       />
     );
   }

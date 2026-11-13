@@ -2519,12 +2519,11 @@ async function startServer() {
     if (
       !currentUser.permissions?.canManagePrograms &&
       currentUser.role !== 'director' &&
-      currentUser.role !== 'program_manager' &&
-      currentUser.role !== 'finance' &&
-      currentUser.role !== 'hr' &&
-      currentUser.role !== 'admin'
+      currentUser.role !== 'program_manager'
     ) {
-      return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Program' });
+      return res.status(403).json({
+        error: 'Tidak memiliki kewenangan menghapus Program (khusus Direktur & Program Manager).',
+      });
     }
 
     const { id } = req.params;
@@ -2537,6 +2536,41 @@ async function startServer() {
     if (targetProgram.status !== 'Selesai') {
       return res.status(400).json({
         error: 'Hanya Program yang sudah berstatus Selesai yang dapat dihapus.',
+      });
+    }
+
+    const progOutcomeIds = new Set(
+      (data.outcomes || []).filter((o) => o.programId === id).map((o) => o.id)
+    );
+    const progOutputIds = new Set(
+      (data.outputs || [])
+        .filter((op) => op.programId === id || progOutcomeIds.has(op.outcomeId))
+        .map((op) => op.id)
+    );
+    const progActivityIds = new Set(
+      (data.activities || [])
+        .filter((act) => act.programId === id || progOutputIds.has(act.outputId))
+        .map((act) => act.id)
+    );
+    const progTors = (data.tors || []).filter(
+      (t) =>
+        t.programId === id ||
+        progOutcomeIds.has(t.outcomeId) ||
+        progOutputIds.has(t.outputId) ||
+        progActivityIds.has(t.activityId)
+    );
+    const progTorIds = new Set(progTors.map((t) => t.id));
+    const linkedTorsCount = progTors.length;
+    const normalizedTargetProgName = targetProgram.name.trim().toLowerCase();
+    const linkedCasCount = (data.cashAdvances || []).filter(
+      (ca) =>
+        progTorIds.has(ca.torId) ||
+        (ca.programName || '').trim().toLowerCase() === normalizedTargetProgName
+    ).length;
+
+    if (linkedTorsCount > 0 || linkedCasCount > 0) {
+      return res.status(400).json({
+        error: `Program "${targetProgram.name}" tidak dapat dihapus karena masih memiliki ${linkedTorsCount} dokumen ToR dan ${linkedCasCount} Cash Advance historis. Gunakan status "Diarsipkan" agar jejak audit tetap utuh.`,
       });
     }
 
@@ -3346,6 +3380,17 @@ async function startServer() {
           updatedAt: nowIso,
         } as any;
         updated = d.subActivities[idx];
+        d.auditLogs.unshift({
+          id: `log-sub-upd-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: 'Pembaruan Sub-Activity',
+          entityType: 'PROGRAM',
+          entityId: id,
+          details: `Memperbarui Sub-Activity: ${updated.name}`,
+          timestamp: nowIso,
+        });
       }
     });
 
@@ -3363,8 +3408,31 @@ async function startServer() {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Sub-Activity' });
     }
     const { id } = req.params;
+    const data = db.getData();
+    const targetSub = (data.subActivities || []).find((s) => s.id === id);
+    if (!targetSub) {
+      return res.status(404).json({ error: 'Sub-Activity tidak ditemukan' });
+    }
+    const linkedTors = (data.tors || []).filter((t) => t.subActivityId === id);
+    if (linkedTors.length > 0) {
+      return res.status(400).json({
+        error: `Sub-Activity "${targetSub.name}" tidak dapat dihapus karena masih terhubung dengan ${linkedTors.length} dokumen ToR.`,
+      });
+    }
+
     db.update((d) => {
       d.subActivities = d.subActivities.filter((s) => s.id !== id);
+      d.auditLogs.unshift({
+        id: `log-sub-del-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Penghapusan Sub-Activity',
+        entityType: 'PROGRAM',
+        entityId: id,
+        details: `Menghapus Sub-Activity: ${targetSub.name}`,
+        timestamp: new Date().toISOString(),
+      });
     });
     res.json({ message: 'Sub-Activity berhasil dihapus' });
   });
@@ -4778,6 +4846,92 @@ async function startServer() {
     res.json({ message: 'Status kegiatan berhasil diperbarui', activityStatus });
   });
 
+  // Save Stage 07 Contribution Report (Laporan TOR / Laporan Kontribusi) closing summary & sign-off
+  app.put('/api/tors/:id/contribution-report', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    const { id } = req.params;
+    const { contributionReportSummary, contributionReportRecommendations, signOff } = req.body || {};
+
+    const data = db.getData();
+    const targetTor = (data.tors || []).find((t) => t.id === id);
+    if (!targetTor) {
+      return res.status(404).json({ error: 'Dokumen ToR tidak ditemukan.' });
+    }
+
+    const isPicOrCreator =
+      targetTor.picId === currentUser.id ||
+      targetTor.createdById === currentUser.id ||
+      targetTor.picName === currentUser.name;
+    const canWriteContributionReport =
+      isPicOrCreator ||
+      currentUser.role === 'director' ||
+      currentUser.role === 'program_manager' ||
+      currentUser.role === 'meal' ||
+      Boolean(currentUser.permissions?.canApproveTor);
+
+    if (!canWriteContributionReport) {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya PIC Kegiatan, MEAL, Program Manager, atau Direktur yang dapat menyimpan catatan Laporan Kontribusi.',
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    let updatedTor: Tor | null = null;
+
+    db.update((d) => {
+      const idx = (d.tors || []).findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      const existing = d.tors[idx];
+      const nextSummary =
+        typeof contributionReportSummary === 'string'
+          ? contributionReportSummary.trim()
+          : existing.contributionReportSummary || '';
+      const nextRecs =
+        typeof contributionReportRecommendations === 'string'
+          ? contributionReportRecommendations.trim()
+          : existing.contributionReportRecommendations || '';
+
+      d.tors[idx] = {
+        ...existing,
+        contributionReportSummary: nextSummary,
+        contributionReportRecommendations: nextRecs,
+        contributionReportSignedOffBy: signOff
+          ? `${currentUser.name} (${currentUser.roleTitle || currentUser.role})`
+          : existing.contributionReportSignedOffBy,
+        contributionReportSignedOffAt: signOff
+          ? nowIso
+          : existing.contributionReportSignedOffAt,
+        updatedAt: nowIso,
+      };
+      updatedTor = d.tors[idx];
+
+      d.auditLogs.unshift({
+        id: `log-tor-contrib-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: signOff
+          ? 'Pengesahan Laporan Kontribusi (Tahap 07)'
+          : 'Penyimpanan Catatan Laporan Kontribusi (Tahap 07)',
+        entityType: 'TOR',
+        entityId: id,
+        details: `${signOff ? 'Mengesahkan' : 'Menyimpan'} ringkasan penutup Laporan Kontribusi untuk ToR ${existing.torNumber}: "${existing.title}".`,
+        timestamp: nowIso,
+      });
+    });
+
+    if (!updatedTor) {
+      return res.status(404).json({ error: 'Dokumen ToR tidak ditemukan.' });
+    }
+
+    res.json({
+      message: signOff
+        ? 'Laporan Kontribusi (Tahap 07) berhasil disimpan dan disahkan.'
+        : 'Catatan Laporan Kontribusi (Tahap 07) berhasil disimpan ke database.',
+      tor: updatedTor,
+    });
+  });
+
   // Delete TOR (Strictly Director Only)
   app.delete('/api/tors/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
@@ -5082,8 +5236,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: 'Pembuatan Formulir Cash Advance',
-        entityType: 'TOR',
-        entityId: targetTor.id,
+        entityType: 'CASH_ADVANCE',
+        entityId: newRecord.id,
         details: `Formulir ${newRecord.advanceNumber} (${newRecord.implementationTimelineSummary}) dibuat untuk TOR ${targetTor.torNumber} senilai ${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(newRecord.totalAmount)}. Batas pelaporan H+7: ${newRecord.reportingDeadlineDate}`,
         timestamp: now.toISOString(),
       });
@@ -5217,8 +5371,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: 'Tutup Laporan Cash Advance',
-        entityType: 'TOR',
-        entityId: found.torId,
+        entityType: 'CASH_ADVANCE',
+        entityId: found.id,
         details: `Laporan Cash Advance ${found.advanceNumber} telah ditutup oleh ${currentUser.name}. Realisasi: Rp ${computedRealized.toLocaleString('id-ID')}. Link PDF Expensify: ${found.expensifyPdfLink}`,
         timestamp: nowIso,
       });
@@ -5398,6 +5552,18 @@ async function startServer() {
           percentUsed: pct,
           itemCount: (found.items || []).length,
         });
+
+        draft.auditLogs.unshift({
+          id: `log-ca-rep-app-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: `${stageLabel} — Laporan Cash Advance`,
+          entityType: 'CASH_ADVANCE',
+          entityId: found.id,
+          details: `${stageLabel} telah memproses laporan pertanggungjawaban ${found.advanceNumber}. Status: ${found.reportApprovalStatus}.`,
+          timestamp: nowIso,
+        });
       });
     } catch (err: any) {
       return res.status(400).json({ error: err.message || 'Gagal memproses persetujuan laporan.' });
@@ -5452,8 +5618,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: 'Pembaruan Cash Advance',
-          entityType: 'TOR',
-          entityId: existing.torId,
+          entityType: 'CASH_ADVANCE',
+          entityId: existing.id,
           details: `Formulir kasbon ${existing.advanceNumber} diperbarui. Total: ${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(recordToSave.totalAmount)}`,
           timestamp: new Date().toISOString(),
         });
@@ -5553,8 +5719,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: wasRevision ? 'Pengajuan Ulang Kasbon ke Finance' : 'Pengajuan Kasbon ke Finance',
-          entityType: 'TOR',
-          entityId: found.torId,
+          entityType: 'CASH_ADVANCE',
+          entityId: found.id,
           details: `Cash Advance ${found.advanceNumber} diajukan ke Keuangan (A2) untuk verifikasi plafon.`,
           timestamp: nowIso,
         });
@@ -5698,8 +5864,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: `Verifikasi Kasbon: ${action}`,
-        entityType: 'TOR',
-        entityId: found.torId,
+        entityType: 'CASH_ADVANCE',
+        entityId: found.id,
         details: `Finance ${action === 'verify' ? 'menyetujui verifikasi' : action} pada kasbon ${found.advanceNumber}. Catatan: ${notes || '-'}`,
         timestamp: nowIso,
       });
@@ -5830,8 +5996,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: `Persetujuan Direktur Kasbon: ${action}`,
-        entityType: 'TOR',
-        entityId: found.torId,
+        entityType: 'CASH_ADVANCE',
+        entityId: found.id,
         details: `Direktur ${action === 'approve' ? 'menyetujui' : 'menolak'} otorisasi kasbon ${found.advanceNumber}.`,
         timestamp: nowIso,
       });
@@ -5945,8 +6111,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: 'Pencairan Kasbon (Disbursement)',
-        entityType: 'TOR',
-        entityId: found.torId,
+        entityType: 'CASH_ADVANCE',
+        entityId: found.id,
         details: `Dana kasbon ${found.advanceNumber} sebesar ${formattedAmt} telah ditransfer kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}`,
         timestamp: nowIso,
       });
@@ -5991,8 +6157,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: 'Penghapusan Draf Kasbon',
-          entityType: 'TOR',
-          entityId: item.torId,
+          entityType: 'CASH_ADVANCE',
+          entityId: item.id,
           details: `Draf kasbon ${item.advanceNumber} telah dihapus.`,
           timestamp: new Date().toISOString(),
         });
@@ -6004,10 +6170,20 @@ async function startServer() {
     res.json({ message: 'Draf Cash Advance berhasil dihapus' });
   });
 
+  function createReadOnlyProjectionDraft<T extends Record<string, any>>(source: T): T {
+    return {
+      ...source,
+      monitoringReports: { ...(source.monitoringReports || {}) },
+      approvalHubItems: { ...(source.approvalHubItems || {}) },
+      approvalWorkflowConfigs: { ...(source.approvalWorkflowConfigs || {}) },
+      approvalNotifications: [...(source.approvalNotifications || [])],
+    };
+  }
+
   // Stats calculation (Synchronized with ApprovalHub & RACI Access without dirtying DB read state)
   app.get('/api/stats', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    const data = db.getData();
+    const data = createReadOnlyProjectionDraft(db.getData());
     syncApprovalHubData(data);
     let tors = [...data.tors];
 
@@ -6173,7 +6349,7 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.role,
         action: 'Pembaruan Ringkasan Realisasi Cash Advance',
-        entityType: 'TOR',
+        entityType: 'CASH_ADVANCE_SUMMARY',
         entityId: torId,
         details: auditEntry.details,
         timestamp: now.toISOString(),
@@ -6313,6 +6489,18 @@ async function startServer() {
         totalShortage: existing.totalShortage || 0,
         percentUsed: existing.percentUsed || 0,
         itemCount: (existing.summaryRows || []).length,
+      });
+
+      draft.auditLogs.unshift({
+        id: `log-ca-sum-app-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: labelMap[stage] || 'Persetujuan Ringkasan Akhir',
+        entityType: 'CASH_ADVANCE_SUMMARY',
+        entityId: torId,
+        details: notes || `Ringkasan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
+        timestamp: now.toISOString(),
       });
     });
 
@@ -7600,7 +7788,7 @@ async function startServer() {
 
   app.get('/api/monitoring-reports', (req: Request, res: Response) => {
     const torId = typeof req.query.torId === 'string' ? req.query.torId : undefined;
-    const draft = db.getData();
+    const draft = createReadOnlyProjectionDraft(db.getData());
     const syncedItems = syncMonitoringReportsForTor(draft, torId);
     let plannedTools: SelectedActivityMonitoringTool[] = [];
     let plannedToolsCount = 0;
@@ -7635,6 +7823,7 @@ async function startServer() {
 
     db.update((draft) => {
       if (!draft.monitoringReports) draft.monitoringReports = {};
+      syncMonitoringReportsForTor(draft);
       const existing = draft.monitoringReports[id];
       if (!existing) return;
 
@@ -7832,7 +8021,7 @@ async function startServer() {
 
   app.get('/api/approval-hub', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    const draft = db.getData();
+    const draft = createReadOnlyProjectionDraft(db.getData());
     syncMonitoringReportsForTor(draft);
     const synced = syncApprovalHubData(draft);
     const accessProfile = resolveUserApprovalAccess(draft, currentUser, synced.items);

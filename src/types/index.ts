@@ -78,8 +78,10 @@ export interface Outcome {
 
 export interface Output {
   id: string;
+  programId?: string;
   outcomeId: string;
   outputNumber?: string;
+  code?: string;
   name: string;
   description: string;
   picId: string;
@@ -87,10 +89,13 @@ export interface Output {
   status: 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai';
   indicators: Indicator[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Activity {
   id: string;
+  programId?: string;
+  outcomeId?: string;
   outputId: string;
   activityNumber?: string; // e.g., "Activity 1.1"
   name: string; // e.g., "Activity 1.1 Conduct regular Board meetings to ensure accountability, effective governance and decision-making."
@@ -104,11 +109,16 @@ export interface Activity {
   endDate: string;
   status: 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai';
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SubActivity {
   id: string;
+  programId?: string;
+  outcomeId?: string;
+  outputId?: string;
   activityId: string;
+  code?: string;
   name: string;
   description: string;
   picName?: string;
@@ -116,6 +126,7 @@ export interface SubActivity {
   endDate?: string;
   status: 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai';
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type ActivityStatus = 'Belum Dimulai' | 'Sedang Berjalan' | 'Selesai';
@@ -310,6 +321,11 @@ export interface Tor {
   implementationMechanisms?: string[];
   isRundownVisible?: boolean;
   organizerPersonInCharge?: string;
+  // Stage 07 (Laporan Kontribusi / Laporan TOR) persistent closing & sign-off fields
+  contributionReportSummary?: string;
+  contributionReportRecommendations?: string;
+  contributionReportSignedOffBy?: string;
+  contributionReportSignedOffAt?: string;
   // Edit Request workflow fields (Request Edit -> ACC Edit by Director)
   editRequestStatus?: 'none' | 'pending' | 'approved' | 'rejected';
   editRequestedById?: string;

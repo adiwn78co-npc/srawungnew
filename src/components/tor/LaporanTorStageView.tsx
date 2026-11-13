@@ -33,6 +33,7 @@ interface LaporanTorStageViewProps {
   tor: Tor;
   cashAdvances: CashAdvanceRecord[];
   onNavigateStage: (stageIndex: number) => void;
+  onRefresh?: () => void;
 }
 
 type SectionKey = keyof MonitoringReportSections;
@@ -109,12 +110,68 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
   tor,
   cashAdvances,
   onNavigateStage,
+  onRefresh,
 }) => {
   const [notulenRecords, setNotulenRecords] = useState<MeetingMinutesRecord[]>([]);
   const [docRecords, setDocRecords] = useState<ActivityDocumentationRecord[]>([]);
   const [monitoringItems, setMonitoringItems] = useState<MonitoringReportItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [exportingDocx, setExportingDocx] = useState<boolean>(false);
+
+  // Persistent Stage 07 Closing Summary & Sign-Off State (stored in database on Tor)
+  const [closingSummary, setClosingSummary] = useState<string>(
+    tor.contributionReportSummary || ''
+  );
+  const [closingRecommendations, setClosingRecommendations] = useState<string>(
+    tor.contributionReportRecommendations || ''
+  );
+  const [signedOffBy, setSignedOffBy] = useState<string | undefined>(
+    tor.contributionReportSignedOffBy
+  );
+  const [signedOffAt, setSignedOffAt] = useState<string | undefined>(
+    tor.contributionReportSignedOffAt
+  );
+  const [isSavingReport, setIsSavingReport] = useState<boolean>(false);
+  const [reportSaveMsg, setReportSaveMsg] = useState<string | null>(null);
+  const [reportErrorMsg, setReportErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    setClosingSummary(tor.contributionReportSummary || '');
+    setClosingRecommendations(tor.contributionReportRecommendations || '');
+    setSignedOffBy(tor.contributionReportSignedOffBy);
+    setSignedOffAt(tor.contributionReportSignedOffAt);
+  }, [
+    tor.id,
+    tor.contributionReportSummary,
+    tor.contributionReportRecommendations,
+    tor.contributionReportSignedOffBy,
+    tor.contributionReportSignedOffAt,
+  ]);
+
+  const handleSaveContributionReport = async (signOff = false) => {
+    setIsSavingReport(true);
+    setReportSaveMsg(null);
+    setReportErrorMsg(null);
+    try {
+      const res = await api.saveTorContributionReport(tor.id, {
+        contributionReportSummary: closingSummary,
+        contributionReportRecommendations: closingRecommendations,
+        signOff,
+      });
+      if (res?.tor) {
+        setClosingSummary(res.tor.contributionReportSummary || '');
+        setClosingRecommendations(res.tor.contributionReportRecommendations || '');
+        setSignedOffBy(res.tor.contributionReportSignedOffBy);
+        setSignedOffAt(res.tor.contributionReportSignedOffAt);
+      }
+      setReportSaveMsg(res?.message || 'Catatan Laporan Kontribusi berhasil disimpan.');
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      setReportErrorMsg(err?.message || 'Gagal menyimpan catatan Laporan Kontribusi.');
+    } finally {
+      setIsSavingReport(false);
+    }
+  };
 
   // Refs for automatic Table of Contents page calculation
   const documentContainerRef = useRef<HTMLDivElement | null>(null);
@@ -540,6 +597,85 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             <span>Sinkronkan Data</span>
+          </button>
+        </div>
+      </div>
+
+      {/* PERSISTENT STAGE 07 CLOSING SUMMARY & SIGN-OFF EDITOR (SAVED TO DATABASE) */}
+      <div className="bg-white rounded-lg border border-stone-200 p-4 space-y-3 print:hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-bold text-stone-900">
+              Catatan Penutup &amp; Pengesahan Laporan Kontribusi (Tersimpan di Database)
+            </h3>
+            <p className="text-[11px] text-stone-500 mt-0.5">
+              Ringkasan akhir dan rekomendasi tindak lanjut ini disimpan ke database pada dokumen TOR dan otomatis tercantum pada naskah cetak / ekspor Laporan Kontribusi.
+            </p>
+          </div>
+          {signedOffBy && signedOffAt && (
+            <div className="text-[11px] text-emerald-700 font-medium flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Disahkan oleh {signedOffBy} · {formatIndonesianDate(signedOffAt.slice(0, 10))}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {reportSaveMsg && (
+          <div className="px-3 py-2 rounded border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs">
+            {reportSaveMsg}
+          </div>
+        )}
+        {reportErrorMsg && (
+          <div className="px-3 py-2 rounded border border-rose-200 bg-rose-50 text-rose-800 text-xs">
+            {reportErrorMsg}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          <div>
+            <label className="block font-semibold text-stone-700 mb-1">
+              Kesimpulan &amp; Ringkasan Capaian Kontribusi
+            </label>
+            <textarea
+              rows={3}
+              value={closingSummary}
+              onChange={(e) => setClosingSummary(e.target.value)}
+              placeholder="Tuliskan kesimpulan capaian kegiatan terhadap indikator Output/Outcome program..."
+              className="w-full p-2.5 border border-stone-300 rounded text-xs text-stone-800 focus:outline-none focus:border-blue-600"
+            />
+          </div>
+          <div>
+            <label className="block font-semibold text-stone-700 mb-1">
+              Rekomendasi Tindak Lanjut Program
+            </label>
+            <textarea
+              rows={3}
+              value={closingRecommendations}
+              onChange={(e) => setClosingRecommendations(e.target.value)}
+              placeholder="Tuliskan rekomendasi tindak lanjut untuk periode/implementasi berikutnya..."
+              className="w-full p-2.5 border border-stone-300 rounded text-xs text-stone-800 focus:outline-none focus:border-blue-600"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            disabled={isSavingReport}
+            onClick={() => handleSaveContributionReport(false)}
+            className="px-3.5 py-1.5 rounded border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {isSavingReport ? 'Menyimpan...' : 'Simpan Catatan Penutup'}
+          </button>
+          <button
+            type="button"
+            disabled={isSavingReport || (!closingSummary.trim() && !closingRecommendations.trim())}
+            onClick={() => handleSaveContributionReport(true)}
+            className="px-3.5 py-1.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+          >
+            Simpan &amp; Sahkan Laporan Kontribusi
           </button>
         </div>
       </div>
@@ -2777,6 +2913,49 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
               })
             )}
           </section>
+
+          {(closingSummary.trim() || closingRecommendations.trim() || signedOffBy) && (
+            <section className="space-y-3 pt-4 border-t border-black">
+              <h3 className="text-[15px] font-bold uppercase tracking-wide text-black">
+                Kesimpulan Penutup &amp; Rekomendasi Laporan Kontribusi
+              </h3>
+              <table className="w-full text-left border-collapse border border-black text-[13.5px]">
+                <tbody>
+                  {closingSummary.trim() && (
+                    <tr className="align-top">
+                      <td className="w-56 font-bold py-2 px-2.5 border border-black bg-[#F3F3F1]">
+                        Kesimpulan Capaian Kontribusi
+                      </td>
+                      <td className="py-2 px-2.5 border border-black whitespace-pre-line">
+                        {closingSummary}
+                      </td>
+                    </tr>
+                  )}
+                  {closingRecommendations.trim() && (
+                    <tr className="align-top">
+                      <td className="w-56 font-bold py-2 px-2.5 border border-black bg-[#F3F3F1]">
+                        Rekomendasi Tindak Lanjut
+                      </td>
+                      <td className="py-2 px-2.5 border border-black whitespace-pre-line">
+                        {closingRecommendations}
+                      </td>
+                    </tr>
+                  )}
+                  {signedOffBy && (
+                    <tr className="align-top">
+                      <td className="w-56 font-bold py-2 px-2.5 border border-black bg-[#F3F3F1]">
+                        Disahkan Oleh
+                      </td>
+                      <td className="py-2 px-2.5 border border-black">
+                        <strong>{signedOffBy}</strong>
+                        {signedOffAt ? ` pada ${formatIndonesianDate(signedOffAt.slice(0, 10))}` : ''}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </section>
+          )}
 
           {/* ================================================================ */}
           {/* CONSISTENT DOCUMENT FOOTER                                       */}
