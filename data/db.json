@@ -44,7 +44,7 @@
       "passwordHash": "scrypt$f60622bd4a6aa3a20e3df3a613b2cf70$90af5538639d96376abfc238ce5ea6106cfe2fe8cfded42f2cc3207328f4cbc9f77bee1fab9f80bdfca9df7f1fec3262a90669124f5853784f619eb639591e6f",
       "passwordUpdatedAt": "2026-01-10T08:00:00Z",
       "mustChangePassword": true,
-      "lastLoginAt": "2026-11-11T06:26:46.295Z"
+      "lastLoginAt": "2026-11-13T12:18:46.653Z"
     },
     {
       "id": "user-finance",
@@ -79,7 +79,7 @@
       "permissions": {
         "canManagePrograms": true,
         "canCreateTor": true,
-        "canApproveTor": false,
+        "canApproveTor": true,
         "canManageUsers": false,
         "canViewAllTors": true
       },
@@ -99,7 +99,7 @@
       "department": "Monitoring, Evaluation, Accountability & Learning",
       "isActive": true,
       "permissions": {
-        "canManagePrograms": false,
+        "canManagePrograms": true,
         "canCreateTor": true,
         "canApproveTor": false,
         "canManageUsers": false,
@@ -166,6 +166,17 @@
   "tors": [],
   "approvalRecords": [],
   "auditLogs": [
+    {
+      "id": "log-login-ok-1794572326720",
+      "actorId": "user-director",
+      "actorName": "Dr. Hendra Wijaya",
+      "actorRole": "Executive Director",
+      "action": "Login Sistem Berhasil",
+      "entityType": "USER",
+      "entityId": "user-director",
+      "details": "Pengguna Dr. Hendra Wijaya (Executive Director · Direktorat Eksekutif) berhasil login ke sistem.",
+      "timestamp": "2026-11-13T12:18:46.653Z"
+    },
     {
       "id": "log-1794378406617",
       "actorId": "user-director",

@@ -143,7 +143,7 @@ const INITIAL_USERS: User[] = [
     permissions: {
       canManagePrograms: true,
       canCreateTor: true,
-      canApproveTor: false,
+      canApproveTor: true,
       canManageUsers: false,
       canViewAllTors: true,
     },
@@ -158,7 +158,7 @@ const INITIAL_USERS: User[] = [
     department: 'Monitoring, Evaluation, Accountability & Learning',
     isActive: true,
     permissions: {
-      canManagePrograms: false,
+      canManagePrograms: true,
       canCreateTor: true,
       canApproveTor: false,
       canManageUsers: false,
@@ -307,13 +307,22 @@ function normalizeSchema(
     parsed.users = parsed.users.map((u) => {
       const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
       const rawPerms = (u.permissions && typeof u.permissions === 'object' ? u.permissions : {}) as Partial<User['permissions']>;
+      const repairedManagePrograms =
+        u.id === 'user-meal' && u.role === 'meal'
+          ? true
+          : (rawPerms.canManagePrograms ?? basePerms.canManagePrograms);
+      const repairedApproveTor =
+        u.role === 'admin'
+          ? false
+          : u.id === 'user-pm' && u.role === 'program_manager'
+          ? true
+          : (rawPerms.canApproveTor ?? basePerms.canApproveTor);
       return {
         ...u,
         permissions: {
-          canManagePrograms: rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+          canManagePrograms: repairedManagePrograms,
           canCreateTor: rawPerms.canCreateTor ?? basePerms.canCreateTor,
-          canApproveTor:
-            u.role === 'admin' ? false : rawPerms.canApproveTor ?? basePerms.canApproveTor,
+          canApproveTor: repairedApproveTor,
           canManageUsers:
             u.role === 'admin' ? true : rawPerms.canManageUsers ?? basePerms.canManageUsers,
           canViewAllTors: rawPerms.canViewAllTors ?? basePerms.canViewAllTors,
@@ -1212,12 +1221,11 @@ class Database {
     if (this.isStrictMysqlRequired()) {
       return; // Jangan pernah menulis ke data/db.json ketika menggunakan MySQL / produksi
     }
-    try {
-      const jsonText = JSON.stringify(snapshot, null, 2);
-      fs.writeFileSync(DB_FILE, jsonText, 'utf-8');
-    } catch {
-      // abaikan jika filesystem bersifat read-only
-    }
+    this.ensureDirectory();
+    const jsonText = JSON.stringify(snapshot, null, 2);
+    const tempFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tempFile, jsonText, 'utf-8');
+    fs.renameSync(tempFile, DB_FILE);
   }
 
   private persistExplicitBackup(snapshot: DatabaseSchema) {

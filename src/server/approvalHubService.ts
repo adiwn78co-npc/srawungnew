@@ -478,7 +478,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
     ...tors.map((t) => `apv-tor-${t.id}`),
     ...cashAdvances.map((ca) => `apv-ca-${ca.id}`),
     ...cashAdvances.filter((ca) => ca.isReported).map((ca) => `apv-finrep-${ca.id}`),
-    ...meetingMinutes.map((mm) => `apv-mm-${mm.id}`),
+    ...meetingMinutes.map((mm) => `apv-notulen-${mm.id}`),
     ...docList.filter(Boolean).map((d) => `apv-doc-${d.id}`),
     ...monReports.filter((m) => m.toolId === 'EXEC-SUMMARY').map((m) => `apv-exec-${m.id}`),
   ]);
@@ -1356,10 +1356,13 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
     const existing = draft.approvalHubItems[itemId];
 
     let mappedStatus: ApprovalHubStatus = existing?.status || 'Pending Verification';
-    if (!existing) {
-      if (exec.status === 'Planned') mappedStatus = 'Draft';
-      else if (exec.status === 'In Progress') mappedStatus = 'Pending Verification';
-      else if (exec.status === 'Completed') mappedStatus = 'Reported to Director';
+    if (!existing || existing.status === 'Draft') {
+      if (exec.status === 'Planned') {
+        mappedStatus = 'Draft';
+      } else if (exec.status === 'In Progress' || exec.status === 'Completed') {
+        const isLegacySeed = !existing && exec.id.startsWith('tor-1__') && exec.status === 'Completed';
+        mappedStatus = isLegacySeed ? 'Reported to Director' : 'Pending Verification';
+      }
     }
 
     const wfConfig = configs['executive_summary'];
@@ -1384,23 +1387,25 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
       refPrefix: `EXEC-${parentTor.id.toUpperCase()}`,
     });
 
-    const defaultTimeline: ApprovalTimelineEvent[] = existing?.timeline?.length
-      ? existing.timeline
-      : [
-          {
-            id: `tl-${itemId}-1`,
-            timestamp: exec.createdAt || new Date().toISOString(),
-            actorId: raci.responsibleUserId,
-            actorName: raci.responsibleUserName,
-            actorRoleCode: 'R',
-            actorRoleTitle: 'Responsible (Pelaksana Kegiatan)',
-            responsibleName: raci.responsibleUserName,
-            actionLabel: 'Menyusun & Mengajukan Executive Summary',
-            resultingStatus:
-              mappedStatus === 'Draft' ? 'Draft' : 'Pending Verification',
-            comment: `Pengajuan Executive Summary (7 Bagian Pembelajaran & Bukti MEAL) untuk ${exec.cashAdvanceActivitySummary}.`,
-            version: 1,
-          },
+    const wasPromotedFromDraft = existing?.status === 'Draft' && mappedStatus === 'Pending Verification';
+    const defaultTimeline: ApprovalTimelineEvent[] =
+      existing?.timeline?.length && !wasPromotedFromDraft
+        ? existing.timeline
+        : [
+            {
+              id: `tl-${itemId}-1`,
+              timestamp: (wasPromotedFromDraft ? exec.updatedAt : exec.createdAt) || new Date().toISOString(),
+              actorId: raci.responsibleUserId,
+              actorName: raci.responsibleUserName,
+              actorRoleCode: 'R',
+              actorRoleTitle: 'Responsible (Pelaksana Kegiatan)',
+              responsibleName: raci.responsibleUserName,
+              actionLabel: 'Menyusun & Mengajukan Executive Summary',
+              resultingStatus:
+                mappedStatus === 'Draft' ? 'Draft' : 'Pending Verification',
+              comment: `Pengajuan Executive Summary (7 Bagian Pembelajaran & Bukti MEAL) untuk ${exec.cashAdvanceActivitySummary}.`,
+              version: 1,
+            },
           ...(mappedStatus === 'Approved' || mappedStatus === 'Reported to Director'
             ? [
                 {
@@ -1536,11 +1541,14 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         '"'
       );
 
-  // Ensure initial notifications exist for active pending items
+  // Ensure initial notifications exist for active non-draft items that do not yet have any notification
   const allItems = Object.values(draft.approvalHubItems);
-  if (draft.approvalNotifications.length === 0) {
-    for (const item of allItems) {
-      const cleanTitle = cleanTitleForNotif(item.title);
+  const existingItemNotifIds = new Set(
+    (draft.approvalNotifications || []).map((n) => n.approvalItemId)
+  );
+  for (const item of allItems) {
+    if (existingItemNotifIds.has(item.id)) continue;
+    const cleanTitle = cleanTitleForNotif(item.title);
       if (item.status === 'Pending Verification') {
         const targetId =
           item.groupType === 'program_documents'
@@ -1641,7 +1649,6 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
           createdAt: item.updatedAt,
           isReadByUserIds: [],
         });
-      }
     }
   }
   // Deduplicate notifications so the same document & event never appear twice

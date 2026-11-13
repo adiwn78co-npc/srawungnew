@@ -17,6 +17,7 @@ import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
 import { resolveMasterBudgetByCode } from '../../lib/masterBudgetStorage.js';
 import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
 import { useOrganizationSettings } from '../../lib/organizationSettings.js';
+import { useAuth } from '../../context/AuthContext.js';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -340,6 +341,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
 }) => {
   const [minutes, setMinutes] = useState<MeetingMinutesRecord[]>([]);
   const { organizationName } = useOrganizationSettings();
+  const { currentUser } = useAuth();
   const [summaryData, setSummaryData] = useState<any>(null);
 
   // Documentation List & Editor State (Stage 05 & Linked in Stage 06)
@@ -353,17 +355,42 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
     initialViewMode === 'preview' ? 'preview' : 'work'
   );
   const [isApprovingFinalSummary, setIsApprovingFinalSummary] = useState(false);
+  const [finalSummaryFeedback, setFinalSummaryFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  const canVerifyFinalSummaryAsFinance =
+    currentUser?.role === 'finance' ||
+    (currentUser?.roleTitle || '').toLowerCase().includes('finance');
+  const canApproveFinalSummaryAsDirector =
+    currentUser?.role === 'director' ||
+    (currentUser?.roleTitle || '').toLowerCase().includes('director') ||
+    (currentUser?.roleTitle || '').toLowerCase().includes('direktur');
 
   const handleApproveFinalSummary = async (stage: 'report' | 'finance' | 'director') => {
     setIsApprovingFinalSummary(true);
+    setFinalSummaryFeedback(null);
     try {
       const res = await api.approveCashAdvanceSummary(tor.id, { stage });
       if (res?.summary) {
         setSummaryData(res.summary);
       }
-      if (onRefresh) onRefresh();
-    } catch {
-      // ignore
+      setFinalSummaryFeedback({
+        type: 'success',
+        text:
+          stage === 'report'
+            ? 'Laporan Keuangan Akhir berhasil ditutup dan dilaporkan ke Finance.'
+            : stage === 'finance'
+            ? 'Laporan Keuangan Akhir berhasil diperiksa Finance dan diteruskan ke Direktur.'
+            : 'Laporan Keuangan Akhir berhasil disetujui akhir oleh Direktur.',
+      });
+      if (onRefresh) await Promise.resolve(onRefresh());
+    } catch (err: any) {
+      setFinalSummaryFeedback({
+        type: 'error',
+        text: err?.message || 'Gagal memproses persetujuan Laporan Keuangan Akhir.',
+      });
     } finally {
       setIsApprovingFinalSummary(false);
     }
@@ -2874,7 +2901,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                         <span>Tutup Laporan &amp; Laporkan Lap. Keuangan Akhir</span>
                       </button>
                     )}
-                    {isFinalReported && !isFinalVerifiedByFinance && (
+                    {isFinalReported && !isFinalVerifiedByFinance && canVerifyFinalSummaryAsFinance && (
                       <button
                         type="button"
                         disabled={isApprovingFinalSummary}
@@ -2885,7 +2912,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                         <span>Periksa Lap. Keuangan Akhir (Finance)</span>
                       </button>
                     )}
-                    {isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
+                    {isFinalVerifiedByFinance && !isFinalApprovedByDirector && canApproveFinalSummaryAsDirector && (
                       <button
                         type="button"
                         disabled={isApprovingFinalSummary}
@@ -2899,6 +2926,17 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                   </div>
                 )}
               </div>
+              {finalSummaryFeedback && (
+                <div
+                  className={`p-2.5 rounded border text-xs font-medium print:hidden ${
+                    finalSummaryFeedback.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-rose-50 border-rose-200 text-rose-800'
+                  }`}
+                >
+                  {finalSummaryFeedback.text}
+                </div>
+              )}
 
               <div className="w-full overflow-hidden">
                 <table className="w-full table-fixed text-xs border-collapse">
@@ -3058,7 +3096,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                           : 'MENUNGGU LAPORAN DITUTUP'
                       }
                     />
-                    {isFinalReported && !isFinalVerifiedByFinance && (
+                    {isFinalReported && !isFinalVerifiedByFinance && canVerifyFinalSummaryAsFinance && (
                       <button
                         type="button"
                         disabled={isApprovingFinalSummary}
@@ -3109,7 +3147,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                           : 'MENUNGGU PEMERIKSAAN FINANCE'
                       }
                     />
-                    {isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
+                    {isFinalVerifiedByFinance && !isFinalApprovedByDirector && canApproveFinalSummaryAsDirector && (
                       <button
                         type="button"
                         disabled={isApprovingFinalSummary}

@@ -382,6 +382,7 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   outcomes = [],
   outputs = [],
   activities = [],
+  subActivities = [],
   users = [],
   isOpen,
   onClose,
@@ -592,6 +593,22 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
     }
   }, [availableActivities, activityId, raciLoaded, isEditMode]);
 
+  const availableSubActivities = useMemo(
+    () => subActivities.filter((sa) => sa.activityId === activityId),
+    [subActivities, activityId]
+  );
+
+  const [subActivityId, setSubActivityId] = useState<string>(() => {
+    if (editingTor?.subActivityId) return editingTor.subActivityId;
+    return '';
+  });
+
+  useEffect(() => {
+    if (subActivityId && !availableSubActivities.some((sa) => sa.id === subActivityId)) {
+      setSubActivityId('');
+    }
+  }, [availableSubActivities, subActivityId]);
+
   const currentProgram = useMemo(
     () => programs.find((p) => p.id === programId),
     [programs, programId]
@@ -607,6 +624,10 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
   const currentActivity = useMemo(
     () => activities.find((a) => a.id === activityId),
     [activities, activityId]
+  );
+  const currentSubActivity = useMemo(
+    () => subActivities.find((sa) => sa.id === subActivityId),
+    [subActivities, subActivityId]
   );
 
   const [budgetStorageTick, setBudgetStorageTick] = useState<number>(0);
@@ -2004,6 +2025,8 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
         outcomeId,
         outputId,
         activityId,
+        subActivityId: subActivityId || undefined,
+        subActivityName: currentSubActivity?.name || undefined,
         activityCode: currentActivity?.code || torNumberPreview.hierarchyCode,
         picId: resolvedPicId,
         background: background.trim(),
@@ -2409,6 +2432,29 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
                           </option>
                         ))
                       )}
+                    </select>
+                  </div>
+
+                  {/* Sub-Activity (Opsional — Terhubung ke Struktur Program) */}
+                  <div className="sm:col-span-2">
+                    <label className="block text-stone-700 font-medium mb-1">
+                      Sub-Activity (Opsional)
+                    </label>
+                    <select
+                      value={subActivityId}
+                      onChange={(e) => setSubActivityId(e.target.value)}
+                      className="w-full h-8 px-2.5 bg-white hover:bg-stone-50/50 focus:bg-white border border-stone-200 focus:border-stone-400 rounded text-stone-800 transition-colors focus:outline-none"
+                    >
+                      <option value="">
+                        {availableSubActivities.length === 0
+                          ? '— Tanpa Sub-Activity (Belum ada Sub-Activity pada Activity ini) —'
+                          : '— Pilih Sub-Activity (Opsional) —'}
+                      </option>
+                      {availableSubActivities.map((sa) => (
+                        <option key={sa.id} value={sa.id}>
+                          {sa.code ? `${sa.code} — ${sa.name}` : sa.name}
+                        </option>
+                      ))}
                     </select>
                   </div>
 

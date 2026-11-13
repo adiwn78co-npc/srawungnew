@@ -2388,7 +2388,13 @@ async function startServer() {
   // Programs CRUD
   app.post('/api/programs', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      !currentUser.permissions?.canManagePrograms &&
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'meal' &&
+      currentUser.role !== 'finance'
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan membuat Program baru' });
     }
 
@@ -2447,7 +2453,13 @@ async function startServer() {
 
   app.put('/api/programs/:id', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== 'director' && currentUser.role !== 'program_manager') {
+    if (
+      !currentUser.permissions?.canManagePrograms &&
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'meal' &&
+      currentUser.role !== 'finance'
+    ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan mengubah Program' });
     }
 
@@ -3403,6 +3415,8 @@ async function startServer() {
     if (
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'meal' &&
+      currentUser.role !== 'finance' &&
       !currentUser.permissions?.canManagePrograms
     ) {
       return res.status(403).json({ error: 'Tidak memiliki kewenangan menghapus Sub-Activity' });
@@ -4183,9 +4197,11 @@ async function startServer() {
 
     const {
       title,
+      programId,
       outcomeId,
       outputId,
       activityId,
+      subActivityId,
       picId,
       implementingTeam,
       background,
@@ -4210,27 +4226,67 @@ async function startServer() {
       activityStatus,
     } = req.body;
 
+    let programName = existing.programName;
     let outcomeName = existing.outcomeName;
     let outputName = existing.outputName;
     let activityName = existing.activityName;
+    let subActivityName = existing.subActivityName;
     let picName = existing.picName;
 
-    if (outcomeId && outcomeId !== existing.outcomeId) {
-      const oc = data.outcomes.find((o) => o.id === outcomeId);
+    const effectiveOutcomeId = outcomeId ?? existing.outcomeId;
+    const effectiveOutputId = outputId ?? existing.outputId;
+    const effectiveActivityId = activityId ?? existing.activityId;
+    const effectiveSubActivityId =
+      subActivityId !== undefined ? subActivityId : existing.subActivityId;
+
+    if (effectiveOutcomeId) {
+      const oc = data.outcomes.find((o) => o.id === effectiveOutcomeId);
       if (oc) outcomeName = oc.name;
     }
-    if (outputId && outputId !== existing.outputId) {
-      const op = data.outputs.find((o) => o.id === outputId);
+    if (effectiveOutputId) {
+      const op = data.outputs.find((o) => o.id === effectiveOutputId);
       if (op) outputName = op.name;
     }
-    if (activityId && activityId !== existing.activityId) {
-      const ac = data.activities.find((a) => a.id === activityId);
+    if (effectiveActivityId) {
+      const ac = data.activities.find((a) => a.id === effectiveActivityId);
       if (ac) activityName = ac.name;
     }
+    if (effectiveSubActivityId) {
+      const sa = (data.subActivities || []).find((s) => s.id === effectiveSubActivityId);
+      subActivityName = sa ? sa.name : req.body.subActivityName ?? existing.subActivityName;
+    } else if (subActivityId === '' || subActivityId === null) {
+      subActivityName = undefined;
+    }
+
+    const derivedProgramId =
+      programId ||
+      data.outcomes.find((o) => o.id === effectiveOutcomeId)?.programId ||
+      existing.programId;
+    const derivedProg = data.programs.find((p) => p.id === derivedProgramId);
+    if (derivedProg) {
+      programName = derivedProg.name;
+    } else if (req.body.programName) {
+      programName = req.body.programName;
+    }
+
     if (picId && picId !== existing.picId) {
       const pu = data.users.find((u) => u.id === picId);
       if (pu) picName = pu.name;
     }
+
+    const { hierarchyCode: updatedHierarchyCode } = computeHierarchyCode({
+      programId: derivedProgramId,
+      outcomeId: effectiveOutcomeId,
+      outputId: effectiveOutputId,
+      activityId: effectiveActivityId,
+      outcomes: data.outcomes,
+      outputs: data.outputs,
+      activities: data.activities,
+    });
+    const updatedProgCode = generateProgramCode(
+      programName || 'Program',
+      derivedProg?.code || existing.programCode
+    );
 
     let updatedTor: Tor | null = null;
     db.update((d) => {
@@ -4238,22 +4294,39 @@ async function startServer() {
       if (idx !== -1) {
         const wasApprovedEdit = d.tors[idx].editRequestStatus === 'approved';
         const keepUnlockedForRevision = d.tors[idx].submissionStatus === 'Perlu Perbaikan';
+        const draftCreatedDate = d.tors[idx].createdAt ? new Date(d.tors[idx].createdAt) : new Date();
+        const refreshedDraftNumber = formatTorNumber({
+          sequence: d.tors[idx].torSequence || 1,
+          programCode: updatedProgCode,
+          hierarchyCode: updatedHierarchyCode,
+          romanMonth: getRomanMonth(draftCreatedDate),
+          year: draftCreatedDate.getFullYear(),
+        });
         d.tors[idx] = {
           ...d.tors[idx],
           // Rule 9: Nomor yang telah diterbitkan bersifat permanen, unik, dan tidak dapat diedit secara manual
-          torNumber: existing.isOfficialNumber ? existing.torNumber : d.tors[idx].torNumber,
+          torNumber: existing.isOfficialNumber ? existing.torNumber : refreshedDraftNumber,
           isOfficialNumber: existing.isOfficialNumber,
           publishedAt: existing.publishedAt,
           torSequence: existing.torSequence,
-          activityCode: existing.isOfficialNumber ? existing.activityCode : (req.body.activityCode || d.tors[idx].activityCode),
-          programCode: existing.isOfficialNumber ? existing.programCode : d.tors[idx].programCode,
+          hierarchyCode: existing.isOfficialNumber
+            ? existing.hierarchyCode || updatedHierarchyCode
+            : updatedHierarchyCode,
+          activityCode: existing.isOfficialNumber
+            ? existing.activityCode
+            : req.body.activityCode || updatedHierarchyCode || d.tors[idx].activityCode,
+          programCode: existing.isOfficialNumber ? existing.programCode : updatedProgCode,
+          programId: derivedProgramId,
+          programName,
           title: title ?? d.tors[idx].title,
-          outcomeId: outcomeId ?? d.tors[idx].outcomeId,
+          outcomeId: effectiveOutcomeId,
           outcomeName,
-          outputId: outputId ?? d.tors[idx].outputId,
+          outputId: effectiveOutputId,
           outputName,
-          activityId: activityId ?? d.tors[idx].activityId,
+          activityId: effectiveActivityId,
           activityName,
+          subActivityId: effectiveSubActivityId || undefined,
+          subActivityName: effectiveSubActivityId ? subActivityName : undefined,
           picId: picId ?? d.tors[idx].picId,
           picName,
           implementingTeam: implementingTeam ?? d.tors[idx].implementingTeam,
@@ -4421,6 +4494,9 @@ async function startServer() {
             };
           });
         }
+
+        syncMonitoringReportsForTor(d, id);
+        syncApprovalHubData(d);
 
         if (wasApprovedEdit || currentUser.role === 'director') {
           d.approvalRecords.push({
@@ -4813,14 +4889,21 @@ async function startServer() {
     const tor = data.tors.find((t) => t.id === id);
     if (!tor) return res.status(404).json({ error: 'TOR tidak ditemukan' });
 
-    // Only PIC, creator, PM, or Director can update activity status
+    const outpRaci = tor.outputId ? data.outputRaciRecords?.[tor.outputId] : undefined;
+    const isRaciROrA1 =
+      outpRaci?.responsibleUserId === currentUser.id ||
+      outpRaci?.accountableUserId === currentUser.id;
+
+    // Only PIC, creator, RACI R/A1, MEAL, PM, or Director can update activity status
     if (
       tor.picId !== currentUser.id &&
       tor.createdById !== currentUser.id &&
+      !isRaciROrA1 &&
       currentUser.role !== 'director' &&
-      currentUser.role !== 'program_manager'
+      currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'meal'
     ) {
-      return res.status(403).json({ error: 'Hanya PIC atau Pengelola Program yang dapat mengubah status pelaksanaan kegiatan' });
+      return res.status(403).json({ error: 'Hanya PIC, R/A1 pada Output, atau Pengelola Program yang dapat mengubah status pelaksanaan kegiatan' });
     }
 
     db.update((d) => {
@@ -5201,6 +5284,7 @@ async function startServer() {
       if (!draft.cashAdvances) draft.cashAdvances = [];
       draft.cashAdvances.push(newRecord);
       syncTorBudgetInDraft(draft, targetTor.id);
+      syncMonitoringReportsForTor(draft, targetTor.id);
       syncApprovalHubData(draft);
 
       if (newRecord.status === 'Diajukan') {
@@ -5610,6 +5694,7 @@ async function startServer() {
         updatedRecord = recordToSave;
         draft.cashAdvances[index] = recordToSave;
         syncTorBudgetInDraft(draft, existing.torId);
+        syncMonitoringReportsForTor(draft, existing.torId);
         syncApprovalHubData(draft);
 
         draft.auditLogs.unshift({
@@ -6372,6 +6457,23 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const now = new Date();
 
+    if (!['report', 'finance', 'director'].includes(stage)) {
+      return res.status(400).json({ error: 'Tahap persetujuan Ringkasan Cash Advance tidak valid.' });
+    }
+    const isFinanceActor =
+      currentUser.role === 'finance' ||
+      (currentUser.roleTitle || '').toLowerCase().includes('finance');
+    if (stage === 'finance' && !isFinanceActor) {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya Finance yang berwenang memeriksa Laporan Keuangan Akhir pada tahap ini.',
+      });
+    }
+    if (stage === 'director' && currentUser.role !== 'director') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya Direktur Eksekutif yang berwenang memberikan persetujuan akhir Laporan Keuangan Akhir.',
+      });
+    }
+
     let updatedSummary: any = null;
     db.update((draft) => {
       if (!draft.cashAdvanceSummaries) draft.cashAdvanceSummaries = {};
@@ -6388,13 +6490,6 @@ async function startServer() {
 
       const targetTor = (draft.tors || []).find((t) => t.id === torId);
       const defaultReporter = targetTor?.picName || targetTor?.createdByName || currentUser.name;
-
-      if (stage === 'finance' && currentUser.role !== 'finance' && currentUser.role !== 'admin') {
-        return;
-      }
-      if (stage === 'director' && currentUser.role !== 'director' && currentUser.role !== 'admin') {
-        return;
-      }
 
       if (stage === 'report') {
         existing.summaryApprovalStatus = 'Menunggu Pemeriksaan Finance';
@@ -6454,6 +6549,8 @@ async function startServer() {
       existing.updatedAt = now.toISOString();
       draft.cashAdvanceSummaries[torId] = existing;
       updatedSummary = existing;
+      syncTorBudgetInDraft(draft, torId);
+      syncApprovalHubData(draft);
 
       if (!draft.cashAdvanceAuditLogs) draft.cashAdvanceAuditLogs = {};
       if (!draft.cashAdvanceAuditLogs[torId]) draft.cashAdvanceAuditLogs[torId] = [];
@@ -6586,6 +6683,7 @@ async function startServer() {
 
       draft.meetingMinutes.unshift(newMom);
       createdRecord = newMom;
+      syncApprovalHubData(draft);
 
       draft.auditLogs.unshift({
         id: `log-mom-${Date.now()}`,
@@ -6647,6 +6745,7 @@ async function startServer() {
 
       draft.meetingMinutes[idx] = merged;
       updatedRecord = merged;
+      syncApprovalHubData(draft);
 
       draft.auditLogs.unshift({
         id: `log-mom-upd-${Date.now()}`,
@@ -6691,6 +6790,7 @@ async function startServer() {
     db.update((draft) => {
       if (!draft.meetingMinutes) return;
       draft.meetingMinutes = draft.meetingMinutes.filter((m) => m.id !== id);
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-mom-del-${Date.now()}`,
         actorId: currentUser.id,
@@ -6837,6 +6937,7 @@ async function startServer() {
         };
       }
       savedRecord = nextDoc;
+      syncApprovalHubData(draft);
 
       draft.auditLogs.unshift({
         id: `log-doc-${Date.now()}`,
@@ -6877,6 +6978,26 @@ async function startServer() {
     db.update((draft) => {
       if (!Array.isArray(draft.activityDocumentationList)) return;
       draft.activityDocumentationList = draft.activityDocumentationList.filter((d) => d.id !== id);
+      if (target.torId) {
+        const remainingForTor = draft.activityDocumentationList.filter((d) => d.torId === target.torId);
+        const latestDoc = remainingForTor[0];
+        if (draft.activityDocumentations) {
+          if (latestDoc) {
+            draft.activityDocumentations[target.torId] = latestDoc;
+          } else {
+            delete draft.activityDocumentations[target.torId];
+          }
+        }
+        const tIdx = (draft.tors || []).findIndex((t) => t.id === target.torId);
+        if (tIdx >= 0) {
+          draft.tors[tIdx] = {
+            ...draft.tors[tIdx],
+            documentation: latestDoc || undefined,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      }
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-doc-del-${Date.now()}`,
         actorId: currentUser.id,
@@ -7029,6 +7150,7 @@ async function startServer() {
         };
       }
       savedRecord = nextDoc;
+      syncApprovalHubData(draft);
     });
 
     res.json(savedRecord);
@@ -7055,7 +7177,9 @@ async function startServer() {
     }
 
     const canManageRaci =
+      currentUser.role === 'director' ||
       currentUser.role === 'program_manager' ||
+      currentUser.role === 'meal' ||
       currentUser.role === 'admin' ||
       Boolean(currentUser.permissions?.canManagePrograms);
 
@@ -7473,6 +7597,8 @@ async function startServer() {
 
       draft.activityMonitoringRecords[activityId] = nextRecord;
       savedRecord = nextRecord;
+      syncMonitoringReportsForTor(draft);
+      syncApprovalHubData(draft);
 
       draft.auditLogs.unshift({
         id: `log-mon-act-${Date.now()}`,
@@ -7991,6 +8117,8 @@ async function startServer() {
           }
         }
       }
+
+      syncApprovalHubData(draft);
 
       if (!body.isAutoSave) {
         draft.auditLogs.unshift({
