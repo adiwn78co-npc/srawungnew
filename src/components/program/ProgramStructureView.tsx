@@ -2857,7 +2857,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                             <span className="inline-flex items-center gap-1 bg-[#F7F7F5] border border-[#D4D4D0] rounded px-1.5 py-0.5">
                               <FolderOpen className="w-3 h-3 text-[#1D4ED8] shrink-0" />
                               <input
-                                type="url"
+                                type="text"
                                 value={inlineFolderUrlDraft}
                                 onChange={(e) => setInlineFolderUrlDraft(e.target.value)}
                                 placeholder="https://drive.google.com/..."

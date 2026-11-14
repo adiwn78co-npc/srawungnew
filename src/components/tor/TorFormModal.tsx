@@ -557,11 +557,58 @@ export const TorFormModal: React.FC<TorFormModalProps> = ({
 
   const getUserOutputRaciRole = (targetOutputId: string): string | null => {
     if (!currentUser) return null;
-    const raci = outputRaciMap[targetOutputId];
+    if (currentUser.role === 'system_admin') return 'System Administrator';
+    if (currentUser.role === 'director') return 'Executive Director';
+
+    let raci: OutputRaciRecord | undefined = outputRaciMap[targetOutputId];
+    if (!raci) {
+      const targetOutput = outputs.find((o) => o.id === targetOutputId);
+      if (targetOutput) {
+        const outc = outcomes.find((oc) => oc.id === targetOutput.outcomeId);
+        const progId = outc?.programId || '';
+        const extractKey = (label?: string, code?: string): string => {
+          const combined = `${code || ''} ${label || ''}`.trim();
+          const m = combined.match(/(?:output\s*)?(\d+(?:\.\d+)+)/i);
+          return m ? m[1].toLowerCase() : combined.toLowerCase().replace(/\s+/g, ' ').trim();
+        };
+        const targetKey = extractKey(targetOutput.name, targetOutput.code);
+        if (targetKey) {
+          raci = Object.values(outputRaciMap).find((cand) => {
+            if (!cand || typeof cand !== 'object') return false;
+            if (progId && cand.programId && cand.programId !== progId) return false;
+            const candMeta = cand as OutputRaciRecord & {
+              outputCode?: string;
+              outputNumber?: string;
+              outputName?: string;
+            };
+            return extractKey(candMeta.outputName, candMeta.outputNumber || candMeta.outputCode) === targetKey;
+          });
+        }
+      }
+    }
+
     if (!raci || raci.status !== 'Aktif') return null;
-    if (raci.responsibleUserId === currentUser.id) return 'R – Responsible';
-    if (raci.accountableUserId === currentUser.id) return 'A1 – Accountable Program';
+    if (currentUser.role === 'admin') return 'Administrator';
+
+    const normUserName = String(currentUser.name || '').trim().toLowerCase();
     if (
+      raci.responsibleUserId === currentUser.id ||
+      (normUserName &&
+        String(raci.responsibleUserName || '').trim().toLowerCase() === normUserName)
+    ) {
+      return 'R – Responsible';
+    }
+    if (
+      raci.accountableUserId === currentUser.id ||
+      (normUserName &&
+        String(raci.accountableUserName || '').trim().toLowerCase() === normUserName)
+    ) {
+      return 'A1 – Accountable Program';
+    }
+    if (
+      raci.accountableFinanceUserId === currentUser.id ||
+      (normUserName &&
+        String(raci.accountableFinanceUserName || '').trim().toLowerCase() === normUserName) ||
       currentUser.role === 'finance' ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance')
     ) {

@@ -4042,7 +4042,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   Link Bukti PDF Expensify (Wajib)
                 </label>
                 <input
-                  type="url"
+                  type="text"
                   required
                   value={lpjExpensifyLink}
                   onChange={(e) => setLpjExpensifyLink(e.target.value)}

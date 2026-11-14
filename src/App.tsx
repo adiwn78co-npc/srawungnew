@@ -96,6 +96,7 @@ function MainAppContent() {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [approvalFilterActivityId, setApprovalFilterActivityId] = useState<string | null>(null);
+  const [monitoringRefreshTick, setMonitoringRefreshTick] = useState<number>(0);
 
   // Modal State
   const [showCreateTorModal, setShowCreateTorModal] = useState(false);
@@ -113,6 +114,7 @@ function MainAppContent() {
     }
     try {
       setLoading(true);
+      setMonitoringRefreshTick((prev) => prev + 1);
       const [torsRes, statsRes, progRes, auditRes, apvRes, finBudgetsRes] = await Promise.all([
         api.getTors().catch((err) => {
           console.error('Failed to load ToRs:', err);
@@ -741,6 +743,7 @@ function MainAppContent() {
                       : undefined
                   }
                   onRaciChanged={loadData}
+                  refreshTrigger={monitoringRefreshTick}
                   responsibleApprovalItems={responsibleApprovalItems}
                   notifications={approvalNotifications}
                   onMarkNotificationRead={handleMarkNotificationRead}

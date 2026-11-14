@@ -1870,7 +1870,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                     ) : (
                       <div className="relative">
                         <input
-                          type="url"
+                          type="text"
                           required
                           value={expensifyLinkInput}
                           onChange={(e) => setExpensifyLinkInput(e.target.value)}

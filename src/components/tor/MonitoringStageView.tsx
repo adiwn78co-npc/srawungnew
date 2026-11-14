@@ -1154,7 +1154,7 @@ export const MonitoringStageView: React.FC<MonitoringStageViewProps> = ({
                                           {isEditingThisLink && (
                                             <div className="mt-3 pt-2.5 border-t border-stone-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                                               <input
-                                                type="url"
+                                                type="text"
                                                 value={linkInputDraft}
                                                 onChange={(e) => setLinkInputDraft(e.target.value)}
                                                 placeholder={`Masukkan link bukti / dokumen untuk [${mItem.toolId}] ${mItem.toolName} (https://drive.google.com/...)`}

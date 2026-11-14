@@ -24,6 +24,7 @@ import type {
   AttendanceSystemBundle,
 } from '../types/index.ts';
 import {
+  backfillHybridTablesFromKvStore,
   checkMysqlWritePrivileges,
   deleteMysqlUserRow,
   ensureMysqlSchema,
@@ -647,12 +648,219 @@ function normalizeSchema(
     }));
   }
 
-  if (!parsed.outputRaciRecords || typeof parsed.outputRaciRecords !== 'object') {
-    parsed.outputRaciRecords = {};
+  const userByIdMap = new Map<string, User>();
+  const userByLowerNameMap = new Map<string, User>();
+  for (const u of parsed.users || []) {
+    if (u && u.id) {
+      userByIdMap.set(String(u.id), u);
+      if (u.name && u.name.trim()) {
+        userByLowerNameMap.set(u.name.trim().toLowerCase(), u);
+      }
+    }
   }
-  if (!parsed.activityMonitoringRecords || typeof parsed.activityMonitoringRecords !== 'object') {
-    parsed.activityMonitoringRecords = {};
+  const activeFinanceUser = (parsed.users || []).find(
+    (u) =>
+      u &&
+      u.isActive !== false &&
+      (u.role === 'finance' || (u.roleTitle || '').toLowerCase().includes('finance'))
+  );
+
+  const canonicalizeNodeKey = (code?: string, number?: string, name?: string): string => {
+    const rawText = String(number || code || name || '').trim();
+    const numMatch = rawText.match(/(?:outcome|output|activity)?\s*(\d+(?:\.\d+)+)/i);
+    if (numMatch) return `num:${numMatch[1]}`;
+    const cleanName = String(name || '')
+      .toLowerCase()
+      .replace(/^(?:outcome|output|activity)\s*\d+(?:\.\d+)*\s*[:.-]?\s*/i, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    return cleanName ? `txt:${cleanName}` : '';
+  };
+
+  const outcomeByIdForRaci = outcomeByIdMap;
+  const outputByProgAndCanonical = new Map<string, Output>();
+  const outputByCanonicalOnly = new Map<string, Output[]>();
+  for (const op of parsed.outputs || []) {
+    if (!op || !op.id) continue;
+    const parentOc = outcomeByIdForRaci.get(op.outcomeId);
+    const progId = (op as any).programId || parentOc?.programId || '';
+    const canon = canonicalizeNodeKey(op.code, op.outputNumber, op.name);
+    if (canon) {
+      if (progId && !outputByProgAndCanonical.has(`${progId}::${canon}`)) {
+        outputByProgAndCanonical.set(`${progId}::${canon}`, op);
+      }
+      const list = outputByCanonicalOnly.get(canon) || [];
+      list.push(op);
+      outputByCanonicalOnly.set(canon, list);
+    }
   }
+
+  const rawRaciInput = parsed.outputRaciRecords as any;
+  const normalizedRaciMap: Record<string, OutputRaciRecord> = {};
+  const rawRaciEntries: Array<[string, any]> = Array.isArray(rawRaciInput)
+    ? rawRaciInput
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => [String(item.outputId || item.id || ''), item])
+    : rawRaciInput && typeof rawRaciInput === 'object'
+    ? Object.entries(rawRaciInput)
+    : [];
+
+  for (const [rawKey, item] of rawRaciEntries) {
+    if (!item || typeof item !== 'object') continue;
+    let resolvedOutputId = String(item.outputId || rawKey || '').trim();
+    if (!resolvedOutputId) continue;
+
+    // Jika outputId pada RACI lama berasal dari sebelum re-import hirarki Excel, rekonsiliasi ke Output aktif yang setara
+    if (!outputByIdMap.has(resolvedOutputId) && outputByIdMap.size > 0) {
+      const hintCanon = canonicalizeNodeKey(
+        item.outputCode || rawKey,
+        item.outputNumber,
+        item.outputName || item.title
+      );
+      const hintProgId = String(item.programId || '').trim();
+      let matchedOut: Output | undefined;
+      if (hintCanon && hintProgId) {
+        matchedOut = outputByProgAndCanonical.get(`${hintProgId}::${hintCanon}`);
+      }
+      if (!matchedOut && hintCanon) {
+        const candidates = outputByCanonicalOnly.get(hintCanon) || [];
+        if (candidates.length === 1) {
+          matchedOut = candidates[0];
+        }
+      }
+      if (matchedOut) {
+        resolvedOutputId = matchedOut.id;
+      }
+    }
+
+    const linkedOut = outputByIdMap.get(resolvedOutputId);
+    const linkedOutc = linkedOut
+      ? outcomeByIdForRaci.get(linkedOut.outcomeId)
+      : item.outcomeId
+      ? outcomeByIdForRaci.get(String(item.outcomeId))
+      : undefined;
+
+    let respId = String(item.responsibleUserId || '').trim();
+    let respName = String(item.responsibleUserName || '').trim();
+    if (respId && !respName && userByIdMap.has(respId)) {
+      respName = userByIdMap.get(respId)!.name;
+    } else if (!respId && respName && userByLowerNameMap.has(respName.toLowerCase())) {
+      respId = userByLowerNameMap.get(respName.toLowerCase())!.id;
+    }
+
+    let accId = String(item.accountableUserId || '').trim();
+    let accName = String(item.accountableUserName || '').trim();
+    if (accId && !accName && userByIdMap.has(accId)) {
+      accName = userByIdMap.get(accId)!.name;
+    } else if (!accId && accName && userByLowerNameMap.has(accName.toLowerCase())) {
+      accId = userByLowerNameMap.get(accName.toLowerCase())!.id;
+    }
+
+    let accFinId = String(item.accountableFinanceUserId || '').trim();
+    let accFinName = String(item.accountableFinanceUserName || '').trim();
+    if (accFinId && !accFinName && userByIdMap.has(accFinId)) {
+      accFinName = userByIdMap.get(accFinId)!.name;
+    } else if (!accFinId && accFinName && userByLowerNameMap.has(accFinName.toLowerCase())) {
+      accFinId = userByLowerNameMap.get(accFinName.toLowerCase())!.id;
+    } else if (!accFinId && !accFinName && (respId || accId) && activeFinanceUser) {
+      accFinId = activeFinanceUser.id;
+      accFinName = activeFinanceUser.name;
+    }
+
+    const assignedById = String(item.assignedById || '').trim();
+    const assignedByName =
+      String(item.assignedByName || '').trim() ||
+      (assignedById && userByIdMap.has(assignedById) ? userByIdMap.get(assignedById)!.name : '');
+    const approvedById = String(item.approvedById || '').trim();
+    const approvedByName =
+      String(item.approvedByName || '').trim() ||
+      (approvedById && userByIdMap.has(approvedById) ? userByIdMap.get(approvedById)!.name : '');
+
+    const consultedUsers = Array.isArray(item.consultedUsers)
+      ? item.consultedUsers.map((x: any) => String(x ?? '').trim()).filter(Boolean)
+      : [];
+    const informedUsers = Array.isArray(item.informedUsers)
+      ? item.informedUsers.map((x: any) => String(x ?? '').trim()).filter(Boolean)
+      : [];
+
+    const hasRA = Boolean((respId || respName) && (accId || accName));
+    const rawStatus = String(item.status || '').trim();
+    const status: OutputRaciRecord['status'] =
+      rawStatus === 'Aktif' ||
+      rawStatus === 'Menunggu Persetujuan Direktur' ||
+      rawStatus === 'Menunggu Program Manager'
+        ? rawStatus
+        : hasRA
+        ? 'Menunggu Persetujuan Direktur'
+        : 'Menunggu Program Manager';
+
+    const existingOnTarget = normalizedRaciMap[resolvedOutputId];
+    // Jangan menimpa record target yang sudah 'Aktif' dengan record orphan yang belum aktif
+    if (existingOnTarget && existingOnTarget.status === 'Aktif' && status !== 'Aktif') {
+      continue;
+    }
+
+    normalizedRaciMap[resolvedOutputId] = {
+      ...item,
+      outputId: resolvedOutputId,
+      outcomeId: linkedOut?.outcomeId || item.outcomeId || '',
+      programId:
+        (linkedOut as any)?.programId || linkedOutc?.programId || item.programId || '',
+      responsibleUserId: respId,
+      responsibleUserName: respName,
+      accountableUserId: accId,
+      accountableUserName: accName,
+      accountableFinanceUserId: accFinId || undefined,
+      accountableFinanceUserName: accFinName || undefined,
+      consultedUsers,
+      informedUsers,
+      status,
+      assignedById: assignedById || undefined,
+      assignedByName: assignedByName || undefined,
+      approvedById: approvedById || undefined,
+      approvedByName: approvedByName || undefined,
+      auditHistory: Array.isArray(item.auditHistory) ? item.auditHistory : [],
+      updatedAt: item.updatedAt || '',
+    };
+  }
+  parsed.outputRaciRecords = normalizedRaciMap;
+
+  const rawActMonInput = parsed.activityMonitoringRecords as any;
+  const normalizedActMonMap: Record<string, ActivityMonitoringRecord> = {};
+  const rawActMonEntries: Array<[string, any]> = Array.isArray(rawActMonInput)
+    ? rawActMonInput
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => [String(item.activityId || item.id || ''), item])
+    : rawActMonInput && typeof rawActMonInput === 'object'
+    ? Object.entries(rawActMonInput)
+    : [];
+  for (const [rawKey, item] of rawActMonEntries) {
+    if (!item || typeof item !== 'object') continue;
+    const actId = String(item.activityId || rawKey || '').trim();
+    if (!actId) continue;
+    const linkedAct = activityByIdMap.get(actId);
+    const linkedOut = linkedAct ? outputByIdMap.get(linkedAct.outputId) : undefined;
+    const linkedOutc = linkedOut ? outcomeByIdForRaci.get(linkedOut.outcomeId) : undefined;
+    const tools = Array.isArray(item.tools) ? item.tools : [];
+    const updatedById = String(item.updatedById || '').trim();
+    const updatedByName =
+      String(item.updatedByName || '').trim() ||
+      (updatedById && userByIdMap.has(updatedById) ? userByIdMap.get(updatedById)!.name : '');
+    normalizedActMonMap[actId] = {
+      ...item,
+      activityId: actId,
+      outputId: linkedAct?.outputId || item.outputId || '',
+      outcomeId: linkedOut?.outcomeId || item.outcomeId || '',
+      programId: linkedOutc?.programId || item.programId || '',
+      tools,
+      status: tools.length > 0 ? 'Sudah Ada Monitoring' : 'Belum Ada Monitoring',
+      updatedById,
+      updatedByName,
+      updatedAt: item.updatedAt || '',
+    };
+  }
+  parsed.activityMonitoringRecords = normalizedActMonMap;
+
   if (!parsed.monitoringReports || typeof parsed.monitoringReports !== 'object') {
     parsed.monitoringReports = {};
   }
@@ -1433,6 +1641,7 @@ class Database {
 
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
             await this.ensureSystemAdministratorInMysql(pool);
+            await backfillHybridTablesFromKvStore(pool, this.data);
 
             this.lastCommittedJson = JSON.stringify(this.data);
             this.committedVersion = this.mutationVersion;

@@ -439,6 +439,7 @@ interface MonitoringToolsViewProps {
   onOpenCreateTorForActivity?: (outcomeId: string, outputId: string, activityId: string) => void;
   onOpenApprovalForActivity?: (activityId: string) => void;
   onRaciChanged?: () => void;
+  refreshTrigger?: number;
   responsibleApprovalItems?: ApprovalHubItem[];
   notifications?: ApprovalNotificationItem[];
   onMarkNotificationRead?: (notificationId?: string, markAll?: boolean) => void;
@@ -455,11 +456,12 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   onOpenCreateTorForActivity,
   onOpenApprovalForActivity,
   onRaciChanged,
+  refreshTrigger = 0,
   responsibleApprovalItems = [],
   notifications = [],
   onMarkNotificationRead,
 }) => {
-  const { currentUser, isDirector, isProgramManager, isAdmin, isSystemAdmin } = useAuth();
+  const { currentUser, isDirector, isProgramManager, isMeal, isAdmin, isSystemAdmin } = useAuth();
   const [showFollowUpInbox, setShowFollowUpInbox] = useState<boolean>(false);
 
   // Core data from server
@@ -551,11 +553,26 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
       setLoading(true);
       const res = await api.getMonitoringConnect();
       if (res) {
-        setRaciMap(res.outputRaciRecords || {});
+        const rawRaci = res.outputRaciRecords as unknown;
+        if (Array.isArray(rawRaci)) {
+          const converted: Record<string, OutputRaciRecord> = {};
+          for (const item of rawRaci) {
+            if (item && typeof item === 'object' && item.outputId) {
+              converted[String(item.outputId)] = item as OutputRaciRecord;
+            }
+          }
+          setRaciMap(converted);
+        } else {
+          setRaciMap(res.outputRaciRecords || {});
+        }
         setActivityMonMap(res.activityMonitoringRecords || {});
       }
     } catch (err: any) {
       console.error('Failed to load monitoring connect data:', err);
+      setFeedbackBanner({
+        type: 'error',
+        message: err?.message || 'Gagal memuat data RACI & Monitoring dari database.',
+      });
     } finally {
       setLoading(false);
     }
@@ -563,7 +580,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
 
   useEffect(() => {
     loadMonitoringData();
-  }, [loadMonitoringData]);
+  }, [loadMonitoringData, refreshTrigger, outputs.length]);
 
   // Registered active users
   const activeUsers = useMemo(() => users.filter((u) => u.isActive !== false), [users]);
@@ -592,15 +609,95 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
     [registeredUserNameSet]
   );
 
-  // Helper to get effective RACI status for an Output
+  // Helper to get effective RACI status for an Output (with user hydration & Output code reconciliation)
   const getOutputRaci = useCallback(
     (output: Output): OutputRaciRecord => {
-      const existing = raciMap[output.id];
-      if (existing) return existing;
       const outc = outcomes.find((oc) => oc.id === output.outcomeId);
+      const progId = outc?.programId || '';
+
+      const extractCanonicalOutputKey = (label?: string, code?: string): string => {
+        const combined = `${code || ''} ${label || ''}`.trim();
+        const m = combined.match(/(?:output\s*)?(\d+(?:\.\d+)+)/i);
+        return m ? m[1].toLowerCase() : combined.toLowerCase().replace(/\s+/g, ' ').trim();
+      };
+
+      let existing: OutputRaciRecord | undefined = raciMap[output.id];
+      if (!existing) {
+        const targetKey = extractCanonicalOutputKey(output.name, output.code);
+        if (targetKey) {
+          existing = Object.values(raciMap).find((cand) => {
+            if (!cand || typeof cand !== 'object') return false;
+            if (progId && cand.programId && cand.programId !== progId) return false;
+            const candMeta = cand as OutputRaciRecord & {
+              outputCode?: string;
+              outputNumber?: string;
+              outputName?: string;
+            };
+            const candKey = extractCanonicalOutputKey(
+              candMeta.outputName,
+              candMeta.outputNumber || candMeta.outputCode
+            );
+            return Boolean(candKey && candKey === targetKey);
+          });
+        }
+      }
+
+      if (existing) {
+        const respById = existing.responsibleUserId
+          ? users.find((u) => u.id === existing.responsibleUserId)
+          : undefined;
+        const respByName =
+          !respById && existing.responsibleUserName
+            ? users.find(
+                (u) =>
+                  u.name.trim().toLowerCase() ===
+                  existing.responsibleUserName.trim().toLowerCase()
+              )
+            : undefined;
+        const accById = existing.accountableUserId
+          ? users.find((u) => u.id === existing.accountableUserId)
+          : undefined;
+        const accByName =
+          !accById && existing.accountableUserName
+            ? users.find(
+                (u) =>
+                  u.name.trim().toLowerCase() ===
+                  existing.accountableUserName.trim().toLowerCase()
+              )
+            : undefined;
+        const finById = existing.accountableFinanceUserId
+          ? users.find((u) => u.id === existing.accountableFinanceUserId)
+          : undefined;
+
+        return {
+          ...existing,
+          outputId: output.id,
+          programId: existing.programId || progId,
+          outcomeId: existing.outcomeId || output.outcomeId,
+          responsibleUserId: existing.responsibleUserId || respByName?.id || '',
+          responsibleUserName:
+            existing.responsibleUserName || respById?.name || respByName?.name || '',
+          accountableUserId: existing.accountableUserId || accByName?.id || '',
+          accountableUserName:
+            existing.accountableUserName || accById?.name || accByName?.name || '',
+          accountableFinanceUserId:
+            existing.accountableFinanceUserId ||
+            (existing.accountableUserId ? financeManagerUser?.id : '') ||
+            '',
+          accountableFinanceUserName:
+            existing.accountableFinanceUserName ||
+            finById?.name ||
+            (existing.accountableUserId || existing.accountableUserName
+              ? financeManagerUser?.name || ''
+              : ''),
+          consultedUsers: Array.isArray(existing.consultedUsers) ? existing.consultedUsers : [],
+          informedUsers: Array.isArray(existing.informedUsers) ? existing.informedUsers : [],
+        };
+      }
+
       return {
         outputId: output.id,
-        programId: outc?.programId || '',
+        programId: progId,
         outcomeId: output.outcomeId,
         responsibleUserId: '',
         responsibleUserName: '',
@@ -612,7 +709,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
         updatedAt: '',
       };
     },
-    [raciMap, outcomes]
+    [raciMap, outcomes, users, financeManagerUser]
   );
 
   // Build effective RACI audit history entries per Output (including fallback from existing fields)
@@ -745,7 +842,12 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   const isCurrentAccountActive = Boolean(currentUser && currentUser.isActive !== false);
   const canAssignRaci =
     isCurrentAccountActive &&
-    (isSystemAdmin || isProgramManager || isAdmin || Boolean(currentUser?.permissions?.canManagePrograms));
+    (isSystemAdmin ||
+      isProgramManager ||
+      isMeal ||
+      isDirector ||
+      isAdmin ||
+      Boolean(currentUser?.permissions?.canManagePrograms));
   const canApproveRaci = isCurrentAccountActive && (isDirector || isSystemAdmin);
 
   // Determine user's Responsible / Accountable assignment role on an Output
@@ -841,6 +943,12 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
       if (isSystemAdmin) {
         return { allowed: true, roleLabel: 'System Administrator' };
       }
+      if (isDirector) {
+        return { allowed: true, roleLabel: 'Executive Director' };
+      }
+      if (isAdmin && raci.status === 'Aktif') {
+        return { allowed: true, roleLabel: 'Administrator' };
+      }
 
       if (raci.status !== 'Aktif') {
         return {
@@ -862,7 +970,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
           'Hanya user yang ditugaskan sebagai R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) pada Output ini yang dapat membuat ToR dan mengelola Monitoring Tools.',
       };
     },
-    [currentUser, isSystemAdmin, getOutputRaci, getUserRaciRoleForOutput]
+    [currentUser, isSystemAdmin, isDirector, isAdmin, getOutputRaci, getUserRaciRoleForOutput]
   );
 
   // Helper to get ToRs linked to an Activity
@@ -976,8 +1084,17 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   // Open RACI Editor Modal for an Output
   const handleOpenRaciEditor = (output: Output) => {
     const raci = getOutputRaci(output);
+    const fallbackPicUser =
+      !raci.responsibleUserId && (output.picId || output.picName)
+        ? activeUsers.find(
+            (u) =>
+              (output.picId && u.id === output.picId) ||
+              (output.picName &&
+                u.name.trim().toLowerCase() === output.picName.trim().toLowerCase())
+          )
+        : undefined;
     setEditingRaciOutput(output);
-    setDraftResponsibleId(raci.responsibleUserId || '');
+    setDraftResponsibleId(raci.responsibleUserId || fallbackPicUser?.id || '');
     setDraftAccountableId(raci.accountableUserId || financeManagerUser?.id || '');
     setDraftConsulted([...(raci.consultedUsers || [])]);
     setDraftInformed([...(raci.informedUsers || [])]);
@@ -2311,34 +2428,43 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
                                   Penanggung Jawab
                                 </div>
                               </div>
-                              <div className="space-y-1.5 text-xs leading-snug">
-                                {getAccountableNamesList(raci).map((acc, idx) => {
-                                  const isA1Inactive =
-                                    !acc.isAutoFinance &&
-                                    raci.accountableUserId &&
-                                    users.some(
-                                      (u) => u.id === raci.accountableUserId && u.isActive === false
-                                    );
-                                  return (
-                                    <div
-                                      key={idx}
-                                      className="flex items-baseline justify-between gap-2"
-                                    >
-                                      <span className="font-semibold text-[#2F3437] break-words">
-                                        {acc.name}
-                                        {isA1Inactive && (
-                                          <span className="ml-1.5 px-1.5 py-0.2 rounded bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-medium">
-                                            Nonaktif
+                              {(() => {
+                                const accList = getAccountableNamesList(raci);
+                                if (accList.length === 0) {
+                                  return <div className="text-xs text-[#A8A29E]">-</div>;
+                                }
+                                return (
+                                  <div className="space-y-1.5 text-xs leading-snug">
+                                    {accList.map((acc, idx) => {
+                                      const isA1Inactive =
+                                        !acc.isAutoFinance &&
+                                        raci.accountableUserId &&
+                                        users.some(
+                                          (u) =>
+                                            u.id === raci.accountableUserId && u.isActive === false
+                                        );
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className="flex items-baseline justify-between gap-2"
+                                        >
+                                          <span className="font-semibold text-[#2F3437] break-words">
+                                            {acc.name}
+                                            {isA1Inactive && (
+                                              <span className="ml-1.5 px-1.5 py-0.2 rounded bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-medium">
+                                                Nonaktif
+                                              </span>
+                                            )}
                                           </span>
-                                        )}
-                                      </span>
-                                      <span className="text-[10.5px] text-[#787774] shrink-0">
-                                        {acc.isAutoFinance ? 'Finance' : 'Program'}
-                                      </span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                                          <span className="text-[10.5px] text-[#787774] shrink-0">
+                                            {acc.isAutoFinance ? 'Finance' : 'Program'}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             {/* Column 3: Consulted / Konsultasi Teknis */}
@@ -3090,7 +3216,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
 
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                 <input
-                                  type="url"
+                                  type="text"
                                   disabled={!editPerm.allowed}
                                   value={selectedTool.toolUrl || ''}
                                   onChange={(e) =>

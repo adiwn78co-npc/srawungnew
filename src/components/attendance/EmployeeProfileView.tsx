@@ -139,8 +139,17 @@ export const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
           setOutcomes(Array.isArray(progRes.outcomes) ? progRes.outcomes : []);
           setOutputs(Array.isArray(progRes.outputs) ? progRes.outputs : []);
         }
-        if (raciRes && Array.isArray(raciRes.outputRaciRecords)) {
-          setOutputRaciRecords(raciRes.outputRaciRecords);
+        if (raciRes && raciRes.outputRaciRecords) {
+          const rawRaci = raciRes.outputRaciRecords as unknown;
+          const list = Array.isArray(rawRaci)
+            ? (rawRaci as OutputRaciRecord[])
+            : typeof rawRaci === 'object' && rawRaci !== null
+              ? (Object.values(rawRaci) as OutputRaciRecord[]).filter(
+                  (item): item is OutputRaciRecord =>
+                    Boolean(item && typeof item === 'object' && 'outputId' in item)
+                )
+              : [];
+          setOutputRaciRecords(list);
         }
       } finally {
         if (mounted) setLoadingOutputs(false);
@@ -158,11 +167,19 @@ export const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
   const entrustedOutputs = useMemo(() => {
     if (!selectedEmployee) return [];
     const empId = selectedEmployee.id;
-    const empNameLower = selectedEmployee.name.toLowerCase();
+    const empNameLower = (selectedEmployee.name || '').trim().toLowerCase();
+
+    const extractCanonicalOutputCode = (label?: string, code?: string): string => {
+      const combined = `${code || ''} ${label || ''}`.trim();
+      const m = combined.match(/(?:output\s*)?(\d+(?:\.\d+)+)/i);
+      return m ? m[1].toLowerCase() : combined.toLowerCase().replace(/\s+/g, ' ').trim();
+    };
 
     const raciMap = new Map<string, OutputRaciRecord>();
     for (const r of outputRaciRecords) {
-      raciMap.set(r.outputId, r);
+      if (r?.outputId) {
+        raciMap.set(r.outputId, r);
+      }
     }
 
     const result: Array<{
@@ -172,34 +189,73 @@ export const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
     }> = [];
 
     for (const op of outputs) {
-      const raci = raciMap.get(op.id);
+      const outcome = outcomes.find((o) => o.id === op.outcomeId);
+      const progId = outcome?.programId || '';
+      const opCodeKey = extractCanonicalOutputCode(op.name, op.code);
+
+      let raci = raciMap.get(op.id);
+      if (!raci && opCodeKey) {
+        raci = outputRaciRecords.find((cand) => {
+          if (progId && cand.programId && cand.programId !== progId) return false;
+          const candRaw = cand as OutputRaciRecord & {
+            outputCode?: string;
+            outputNumber?: string;
+            outputName?: string;
+          };
+          const candKey = extractCanonicalOutputCode(
+            candRaw.outputName,
+            candRaw.outputNumber || candRaw.outputCode
+          );
+          return Boolean(candKey && candKey === opCodeKey);
+        });
+      }
+
       const roles: string[] = [];
 
       if (raci) {
-        if (raci.responsibleUserId === empId) roles.push('R (Pelaksana)');
-        if (raci.accountableUserId === empId) roles.push('A1 (Program)');
-        if (raci.accountableFinanceUserId === empId) roles.push('A2 (Finance)');
         if (
+          raci.responsibleUserId === empId ||
+          (empNameLower &&
+            (raci.responsibleUserName || '').trim().toLowerCase() === empNameLower)
+        ) {
+          roles.push('R (Pelaksana)');
+        }
+        if (
+          raci.accountableUserId === empId ||
+          (empNameLower &&
+            (raci.accountableUserName || '').trim().toLowerCase() === empNameLower)
+        ) {
+          roles.push('A1 (Program)');
+        }
+        if (
+          raci.accountableFinanceUserId === empId ||
+          (empNameLower &&
+            (raci.accountableFinanceUserName || '').trim().toLowerCase() === empNameLower)
+        ) {
+          roles.push('A2 (Finance)');
+        }
+        if (
+          empNameLower &&
           Array.isArray(raci.consultedUsers) &&
-          raci.consultedUsers.some((c) => c.toLowerCase().includes(empNameLower))
+          raci.consultedUsers.some((c) => String(c || '').toLowerCase().includes(empNameLower))
         ) {
           roles.push('C (Consulted)');
         }
         if (
+          empNameLower &&
           Array.isArray(raci.informedUsers) &&
-          raci.informedUsers.some((i) => i.toLowerCase().includes(empNameLower))
+          raci.informedUsers.some((i) => String(i || '').toLowerCase().includes(empNameLower))
         ) {
           roles.push('I (Informed)');
         }
       } else if (
         op.picId === empId ||
-        (op.picName && op.picName.toLowerCase().includes(empNameLower))
+        (empNameLower && op.picName && op.picName.toLowerCase().includes(empNameLower))
       ) {
         roles.push('PIC Output');
       }
 
       if (roles.length > 0) {
-        const outcome = outcomes.find((o) => o.id === op.outcomeId);
         const program = programs.find(
           (p) => p.id === (outcome?.programId || raci?.programId)
         );
@@ -572,7 +628,7 @@ export const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
               Tautan / Link Dokumen (Google Drive / Notion / OneDrive)
             </label>
             <input
-              type="url"
+              type="text"
               required
               placeholder="https://drive.google.com/drive/folders/..."
               value={linkUrlInput}

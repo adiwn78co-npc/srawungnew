@@ -224,6 +224,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const isDirector = rawIsDirector || isSystemAdmin;
   const [confirmDeleteTorId, setConfirmDeleteTorId] = useState<string | null>(null);
   const [deletingTorId, setDeletingTorId] = useState<string | null>(null);
+  const [quickActionError, setQuickActionError] = useState<{ torId: string; message: string } | null>(null);
 
   // Complete Filter States
   const [filterSubmissionStatus, setFilterSubmissionStatus] = useState<string>('all');
@@ -1158,6 +1159,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           )}
                         </div>
 
+                        {quickActionError?.torId === tor.id && (
+                          <div className="mt-2.5 px-3 py-2 rounded-md bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2">
+                            <span>{quickActionError.message}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setQuickActionError(null);
+                              }}
+                              className="text-rose-700 hover:text-rose-900 font-semibold text-[11px] shrink-0 cursor-pointer"
+                            >
+                              Tutup
+                            </button>
+                          </div>
+                        )}
+
                         {/* Bottom Actions Bar */}
                         <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-3 border-t border-[#EDEDEC]">
                           <div className="text-[11px] text-[#9A9996]">
@@ -1172,11 +1189,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 onClick={async (e) => {
                                   e.stopPropagation();
                                   try {
+                                    setQuickActionError(null);
                                     setQuickSubmitLoadingTorId(tor.id);
                                     await api.submitTor(tor.id, 'Diajukan melalui ringkasan dokumen.');
                                     onRefreshData?.();
                                   } catch (err: any) {
-                                    alert(err.message || 'Gagal mengajukan TOR');
+                                    setQuickActionError({
+                                      torId: tor.id,
+                                      message: err?.message || 'Gagal mengajukan TOR ke server.',
+                                    });
                                   } finally {
                                     setQuickSubmitLoadingTorId(null);
                                   }
@@ -1199,12 +1220,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                     onClick={async (e) => {
                                       e.stopPropagation();
                                       try {
+                                        setQuickActionError(null);
                                         setDeletingTorId(tor.id);
                                         await api.deleteTor(tor.id);
                                         setConfirmDeleteTorId(null);
                                         onRefreshData?.();
-                                      } catch {
-                                        // ignore
+                                      } catch (err: any) {
+                                        setQuickActionError({
+                                          torId: tor.id,
+                                          message: err?.message || 'Gagal menghapus TOR dari database.',
+                                        });
                                       } finally {
                                         setDeletingTorId(null);
                                       }

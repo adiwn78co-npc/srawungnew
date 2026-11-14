@@ -552,11 +552,62 @@ var EXPECTED_TABLE_COLUMN_ADDITIONS = [
   { table: "tors", column: "start_date", definition: "VARCHAR(32) NULL" },
   { table: "tors", column: "end_date", definition: "VARCHAR(32) NULL" },
   { table: "tors", column: "raw_json", definition: "LONGTEXT NULL" },
-  { table: "program_budgets", column: "budget_approval_status", definition: "VARCHAR(64) NULL" },
-  { table: "program_budgets", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "users", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "approval_records", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "cash_advances", column: "requester_name", definition: "VARCHAR(255) NULL" },
+  { table: "cash_advances", column: "realized_amount", definition: "DECIMAL(18, 2) NULL" },
+  { table: "cash_advances", column: "report_approval_status", definition: "VARCHAR(128) NULL" },
+  { table: "cash_advances", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "cash_advances", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "cash_advance_summaries", column: "approval_status", definition: "VARCHAR(128) NULL" },
+  { table: "cash_advance_summaries", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "cash_advance_summaries", column: "raw_json", definition: "LONGTEXT NULL" },
   { table: "meeting_minutes", column: "document_number", definition: "VARCHAR(128) NULL" },
   { table: "meeting_minutes", column: "updated_at", definition: "VARCHAR(64) NULL" },
-  { table: "participants", column: "updated_at", definition: "VARCHAR(64) NULL" }
+  { table: "meeting_minutes", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "activity_documentations", column: "document_number", definition: "VARCHAR(128) NULL" },
+  { table: "activity_documentations", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "activity_documentations", column: "story_topic", definition: "TEXT NULL" },
+  { table: "activity_documentations", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "activity_documentations", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "output_raci_records", column: "outcome_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "responsible_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "responsible_user_name", definition: "VARCHAR(255) NULL" },
+  { table: "output_raci_records", column: "accountable_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "accountable_user_name", definition: "VARCHAR(255) NULL" },
+  { table: "output_raci_records", column: "accountable_finance_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "accountable_finance_user_name", definition: "VARCHAR(255) NULL" },
+  { table: "output_raci_records", column: "consulted_users_json", definition: "LONGTEXT NULL" },
+  { table: "output_raci_records", column: "informed_users_json", definition: "LONGTEXT NULL" },
+  { table: "output_raci_records", column: "status", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "assigned_by_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "assigned_by_name", definition: "VARCHAR(255) NULL" },
+  { table: "output_raci_records", column: "assigned_at", definition: "VARCHAR(64) NULL" },
+  { table: "output_raci_records", column: "approved_by_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "output_raci_records", column: "approved_by_name", definition: "VARCHAR(255) NULL" },
+  { table: "output_raci_records", column: "approved_at", definition: "VARCHAR(64) NULL" },
+  { table: "output_raci_records", column: "director_notes", definition: "TEXT NULL" },
+  { table: "output_raci_records", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "output_raci_records", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "activity_monitoring_records", column: "output_id", definition: "VARCHAR(128) NULL" },
+  { table: "activity_monitoring_records", column: "outcome_id", definition: "VARCHAR(128) NULL" },
+  { table: "activity_monitoring_records", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "activity_monitoring_records", column: "status", definition: "VARCHAR(128) NULL" },
+  { table: "activity_monitoring_records", column: "updated_by_user_id", definition: "VARCHAR(128) NULL" },
+  { table: "activity_monitoring_records", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "activity_monitoring_records", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "monitoring_reports", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "monitoring_reports", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "approval_hub_items", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "approval_hub_items", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "program_budgets", column: "budget_approval_status", definition: "VARCHAR(64) NULL" },
+  { table: "program_budgets", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "participants", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "participants", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "attendance_records", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "attendance_records", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "audit_logs", column: "raw_json", definition: "LONGTEXT NULL" }
 ];
 var schemaVerifiedOnceForPool = false;
 async function ensureMysqlSchema(pool) {
@@ -902,10 +953,47 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   };
   const cleanHydratedDateOnly = (val) => normalizeMysqlDateOnlyValue(val) || "";
   const cleanHydratedTimestamp = cleanHydratedTimestampValue;
-  const programs = parseAndHydrateRows(
-    programRows,
-    (r, raw) => hydrateMysqlProgramRow(r, raw)
-  ).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const userNameById = /* @__PURE__ */ new Map();
+  for (const u of users) {
+    if (u && u.id && u.name) {
+      userNameById.set(String(u.id), String(u.name));
+    }
+  }
+  const resolveUserName = (userId, explicitName) => {
+    const cleanExplicit = typeof explicitName === "string" ? explicitName.trim() : "";
+    if (cleanExplicit) return cleanExplicit;
+    const cleanId = typeof userId === "string" ? userId.trim() : "";
+    if (cleanId && userNameById.has(cleanId)) {
+      return userNameById.get(cleanId) || "";
+    }
+    return "";
+  };
+  const parseStringArrayFlexible = (primaryVal, fallbackVal) => {
+    const extract = (v) => {
+      if (Array.isArray(v)) {
+        return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+      }
+      if (typeof v === "string" && v.trim()) {
+        const trimmed = v.trim();
+        if (trimmed.startsWith("[")) {
+          const parsed = safeJsonParse(trimmed, null);
+          if (Array.isArray(parsed)) {
+            return parsed.map((x) => String(x ?? "").trim()).filter(Boolean);
+          }
+        }
+        return trimmed.split(",").map((x) => x.trim()).filter(Boolean);
+      }
+      return null;
+    };
+    return extract(primaryVal) ?? extract(fallbackVal) ?? [];
+  };
+  const programs = parseAndHydrateRows(programRows, (r, raw) => {
+    const hydrated = hydrateMysqlProgramRow(r, raw);
+    return {
+      ...hydrated,
+      picName: resolveUserName(hydrated.picId, hydrated.picName)
+    };
+  }).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const stripInternalCodePrefix = (val) => {
     const s = String(val ?? "");
     return s.includes("::") ? s.split("::").slice(1).join("::") : s;
@@ -913,6 +1001,7 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   const outcomes = parseAndHydrateRows(outcomeRows, (r, raw) => {
     const colInd = safeJsonParse(r?.indicators_json ?? r?.indicators, null);
     const resolvedIndicators = Array.isArray(raw.indicators) ? raw.indicators : Array.isArray(colInd) ? colInd : [];
+    const resolvedPicId = r?.pic_id || raw.picId || "";
     return {
       ...raw,
       id: String(r?.id || raw.id || ""),
@@ -922,8 +1011,8 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       name: r?.name || raw.name || raw.title || "",
       title: raw.title || r?.name || raw.name || "",
       description: r?.description ?? raw.description ?? "",
-      picId: r?.pic_id || raw.picId || "",
-      picName: r?.pic_name || raw.picName || "",
+      picId: resolvedPicId,
+      picName: resolveUserName(resolvedPicId, r?.pic_name || raw.picName),
       indicators: resolvedIndicators,
       status: r?.status || raw.status || "Belum Dimulai",
       budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
@@ -934,6 +1023,7 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   const outputs = parseAndHydrateRows(outputRows, (r, raw) => {
     const colInd = safeJsonParse(r?.indicators_json ?? r?.indicators, null);
     const resolvedIndicators = Array.isArray(raw.indicators) ? raw.indicators : Array.isArray(colInd) ? colInd : [];
+    const resolvedPicId = r?.pic_id || raw.picId || "";
     return {
       ...raw,
       id: String(r?.id || raw.id || ""),
@@ -944,8 +1034,8 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       name: r?.name || raw.name || raw.title || "",
       title: raw.title || r?.name || raw.name || "",
       description: r?.description ?? raw.description ?? "",
-      picId: r?.pic_id || raw.picId || "",
-      picName: r?.pic_name || raw.picName || "",
+      picId: resolvedPicId,
+      picName: resolveUserName(resolvedPicId, r?.pic_name || raw.picName),
       indicators: resolvedIndicators,
       status: r?.status || raw.status || "Belum Dimulai",
       budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
@@ -953,28 +1043,31 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
     };
   });
-  const activities = parseAndHydrateRows(activityRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    programId: r?.program_id || raw.programId || "",
-    outcomeId: r?.outcome_id || raw.outcomeId || "",
-    outputId: r?.output_id || raw.outputId || "",
-    activityNumber: raw.activityNumber || r?.activity_number || void 0,
-    code: stripInternalCodePrefix(r?.code) || raw.code || raw.activityNumber || "",
-    name: r?.name || raw.name || raw.title || "",
-    title: raw.title || r?.name || raw.name || "",
-    description: r?.description ?? raw.description ?? "",
-    anticipatedInputs: r?.anticipated_inputs ?? raw.anticipatedInputs ?? "",
-    plannedParticipantsBreakdown: r?.planned_participants_breakdown ?? raw.plannedParticipantsBreakdown ?? "",
-    picId: r?.pic_id || raw.picId || "",
-    picName: r?.pic_name || raw.picName || "",
-    startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
-    endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
-    status: r?.status || raw.status || "Belum Dimulai",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
-    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
-  }));
+  const activities = parseAndHydrateRows(activityRows, (r, raw) => {
+    const resolvedPicId = r?.pic_id || raw.picId || "";
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      programId: r?.program_id || raw.programId || "",
+      outcomeId: r?.outcome_id || raw.outcomeId || "",
+      outputId: r?.output_id || raw.outputId || "",
+      activityNumber: raw.activityNumber || r?.activity_number || void 0,
+      code: stripInternalCodePrefix(r?.code) || raw.code || raw.activityNumber || "",
+      name: r?.name || raw.name || raw.title || "",
+      title: raw.title || r?.name || raw.name || "",
+      description: r?.description ?? raw.description ?? "",
+      anticipatedInputs: r?.anticipated_inputs ?? raw.anticipatedInputs ?? "",
+      plannedParticipantsBreakdown: r?.planned_participants_breakdown ?? raw.plannedParticipantsBreakdown ?? "",
+      picId: resolvedPicId,
+      picName: resolveUserName(resolvedPicId, r?.pic_name || raw.picName),
+      startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+      endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
+      status: r?.status || raw.status || "Belum Dimulai",
+      budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
+    };
+  });
   const subActivities = parseAndHydrateRows(subActivityRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
@@ -1194,9 +1287,9 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     for (const kvRec of kvAttendanceRecords) {
       if (!kvRec || !kvRec.id) continue;
       const recId = String(kvRec.id);
-      const isKvActiveClock = Boolean(kvRec.clockInTime) && !String(kvRec.clockInTime).startsWith("0000-00-00") && (!kvRec.clockOutTime || String(kvRec.clockOutTime).startsWith("0000-00-00"));
-      if (!mergedById.has(recId) && isKvActiveClock) {
-        mergedById.set(recId, { ...kvRec, clockOutTime: void 0 });
+      if (!mergedById.has(recId)) {
+        const cleanClockOut = !kvRec.clockOutTime || String(kvRec.clockOutTime).startsWith("0000-00-00") ? void 0 : kvRec.clockOutTime;
+        mergedById.set(recId, { ...kvRec, clockOutTime: cleanClockOut });
       }
     }
     attendanceSystem.records = Array.from(mergedById.values()).sort(
@@ -1205,22 +1298,22 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   } else {
     attendanceSystem.records = kvAttendanceRecords;
   }
-  const cashAdvanceSummaries = caSummaryRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of caSummaryRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const torKey = String(r?.tor_id || raw.torId || r?.id || "");
-      if (!torKey) continue;
-      map[torKey] = {
-        ...raw,
-        torId: torKey,
-        approvalStatus: r?.approval_status || raw.approvalStatus,
-        updatedAt: r?.updated_at || raw.updatedAt
-      };
-    }
-    return map;
-  })() : kvMap["cashAdvanceSummaries"] || {};
-  const activityDocumentationList = activityDocRows.length > 0 ? parseAndHydrateRows(activityDocRows, (r, raw) => ({
+  const kvCaSummaries = kvMap["cashAdvanceSummaries"] && typeof kvMap["cashAdvanceSummaries"] === "object" ? kvMap["cashAdvanceSummaries"] : {};
+  const cashAdvanceSummaries = { ...kvCaSummaries };
+  for (const r of caSummaryRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const torKey = String(r?.tor_id || raw.torId || r?.id || "");
+    if (!torKey) continue;
+    cashAdvanceSummaries[torKey] = {
+      ...cashAdvanceSummaries[torKey] || {},
+      ...raw,
+      torId: torKey,
+      approvalStatus: r?.approval_status || raw.approvalStatus,
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt
+    };
+  }
+  const kvDocList = Array.isArray(kvMap["activityDocumentationList"]) ? kvMap["activityDocumentationList"] : [];
+  const hydratedDocRows = parseAndHydrateRows(activityDocRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
     documentNumber: r?.document_number || raw.documentNumber || "",
@@ -1232,9 +1325,24 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     humanInterestStories: Array.isArray(raw.humanInterestStories) ? raw.humanInterestStories : [],
     generalPhotoLinks: Array.isArray(raw.generalPhotoLinks) ? raw.generalPhotoLinks : [],
     updatedById: r?.updated_by_user_id || raw.updatedById || "",
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-  })) : Array.isArray(kvMap["activityDocumentationList"]) ? kvMap["activityDocumentationList"] : [];
+    createdAt: cleanHydratedTimestamp(r?.created_at) || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  }));
+  const mergedDocsById = /* @__PURE__ */ new Map();
+  for (const kvDoc of kvDocList) {
+    if (kvDoc && kvDoc.id) {
+      mergedDocsById.set(String(kvDoc.id), kvDoc);
+    }
+  }
+  for (const relDoc of hydratedDocRows) {
+    if (relDoc && relDoc.id) {
+      mergedDocsById.set(String(relDoc.id), {
+        ...mergedDocsById.get(String(relDoc.id)) || {},
+        ...relDoc
+      });
+    }
+  }
+  const activityDocumentationList = Array.from(mergedDocsById.values());
   const activityDocumentations = {
     ...kvMap["activityDocumentations"] || {}
   };
@@ -1243,118 +1351,230 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       activityDocumentations[doc.torId] = doc;
     }
   }
-  const outputRaciRecords = outputRaciRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of outputRaciRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const outKey = String(r?.output_id || raw.outputId || r?.id || "");
+  const hydrateRaciEntry = (outKey, baseObj, r) => {
+    const respId = String(r?.responsible_user_id || baseObj.responsibleUserId || "");
+    const accId = String(r?.accountable_user_id || baseObj.accountableUserId || "");
+    const accFinId = String(
+      r?.accountable_finance_user_id || baseObj.accountableFinanceUserId || ""
+    );
+    const assignedById = String(
+      r?.assigned_by_user_id || baseObj.assignedById || ""
+    );
+    const approvedById = String(
+      r?.approved_by_user_id || baseObj.approvedById || ""
+    );
+    const respName = resolveUserName(
+      respId,
+      r?.responsible_user_name || baseObj.responsibleUserName
+    );
+    const accName = resolveUserName(
+      accId,
+      r?.accountable_user_name || baseObj.accountableUserName
+    );
+    const accFinName = resolveUserName(
+      accFinId,
+      r?.accountable_finance_user_name || baseObj.accountableFinanceUserName
+    );
+    const assignedByName = resolveUserName(
+      assignedById,
+      r?.assigned_by_name || baseObj.assignedByName
+    );
+    const approvedByName = resolveUserName(
+      approvedById,
+      r?.approved_by_name || baseObj.approvedByName
+    );
+    const consultedUsers = parseStringArrayFlexible(
+      baseObj.consultedUsers,
+      r?.consulted_users_json ?? r?.consulted_users
+    );
+    const informedUsers = parseStringArrayFlexible(
+      baseObj.informedUsers,
+      r?.informed_users_json ?? r?.informed_users
+    );
+    const hasRA = Boolean((respId || respName) && (accId || accName));
+    const rawStatus = String(r?.status || baseObj.status || "").trim();
+    const resolvedStatus = rawStatus === "Aktif" || rawStatus === "Menunggu Persetujuan Direktur" || rawStatus === "Menunggu Program Manager" ? rawStatus : hasRA ? "Menunggu Persetujuan Direktur" : "Menunggu Program Manager";
+    return {
+      ...baseObj,
+      outputId: outKey,
+      outcomeId: r?.outcome_id || baseObj.outcomeId || "",
+      programId: r?.program_id || baseObj.programId || "",
+      responsibleUserId: respId,
+      responsibleUserName: respName,
+      accountableUserId: accId,
+      accountableUserName: accName,
+      accountableFinanceUserId: accFinId || void 0,
+      accountableFinanceUserName: accFinName || void 0,
+      consultedUsers,
+      informedUsers,
+      status: resolvedStatus,
+      assignedById: assignedById || void 0,
+      assignedByName: assignedByName || void 0,
+      assignedAt: cleanHydratedTimestamp(r?.assigned_at) || cleanHydratedTimestamp(baseObj.assignedAt) || void 0,
+      approvedById: approvedById || void 0,
+      approvedByName: approvedByName || void 0,
+      approvedAt: cleanHydratedTimestamp(r?.approved_at) || cleanHydratedTimestamp(baseObj.approvedAt) || void 0,
+      directorNotes: r?.director_notes !== void 0 && r?.director_notes !== null ? String(r.director_notes) : baseObj.directorNotes,
+      auditHistory: Array.isArray(baseObj.auditHistory) ? baseObj.auditHistory : [],
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(baseObj.updatedAt) || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  };
+  const rawKvRaci = kvMap["outputRaciRecords"];
+  const outputRaciRecords = {};
+  if (Array.isArray(rawKvRaci)) {
+    for (const item of rawKvRaci) {
+      if (!item || typeof item !== "object") continue;
+      const outKey = String(item.outputId || item.id || "");
       if (!outKey) continue;
-      map[outKey] = {
-        ...raw,
-        outputId: outKey,
-        outcomeId: r?.outcome_id || raw.outcomeId || "",
-        programId: r?.program_id || raw.programId || "",
-        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
-        accountableUserId: r?.accountable_user_id || raw.accountableUserId || "",
-        accountableFinanceUserId: r?.accountable_finance_user_id || raw.accountableFinanceUserId || "",
-        status: r?.status || raw.status || "Menunggu Persetujuan Direktur",
-        approvedById: r?.approved_by_user_id || raw.approvedById || void 0,
-        approvedAt: r?.approved_at || raw.approvedAt || void 0,
-        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-      };
+      outputRaciRecords[outKey] = hydrateRaciEntry(outKey, item);
     }
-    return map;
-  })() : kvMap["outputRaciRecords"] || {};
-  const activityMonitoringRecords = activityMonRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of activityMonRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const actKey = String(r?.activity_id || raw.activityId || r?.id || "");
+  } else if (rawKvRaci && typeof rawKvRaci === "object") {
+    for (const [k, item] of Object.entries(rawKvRaci)) {
+      if (!item || typeof item !== "object") continue;
+      const outKey = String(item.outputId || k || "");
+      if (!outKey) continue;
+      outputRaciRecords[outKey] = hydrateRaciEntry(outKey, item);
+    }
+  }
+  for (const r of outputRaciRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const outKey = String(r?.output_id || raw.outputId || r?.id || "");
+    if (!outKey) continue;
+    const mergedBase = {
+      ...outputRaciRecords[outKey] || {},
+      ...raw
+    };
+    outputRaciRecords[outKey] = hydrateRaciEntry(outKey, mergedBase, r);
+  }
+  const rawKvActMon = kvMap["activityMonitoringRecords"];
+  const activityMonitoringRecords = {};
+  if (Array.isArray(rawKvActMon)) {
+    for (const item of rawKvActMon) {
+      if (!item || typeof item !== "object") continue;
+      const actKey = String(item.activityId || item.id || "");
       if (!actKey) continue;
-      map[actKey] = {
-        ...raw,
+      activityMonitoringRecords[actKey] = {
+        ...item,
         activityId: actKey,
-        outputId: r?.output_id || raw.outputId || "",
-        outcomeId: r?.outcome_id || raw.outcomeId || "",
-        programId: r?.program_id || raw.programId || "",
-        tools: Array.isArray(raw.tools) ? raw.tools : [],
-        status: r?.status || raw.status || "Belum Ada Monitoring",
-        updatedById: r?.updated_by_user_id || raw.updatedById || "",
-        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+        tools: Array.isArray(item.tools) ? item.tools : []
       };
     }
-    return map;
-  })() : kvMap["activityMonitoringRecords"] || {};
-  const monitoringReports = monReportRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of monReportRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const repId = String(r?.id || raw.id || "");
-      if (!repId) continue;
-      map[repId] = {
-        ...raw,
-        id: repId,
-        torId: r?.tor_id || raw.torId || "",
-        programId: r?.program_id || raw.programId || "",
-        outcomeId: r?.outcome_id || raw.outcomeId || "",
-        outputId: r?.output_id || raw.outputId || "",
-        activityId: r?.activity_id || raw.activityId || "",
-        cashAdvanceId: r?.cash_advance_id || raw.cashAdvanceId || "",
-        toolId: r?.tool_id || raw.toolId || "",
-        toolName: r?.tool_name || raw.toolName || "",
-        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
-        status: r?.status || raw.status || "Planned",
-        monitoringDate: r?.monitoring_date || raw.monitoringDate || "",
-        createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  } else if (rawKvActMon && typeof rawKvActMon === "object") {
+    for (const [k, item] of Object.entries(rawKvActMon)) {
+      if (!item || typeof item !== "object") continue;
+      const actKey = String(item.activityId || k || "");
+      if (!actKey) continue;
+      activityMonitoringRecords[actKey] = {
+        ...item,
+        activityId: actKey,
+        tools: Array.isArray(item.tools) ? item.tools : []
       };
     }
-    return map;
-  })() : kvMap["monitoringReports"] || {};
-  const approvalHubItems = apvHubRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of apvHubRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const itemId = String(r?.id || raw.id || "");
-      if (!itemId) continue;
-      map[itemId] = {
-        ...raw,
-        id: itemId,
-        categoryCode: r?.category_code || raw.categoryCode || "tor",
-        sourceTorId: r?.source_tor_id || raw.sourceTorId || void 0,
-        sourceEntityId: r?.source_entity_id || raw.sourceEntityId || "",
-        programId: r?.program_id || raw.programId || void 0,
-        referenceNumber: r?.reference_number || raw.referenceNumber || "",
-        title: r?.title || raw.title || "",
-        status: r?.status || raw.status || "Draft",
-        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
-        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    return map;
-  })() : kvMap["approvalHubItems"] || {};
-  const programBudgets = progBudgetRows.length > 0 ? (() => {
-    const map = {};
-    for (const r of progBudgetRows) {
-      const raw = safeJsonParse(r?.raw_json, {});
-      const key = String(r?.id || raw.id || "");
-      if (!key) continue;
-      const isMasterListKey = key === "__MASTER_BUDGET_ITEMS__";
-      map[key] = {
-        ...raw,
-        id: key,
-        ...r?.program_id ? { programId: r.program_id } : {},
-        ...r?.program_name ? { programName: r.program_name } : {},
-        ...r?.fiscal_year !== null && r?.fiscal_year !== void 0 ? { fiscalYear: Number(r.fiscal_year) } : {},
-        ...!isMasterListKey && r?.total_program_budget !== null && r?.total_program_budget !== void 0 ? { totalProgramBudget: Number(r.total_program_budget) } : {},
-        ...!isMasterListKey && r?.annual_approved_budget !== null && r?.annual_approved_budget !== void 0 ? { annualApprovedBudget: Number(r.annual_approved_budget) } : {},
-        ...r?.budget_approval_status ? { budgetApprovalStatus: r.budget_approval_status } : {},
-        ...r?.updated_by ? { updatedBy: r.updated_by } : {},
-        updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt
-      };
-    }
-    return map;
-  })() : kvMap["programBudgets"] || {};
+  }
+  for (const r of activityMonRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const actKey = String(r?.activity_id || raw.activityId || r?.id || "");
+    if (!actKey) continue;
+    const prevBase = activityMonitoringRecords[actKey] || {};
+    const resolvedTools = Array.isArray(raw.tools) ? raw.tools : Array.isArray(prevBase.tools) ? prevBase.tools : [];
+    const resolvedUpdatedById = r?.updated_by_user_id || raw.updatedById || prevBase.updatedById || "";
+    activityMonitoringRecords[actKey] = {
+      ...prevBase,
+      ...raw,
+      activityId: actKey,
+      outputId: r?.output_id || raw.outputId || prevBase.outputId || "",
+      outcomeId: r?.outcome_id || raw.outcomeId || prevBase.outcomeId || "",
+      programId: r?.program_id || raw.programId || prevBase.programId || "",
+      tools: resolvedTools,
+      status: r?.status || raw.status || prevBase.status || (resolvedTools.length > 0 ? "Sudah Ada Monitoring" : "Belum Ada Monitoring"),
+      updatedById: resolvedUpdatedById,
+      updatedByName: resolveUserName(
+        resolvedUpdatedById,
+        raw.updatedByName || prevBase.updatedByName
+      ),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt) || prevBase.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  const kvMonReports = kvMap["monitoringReports"] && typeof kvMap["monitoringReports"] === "object" ? kvMap["monitoringReports"] : {};
+  const monitoringReports = { ...kvMonReports };
+  for (const r of monReportRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const repId = String(r?.id || raw.id || "");
+    if (!repId) continue;
+    const prevBase = monitoringReports[repId] || {};
+    const resolvedRespId = r?.responsible_user_id || raw.responsibleUserId || prevBase.responsibleUserId || "";
+    monitoringReports[repId] = {
+      ...prevBase,
+      ...raw,
+      id: repId,
+      torId: r?.tor_id || raw.torId || prevBase.torId || "",
+      programId: r?.program_id || raw.programId || prevBase.programId || "",
+      outcomeId: r?.outcome_id || raw.outcomeId || prevBase.outcomeId || "",
+      outputId: r?.output_id || raw.outputId || prevBase.outputId || "",
+      activityId: r?.activity_id || raw.activityId || prevBase.activityId || "",
+      cashAdvanceId: r?.cash_advance_id || raw.cashAdvanceId || prevBase.cashAdvanceId || "",
+      toolId: r?.tool_id || raw.toolId || prevBase.toolId || "",
+      toolName: r?.tool_name || raw.toolName || prevBase.toolName || "",
+      responsibleUserId: resolvedRespId,
+      responsibleName: resolveUserName(
+        resolvedRespId,
+        raw.responsibleName || prevBase.responsibleName
+      ),
+      status: r?.status || raw.status || prevBase.status || "Planned",
+      monitoringDate: cleanHydratedDateOnly(r?.monitoring_date) || cleanHydratedDateOnly(raw.monitoringDate) || prevBase.monitoringDate || "",
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt) || prevBase.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt) || prevBase.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  const kvApvHub = kvMap["approvalHubItems"] && typeof kvMap["approvalHubItems"] === "object" ? kvMap["approvalHubItems"] : {};
+  const approvalHubItems = { ...kvApvHub };
+  for (const r of apvHubRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const itemId = String(r?.id || raw.id || "");
+    if (!itemId) continue;
+    const prevBase = approvalHubItems[itemId] || {};
+    const resolvedRespId = r?.responsible_user_id || raw.responsibleUserId || prevBase.responsibleUserId || "";
+    approvalHubItems[itemId] = {
+      ...prevBase,
+      ...raw,
+      id: itemId,
+      categoryCode: r?.category_code || raw.categoryCode || prevBase.categoryCode || "tor",
+      sourceTorId: r?.source_tor_id || raw.sourceTorId || prevBase.sourceTorId || void 0,
+      sourceEntityId: r?.source_entity_id || raw.sourceEntityId || prevBase.sourceEntityId || "",
+      programId: r?.program_id || raw.programId || prevBase.programId || void 0,
+      referenceNumber: r?.reference_number || raw.referenceNumber || prevBase.referenceNumber || "",
+      title: r?.title || raw.title || prevBase.title || "",
+      status: r?.status || raw.status || prevBase.status || "Draft",
+      responsibleUserId: resolvedRespId,
+      responsibleUserName: resolveUserName(
+        resolvedRespId,
+        raw.responsibleUserName || prevBase.responsibleUserName
+      ),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt) || prevBase.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  const kvProgBudgets = kvMap["programBudgets"] && typeof kvMap["programBudgets"] === "object" ? kvMap["programBudgets"] : {};
+  const programBudgets = { ...kvProgBudgets };
+  for (const r of progBudgetRows) {
+    const raw = safeJsonParse(r?.raw_json, {});
+    const key = String(r?.id || raw.id || "");
+    if (!key) continue;
+    const prevBase = programBudgets[key] || {};
+    const isMasterListKey = key === "__MASTER_BUDGET_ITEMS__";
+    programBudgets[key] = {
+      ...prevBase,
+      ...raw,
+      id: key,
+      ...r?.program_id ? { programId: r.program_id } : {},
+      ...r?.program_name ? { programName: r.program_name } : {},
+      ...r?.fiscal_year !== null && r?.fiscal_year !== void 0 ? { fiscalYear: Number(r.fiscal_year) } : {},
+      ...!isMasterListKey && r?.total_program_budget !== null && r?.total_program_budget !== void 0 ? { totalProgramBudget: Number(r.total_program_budget) } : {},
+      ...!isMasterListKey && r?.annual_approved_budget !== null && r?.annual_approved_budget !== void 0 ? { annualApprovedBudget: Number(r.annual_approved_budget) } : {},
+      ...r?.budget_approval_status ? { budgetApprovalStatus: r.budget_approval_status } : {},
+      ...r?.updated_by ? { updatedBy: r.updated_by } : {},
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt || prevBase.updatedAt
+    };
+  }
   return {
     users,
     currentUserId: kvMap["currentUserId"] || users[0]?.id || "user-director",
@@ -1980,17 +2200,29 @@ function buildActivityDocumentationCandidateRow(doc, nowIso, rels) {
 }
 function buildOutputRaciCandidateRow(raci, nowIso, rels) {
   const outId = String(raci.outputId || raci.id || "").slice(0, 128);
+  const consultedArr = Array.isArray(raci.consultedUsers) ? raci.consultedUsers : [];
+  const informedArr = Array.isArray(raci.informedUsers) ? raci.informedUsers : [];
   return {
     id: outId,
     output_id: outId,
     outcome_id: validFkOrNull(raci.outcomeId, rels?.outcomeIds, 128),
     program_id: validFkOrNull(raci.programId, rels?.programIds, 128),
     responsible_user_id: validFkOrNull(raci.responsibleUserId, rels?.userIds, 128),
+    responsible_user_name: truncStr(raci.responsibleUserName, 255),
     accountable_user_id: validFkOrNull(raci.accountableUserId, rels?.userIds, 128),
+    accountable_user_name: truncStr(raci.accountableUserName, 255),
     accountable_finance_user_id: validFkOrNull(raci.accountableFinanceUserId, rels?.userIds, 128),
+    accountable_finance_user_name: truncStr(raci.accountableFinanceUserName, 255),
+    consulted_users_json: JSON.stringify(consultedArr),
+    informed_users_json: JSON.stringify(informedArr),
     status: truncStr(raci.status, 128),
+    assigned_by_user_id: validFkOrNull(raci.assignedById, rels?.userIds, 128),
+    assigned_by_name: truncStr(raci.assignedByName, 255),
+    assigned_at: raci.assignedAt || null,
     approved_by_user_id: validFkOrNull(raci.approvedById, rels?.userIds, 128),
+    approved_by_name: truncStr(raci.approvedByName, 255),
     approved_at: raci.approvedAt || null,
+    director_notes: raci.directorNotes ?? null,
     updated_at: raci.updatedAt || nowIso,
     raw_json: JSON.stringify(raci)
   };
@@ -2231,9 +2463,17 @@ var ENTITY_TABLE_SPECS = [
   },
   {
     tableName: "cash_advance_summaries",
-    getRows: (d) => Object.entries(d.cashAdvanceSummaries || {}).map(
-      ([torId, rec]) => rec && typeof rec === "object" ? { ...rec, id: rec.id || torId, torId: rec.torId || torId } : null
-    ).filter(Boolean),
+    getRows: (d) => {
+      const validTorIds = new Set((d.tors || []).map((t) => String(t.id)));
+      return Object.entries(d.cashAdvanceSummaries || {}).map(([torId, rec]) => {
+        if (!rec || typeof rec !== "object") return null;
+        const resolvedTorId = String(rec.torId || torId || "");
+        if (!resolvedTorId || validTorIds.size > 0 && !validTorIds.has(resolvedTorId)) {
+          return null;
+        }
+        return { ...rec, id: rec.id || resolvedTorId, torId: resolvedTorId };
+      }).filter(Boolean);
+    },
     buildCandidate: buildCashAdvanceSummaryCandidateRow,
     allowTargetedDelete: true,
     upsertOptions: {
@@ -2255,9 +2495,17 @@ var ENTITY_TABLE_SPECS = [
   },
   {
     tableName: "output_raci_records",
-    getRows: (d) => Object.entries(d.outputRaciRecords || {}).map(
-      ([outId, rec]) => rec && typeof rec === "object" ? { ...rec, id: outId, outputId: rec.outputId || outId } : null
-    ).filter(Boolean),
+    getRows: (d) => {
+      const validOutputIds = new Set((d.outputs || []).map((o) => String(o.id)));
+      return Object.entries(d.outputRaciRecords || {}).map(([outId, rec]) => {
+        if (!rec || typeof rec !== "object") return null;
+        const resolvedOutId = String(rec.outputId || outId || "");
+        if (!resolvedOutId || !validOutputIds.has(resolvedOutId)) {
+          return null;
+        }
+        return { ...rec, id: resolvedOutId, outputId: resolvedOutId };
+      }).filter(Boolean);
+    },
     buildCandidate: buildOutputRaciCandidateRow,
     allowTargetedDelete: true,
     upsertOptions: {
@@ -2267,9 +2515,17 @@ var ENTITY_TABLE_SPECS = [
   },
   {
     tableName: "activity_monitoring_records",
-    getRows: (d) => Object.entries(d.activityMonitoringRecords || {}).map(
-      ([actId, rec]) => rec && typeof rec === "object" ? { ...rec, id: actId, activityId: rec.activityId || actId } : null
-    ).filter(Boolean),
+    getRows: (d) => {
+      const validActivityIds = new Set((d.activities || []).map((a) => String(a.id)));
+      return Object.entries(d.activityMonitoringRecords || {}).map(([actId, rec]) => {
+        if (!rec || typeof rec !== "object") return null;
+        const resolvedActId = String(rec.activityId || actId || "");
+        if (!resolvedActId || !validActivityIds.has(resolvedActId)) {
+          return null;
+        }
+        return { ...rec, id: resolvedActId, activityId: resolvedActId };
+      }).filter(Boolean);
+    },
     buildCandidate: buildActivityMonitoringCandidateRow,
     allowTargetedDelete: true,
     upsertOptions: {
@@ -2442,8 +2698,15 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
           } catch {
           }
         }
+        const colMetaMap = await describeTableColumns(conn, op.spec.tableName);
+        const preferredPk = op.spec.upsertOptions?.primaryKeyColumn || "id";
+        const detectedPriCol = Array.from(colMetaMap.entries()).find(
+          ([, m]) => String(m.key || "").toUpperCase() === "PRI"
+        )?.[0];
+        const resolvedPkCol = colMetaMap.has(preferredPk) ? preferredPk : detectedPriCol || (colMetaMap.has("id") ? "id" : "");
+        if (!resolvedPkCol) continue;
         const [delRes] = await conn.query(
-          `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
+          `DELETE FROM \`${op.spec.tableName}\` WHERE \`${resolvedPkCol}\` = ?`,
           [delId.slice(0, 255)]
         );
         deletedRows += 1;
@@ -2680,6 +2943,56 @@ async function saveDatabaseToMysql(pool, data) {
   } finally {
     conn.release();
   }
+}
+async function backfillHybridTablesFromKvStore(pool, data) {
+  const hybridTableNames = /* @__PURE__ */ new Set([
+    "attendance_records",
+    "cash_advance_summaries",
+    "activity_documentations",
+    "output_raci_records",
+    "activity_monitoring_records",
+    "monitoring_reports",
+    "approval_hub_items",
+    "program_budgets"
+  ]);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const relSets = buildRelationSetsFromData(data);
+  let backfilledCount = 0;
+  for (const spec of ENTITY_TABLE_SPECS) {
+    if (!hybridTableNames.has(spec.tableName)) continue;
+    const expectedRows = (spec.getRows(data) || []).filter((r) => r && r.id);
+    if (expectedRows.length === 0) continue;
+    try {
+      const [existingDbRows] = await pool.query(
+        `SELECT \`id\`, \`raw_json\` FROM \`${spec.tableName}\``
+      );
+      const existingIdsWithRaw = /* @__PURE__ */ new Set();
+      for (const row of Array.isArray(existingDbRows) ? existingDbRows : []) {
+        if (row && row.id && typeof row.raw_json === "string" && row.raw_json.trim().length > 2) {
+          existingIdsWithRaw.add(String(row.id));
+        }
+      }
+      for (const item of expectedRows) {
+        const idStr = String(item.id);
+        if (!existingIdsWithRaw.has(idStr)) {
+          await executeAdaptiveUpsert(
+            pool,
+            spec.tableName,
+            spec.buildCandidate(item, nowIso, relSets),
+            spec.upsertOptions
+          );
+          backfilledCount += 1;
+        }
+      }
+    } catch {
+    }
+  }
+  if (backfilledCount > 0) {
+    console.log(
+      `[DB] Non-destructive hybrid relational backfill synced ${backfilledCount} row(s) to MySQL tables.`
+    );
+  }
+  return backfilledCount;
 }
 
 // src/server/db.ts
@@ -3165,12 +3478,160 @@ function normalizeSchema(parsed, options) {
       documentation: parsed.activityDocumentationList?.find((d) => d.torId === t.id) || parsed.activityDocumentations?.[t.id] || t.documentation
     }));
   }
-  if (!parsed.outputRaciRecords || typeof parsed.outputRaciRecords !== "object") {
-    parsed.outputRaciRecords = {};
+  const userByIdMap = /* @__PURE__ */ new Map();
+  const userByLowerNameMap = /* @__PURE__ */ new Map();
+  for (const u of parsed.users || []) {
+    if (u && u.id) {
+      userByIdMap.set(String(u.id), u);
+      if (u.name && u.name.trim()) {
+        userByLowerNameMap.set(u.name.trim().toLowerCase(), u);
+      }
+    }
   }
-  if (!parsed.activityMonitoringRecords || typeof parsed.activityMonitoringRecords !== "object") {
-    parsed.activityMonitoringRecords = {};
+  const activeFinanceUser = (parsed.users || []).find(
+    (u) => u && u.isActive !== false && (u.role === "finance" || (u.roleTitle || "").toLowerCase().includes("finance"))
+  );
+  const canonicalizeNodeKey = (code, number, name) => {
+    const rawText = String(number || code || name || "").trim();
+    const numMatch = rawText.match(/(?:outcome|output|activity)?\s*(\d+(?:\.\d+)+)/i);
+    if (numMatch) return `num:${numMatch[1]}`;
+    const cleanName = String(name || "").toLowerCase().replace(/^(?:outcome|output|activity)\s*\d+(?:\.\d+)*\s*[:.-]?\s*/i, "").replace(/[^a-z0-9]+/g, " ").trim();
+    return cleanName ? `txt:${cleanName}` : "";
+  };
+  const outcomeByIdForRaci = outcomeByIdMap;
+  const outputByProgAndCanonical = /* @__PURE__ */ new Map();
+  const outputByCanonicalOnly = /* @__PURE__ */ new Map();
+  for (const op of parsed.outputs || []) {
+    if (!op || !op.id) continue;
+    const parentOc = outcomeByIdForRaci.get(op.outcomeId);
+    const progId = op.programId || parentOc?.programId || "";
+    const canon = canonicalizeNodeKey(op.code, op.outputNumber, op.name);
+    if (canon) {
+      if (progId && !outputByProgAndCanonical.has(`${progId}::${canon}`)) {
+        outputByProgAndCanonical.set(`${progId}::${canon}`, op);
+      }
+      const list = outputByCanonicalOnly.get(canon) || [];
+      list.push(op);
+      outputByCanonicalOnly.set(canon, list);
+    }
   }
+  const rawRaciInput = parsed.outputRaciRecords;
+  const normalizedRaciMap = {};
+  const rawRaciEntries = Array.isArray(rawRaciInput) ? rawRaciInput.filter((item) => item && typeof item === "object").map((item) => [String(item.outputId || item.id || ""), item]) : rawRaciInput && typeof rawRaciInput === "object" ? Object.entries(rawRaciInput) : [];
+  for (const [rawKey, item] of rawRaciEntries) {
+    if (!item || typeof item !== "object") continue;
+    let resolvedOutputId = String(item.outputId || rawKey || "").trim();
+    if (!resolvedOutputId) continue;
+    if (!outputByIdMap.has(resolvedOutputId) && outputByIdMap.size > 0) {
+      const hintCanon = canonicalizeNodeKey(
+        item.outputCode || rawKey,
+        item.outputNumber,
+        item.outputName || item.title
+      );
+      const hintProgId = String(item.programId || "").trim();
+      let matchedOut;
+      if (hintCanon && hintProgId) {
+        matchedOut = outputByProgAndCanonical.get(`${hintProgId}::${hintCanon}`);
+      }
+      if (!matchedOut && hintCanon) {
+        const candidates = outputByCanonicalOnly.get(hintCanon) || [];
+        if (candidates.length === 1) {
+          matchedOut = candidates[0];
+        }
+      }
+      if (matchedOut) {
+        resolvedOutputId = matchedOut.id;
+      }
+    }
+    const linkedOut = outputByIdMap.get(resolvedOutputId);
+    const linkedOutc = linkedOut ? outcomeByIdForRaci.get(linkedOut.outcomeId) : item.outcomeId ? outcomeByIdForRaci.get(String(item.outcomeId)) : void 0;
+    let respId = String(item.responsibleUserId || "").trim();
+    let respName = String(item.responsibleUserName || "").trim();
+    if (respId && !respName && userByIdMap.has(respId)) {
+      respName = userByIdMap.get(respId).name;
+    } else if (!respId && respName && userByLowerNameMap.has(respName.toLowerCase())) {
+      respId = userByLowerNameMap.get(respName.toLowerCase()).id;
+    }
+    let accId = String(item.accountableUserId || "").trim();
+    let accName = String(item.accountableUserName || "").trim();
+    if (accId && !accName && userByIdMap.has(accId)) {
+      accName = userByIdMap.get(accId).name;
+    } else if (!accId && accName && userByLowerNameMap.has(accName.toLowerCase())) {
+      accId = userByLowerNameMap.get(accName.toLowerCase()).id;
+    }
+    let accFinId = String(item.accountableFinanceUserId || "").trim();
+    let accFinName = String(item.accountableFinanceUserName || "").trim();
+    if (accFinId && !accFinName && userByIdMap.has(accFinId)) {
+      accFinName = userByIdMap.get(accFinId).name;
+    } else if (!accFinId && accFinName && userByLowerNameMap.has(accFinName.toLowerCase())) {
+      accFinId = userByLowerNameMap.get(accFinName.toLowerCase()).id;
+    } else if (!accFinId && !accFinName && (respId || accId) && activeFinanceUser) {
+      accFinId = activeFinanceUser.id;
+      accFinName = activeFinanceUser.name;
+    }
+    const assignedById = String(item.assignedById || "").trim();
+    const assignedByName = String(item.assignedByName || "").trim() || (assignedById && userByIdMap.has(assignedById) ? userByIdMap.get(assignedById).name : "");
+    const approvedById = String(item.approvedById || "").trim();
+    const approvedByName = String(item.approvedByName || "").trim() || (approvedById && userByIdMap.has(approvedById) ? userByIdMap.get(approvedById).name : "");
+    const consultedUsers = Array.isArray(item.consultedUsers) ? item.consultedUsers.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+    const informedUsers = Array.isArray(item.informedUsers) ? item.informedUsers.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+    const hasRA = Boolean((respId || respName) && (accId || accName));
+    const rawStatus = String(item.status || "").trim();
+    const status = rawStatus === "Aktif" || rawStatus === "Menunggu Persetujuan Direktur" || rawStatus === "Menunggu Program Manager" ? rawStatus : hasRA ? "Menunggu Persetujuan Direktur" : "Menunggu Program Manager";
+    const existingOnTarget = normalizedRaciMap[resolvedOutputId];
+    if (existingOnTarget && existingOnTarget.status === "Aktif" && status !== "Aktif") {
+      continue;
+    }
+    normalizedRaciMap[resolvedOutputId] = {
+      ...item,
+      outputId: resolvedOutputId,
+      outcomeId: linkedOut?.outcomeId || item.outcomeId || "",
+      programId: linkedOut?.programId || linkedOutc?.programId || item.programId || "",
+      responsibleUserId: respId,
+      responsibleUserName: respName,
+      accountableUserId: accId,
+      accountableUserName: accName,
+      accountableFinanceUserId: accFinId || void 0,
+      accountableFinanceUserName: accFinName || void 0,
+      consultedUsers,
+      informedUsers,
+      status,
+      assignedById: assignedById || void 0,
+      assignedByName: assignedByName || void 0,
+      approvedById: approvedById || void 0,
+      approvedByName: approvedByName || void 0,
+      auditHistory: Array.isArray(item.auditHistory) ? item.auditHistory : [],
+      updatedAt: item.updatedAt || ""
+    };
+  }
+  parsed.outputRaciRecords = normalizedRaciMap;
+  const rawActMonInput = parsed.activityMonitoringRecords;
+  const normalizedActMonMap = {};
+  const rawActMonEntries = Array.isArray(rawActMonInput) ? rawActMonInput.filter((item) => item && typeof item === "object").map((item) => [String(item.activityId || item.id || ""), item]) : rawActMonInput && typeof rawActMonInput === "object" ? Object.entries(rawActMonInput) : [];
+  for (const [rawKey, item] of rawActMonEntries) {
+    if (!item || typeof item !== "object") continue;
+    const actId = String(item.activityId || rawKey || "").trim();
+    if (!actId) continue;
+    const linkedAct = activityByIdMap.get(actId);
+    const linkedOut = linkedAct ? outputByIdMap.get(linkedAct.outputId) : void 0;
+    const linkedOutc = linkedOut ? outcomeByIdForRaci.get(linkedOut.outcomeId) : void 0;
+    const tools = Array.isArray(item.tools) ? item.tools : [];
+    const updatedById = String(item.updatedById || "").trim();
+    const updatedByName = String(item.updatedByName || "").trim() || (updatedById && userByIdMap.has(updatedById) ? userByIdMap.get(updatedById).name : "");
+    normalizedActMonMap[actId] = {
+      ...item,
+      activityId: actId,
+      outputId: linkedAct?.outputId || item.outputId || "",
+      outcomeId: linkedOut?.outcomeId || item.outcomeId || "",
+      programId: linkedOutc?.programId || item.programId || "",
+      tools,
+      status: tools.length > 0 ? "Sudah Ada Monitoring" : "Belum Ada Monitoring",
+      updatedById,
+      updatedByName,
+      updatedAt: item.updatedAt || ""
+    };
+  }
+  parsed.activityMonitoringRecords = normalizedActMonMap;
   if (!parsed.monitoringReports || typeof parsed.monitoringReports !== "object") {
     parsed.monitoringReports = {};
   }
@@ -3795,6 +4256,7 @@ var Database = class {
             }
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
             await this.ensureSystemAdministratorInMysql(pool);
+            await backfillHybridTablesFromKvStore(pool, this.data);
             this.lastCommittedJson = JSON.stringify(this.data);
             this.committedVersion = this.mutationVersion;
             this.mysqlStatus = "ready";
@@ -8991,7 +9453,7 @@ async function startServer() {
     };
     res.json(orgSettings);
   });
-  app.put("/api/organization-settings", (req, res) => {
+  app.put("/api/organization-settings", async (req, res) => {
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && currentUser.role !== "director" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
@@ -9006,6 +9468,8 @@ async function startServer() {
     let savedSettings = null;
     db.update((draft) => {
       savedSettings = {
+        ...draft.organizationSettings || {},
+        ...body,
         organizationName,
         sidebarBrandName,
         sidebarSubtitle,
@@ -9030,6 +9494,7 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites("PUT /api/organization-settings");
     res.json(savedSettings);
   });
   app.post("/api/users", async (req, res) => {
@@ -9058,7 +9523,9 @@ async function startServer() {
     const rawName = String(req.body?.name || "").trim();
     const rawEmail = String(req.body?.email || "").trim().toLowerCase();
     const rawUsernameInput = String(req.body?.username || "").trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
-    const rawInitialPassword = String(req.body?.initialPassword || "").trim();
+    const rawInitialPassword = String(
+      req.body?.initialPassword ?? req.body?.password ?? ""
+    ).trim();
     const role = req.body?.role;
     const rawRoleTitle = String(req.body?.roleTitle || "").trim();
     const rawDepartment = String(req.body?.department || "").trim();
@@ -9105,7 +9572,7 @@ async function startServer() {
       (u) => u.email.trim().toLowerCase() === rawEmail
     );
     if (duplicateEmail) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Email "${rawEmail}" sudah terdaftar atas nama ${duplicateEmail.name}. Gunakan email yang berbeda.`
       });
     }
@@ -9113,7 +9580,7 @@ async function startServer() {
       (u) => (u.username || deriveDefaultUsername(u.email, u.name)).trim().toLowerCase() === resolvedUsername
     );
     if (duplicateUsername) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Username "${resolvedUsername}" sudah digunakan oleh ${duplicateUsername.name}. Gunakan username unik.`
       });
     }
@@ -9121,7 +9588,7 @@ async function startServer() {
       (u) => u.name.trim().toLowerCase() === rawName.toLowerCase()
     );
     if (duplicateName) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Pengguna dengan nama "${rawName}" sudah terdaftar (${duplicateName.email}). Hindari pembuatan akun ganda.`
       });
     }
@@ -9562,6 +10029,19 @@ async function startServer() {
       return res.status(400).json({ error: "Tanggal selesai tidak boleh lebih awal dari tanggal mulai" });
     }
     const data = db.getData();
+    const normProgName = name.trim().toLowerCase();
+    const normProgCode = typeof code === "string" && code.trim() ? code.trim().toLowerCase() : "";
+    const duplicateProgram = (data.programs || []).find((p) => {
+      if (normProgCode && String(p.code || "").trim().toLowerCase() === normProgCode) {
+        return true;
+      }
+      return String(p.name || "").trim().toLowerCase() === normProgName && String(p.startDate || "") === cleanStart && String(p.endDate || "") === cleanEnd;
+    });
+    if (duplicateProgram) {
+      return res.status(409).json({
+        error: `Program "${name.trim()}"${normProgCode ? ` (${code.trim()})` : ""} sudah terdaftar di database MySQL.`
+      });
+    }
     const picUser = picId ? data.users.find((u) => u.id === picId) : currentUser;
     const resolvedBudget = totalBudget !== void 0 ? Number(totalBudget) || 0 : budget !== void 0 ? Number(budget) || 0 : 0;
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -10840,21 +11320,36 @@ async function startServer() {
     if (!outcome || !output || !activity || !picUser) {
       return res.status(400).json({ error: "Relasi Program atau PIC tidak valid" });
     }
+    const normTorTitle = String(title).trim().toLowerCase();
+    const recentDuplicateTor = (data.tors || []).find((t) => {
+      if (t.activityId !== activityId || String(t.title || "").trim().toLowerCase() !== normTorTitle) {
+        return false;
+      }
+      const createdMs = t.createdAt ? Date.parse(t.createdAt) : 0;
+      return createdMs > 0 && Date.now() - createdMs < 15e3;
+    });
+    if (recentDuplicateTor) {
+      return res.status(409).json({
+        error: `Dokumen ToR "${String(title).trim()}" baru saja disimpan (${recentDuplicateTor.torNumber}). Pengiriman ganda dibatalkan.`
+      });
+    }
     const outputRaci = data.outputRaciRecords?.[outputId];
     if (!outputRaci || outputRaci.status !== "Aktif") {
       return res.status(403).json({
         error: outputRaci?.status === "Menunggu Persetujuan Direktur" ? `Penugasan RACI pada Output "${output.name}" masih menunggu persetujuan Direktur. Pembuatan ToR belum diizinkan.` : `Penugasan RACI pada Output "${output.name}" belum ditentukan dan disetujui Direktur.`
       });
     }
-    const isR = outputRaci.responsibleUserId === currentUser.id;
-    const isA1 = outputRaci.accountableUserId === currentUser.id;
-    const isA2 = currentUser.role === "finance" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
-    if (!isR && !isA1 && !isA2) {
+    const normCurrentName = String(currentUser.name || "").trim().toLowerCase();
+    const isPrivilegedSuperRole = currentUser.role === "system_admin" || currentUser.role === "director";
+    const isR = outputRaci.responsibleUserId === currentUser.id || Boolean(normCurrentName) && String(outputRaci.responsibleUserName || "").trim().toLowerCase() === normCurrentName;
+    const isA1 = outputRaci.accountableUserId === currentUser.id || Boolean(normCurrentName) && String(outputRaci.accountableUserName || "").trim().toLowerCase() === normCurrentName;
+    const isA2 = outputRaci.accountableFinanceUserId === currentUser.id || currentUser.role === "finance" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
+    if (!isR && !isA1 && !isA2 && !isPrivilegedSuperRole) {
       return res.status(403).json({
         error: `Anda tidak memiliki penugasan R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) pada Output "${output.name}".`
       });
     }
-    const creatorRaciRoleLabel = isR ? "R \u2013 Responsible" : isA1 ? "A1 \u2013 Accountable Program" : "A2 \u2013 Accountable Finance";
+    const creatorRaciRoleLabel = isR ? "R \u2013 Responsible" : isA1 ? "A1 \u2013 Accountable Program" : isA2 ? "A2 \u2013 Accountable Finance" : currentUser.role === "system_admin" ? "System Administrator" : "Direktur";
     const program = outcome.programId ? (data.programs || []).find((p) => p.id === outcome.programId) : null;
     const programId = req.body.programId || program?.id || outcome.programId || "";
     const programName = program?.name || outcome.programName || outcome.projectName || "";
@@ -11844,6 +12339,17 @@ async function startServer() {
       return res.status(400).json({
         error: "Tidak dapat mengajukan Cash Advance baru karena masih terdapat 2 Cash Advance yang belum dilaporkan. Silakan tutup laporan pada menu Ringkasan Cash Advance beserta lampiran link PDF Expensify terlebih dahulu."
       });
+    }
+    if (body.advanceNumber) {
+      const normAdvNum = String(body.advanceNumber).trim().toLowerCase();
+      const dupAdv = (data.cashAdvances || []).find(
+        (c) => String(c.advanceNumber || "").trim().toLowerCase() === normAdvNum
+      );
+      if (dupAdv) {
+        return res.status(409).json({
+          error: `Nomor Cash Advance "${String(body.advanceNumber).trim()}" sudah terdaftar di database.`
+        });
+      }
     }
     const now = /* @__PURE__ */ new Date();
     const requestDateStr = body.requestDate || now.toISOString().slice(0, 10);
@@ -13461,14 +13967,17 @@ async function startServer() {
     });
     res.json(savedRecord);
   });
-  app.get("/api/monitoring-connect", (_req, res) => {
+  app.get("/api/monitoring-connect", async (_req, res) => {
+    if (db.isMysqlReady()) {
+      await db.refreshFromMysqlIfStale(500);
+    }
     const data = db.getData();
     res.json({
       outputRaciRecords: data.outputRaciRecords || {},
       activityMonitoringRecords: data.activityMonitoringRecords || {}
     });
   });
-  app.post("/api/monitoring-connect/raci/:outputId", (req, res) => {
+  app.post("/api/monitoring-connect/raci/:outputId", async (req, res) => {
     const { outputId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -13541,6 +14050,9 @@ async function startServer() {
       };
       const nextRecord = {
         outputId,
+        outputCode: outp?.code || prev?.outputCode,
+        outputNumber: outp?.outputNumber || prev?.outputNumber,
+        outputName: outp?.name || prev?.outputName,
         programId: body.programId || outc?.programId || prev?.programId || "",
         outcomeId: body.outcomeId || outp?.outcomeId || prev?.outcomeId || "",
         responsibleUserId: respUser?.id || "",
@@ -13565,6 +14077,7 @@ async function startServer() {
       draft.outputRaciRecords[outputId] = nextRecord;
       savedRecord = nextRecord;
       if (outp && respUser) {
+        outp.picId = respUser.id;
         outp.picName = respUser.name;
       }
       if (!draft.approvalNotifications) draft.approvalNotifications = [];
@@ -13640,9 +14153,10 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites(`POST /api/monitoring-connect/raci/${outputId}`);
     res.json(savedRecord);
   });
-  app.post("/api/monitoring-connect/raci/:outputId/approve", (req, res) => {
+  app.post("/api/monitoring-connect/raci/:outputId/approve", async (req, res) => {
     const { outputId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -13733,9 +14247,10 @@ async function startServer() {
     if (!savedRecord) {
       return res.status(404).json({ error: "Data RACI untuk Output ini belum tersedia." });
     }
+    await db.commitPendingWrites(`POST /api/monitoring-connect/raci/${outputId}/approve`);
     res.json(savedRecord);
   });
-  app.post("/api/monitoring-connect/activity/:activityId", (req, res) => {
+  app.post("/api/monitoring-connect/activity/:activityId", async (req, res) => {
     const { activityId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -13756,9 +14271,11 @@ async function startServer() {
         error: targetRaci?.status === "Menunggu Persetujuan Direktur" ? "Penugasan RACI pada Output ini masih menunggu persetujuan Direktur. Pengelolaan Monitoring Tools belum diizinkan." : "Penugasan RACI pada Output ini belum aktif."
       });
     }
-    const isR = targetRaci.responsibleUserId === currentUser.id || currentUser.role === "system_admin";
-    const isA1 = targetRaci.accountableUserId === currentUser.id || currentUser.role === "system_admin";
-    const isA2 = currentUser.role === "finance" || currentUser.role === "system_admin" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
+    const normCurrentName = String(currentUser.name || "").trim().toLowerCase();
+    const isSuperRole = currentUser.role === "system_admin" || currentUser.role === "director";
+    const isR = targetRaci.responsibleUserId === currentUser.id || Boolean(normCurrentName) && String(targetRaci.responsibleUserName || "").trim().toLowerCase() === normCurrentName || isSuperRole;
+    const isA1 = targetRaci.accountableUserId === currentUser.id || Boolean(normCurrentName) && String(targetRaci.accountableUserName || "").trim().toLowerCase() === normCurrentName || isSuperRole;
+    const isA2 = targetRaci.accountableFinanceUserId === currentUser.id || currentUser.role === "finance" || isSuperRole || (currentUser.roleTitle || "").toLowerCase().includes("finance");
     if (!isR && !isA1 && !isA2) {
       return res.status(403).json({
         error: "Hanya user dengan penugasan R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) yang dapat mengelola Monitoring Tools pada Output ini."
@@ -13811,6 +14328,7 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites(`POST /api/monitoring-connect/activity/${activityId}`);
     res.json(savedRecord);
   });
   function createEmptyMonitoringSections() {
@@ -14079,7 +14597,7 @@ async function startServer() {
       cashAdvanceCount
     });
   });
-  app.put("/api/monitoring-reports/:id", (req, res) => {
+  app.put("/api/monitoring-reports/:id", async (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const body = req.body || {};
@@ -14215,6 +14733,7 @@ async function startServer() {
     if (!updatedItem) {
       return res.status(404).json({ error: "Item monitoring tidak ditemukan." });
     }
+    await db.commitPendingWrites(`PUT /api/monitoring-reports/${id}`);
     res.json(updatedItem);
   });
   app.get("/api/approval-hub", (req, res) => {
@@ -14255,7 +14774,7 @@ async function startServer() {
     });
     res.json({ success: true });
   });
-  app.post("/api/approval-hub/:id/action", (req, res) => {
+  app.post("/api/approval-hub/:id/action", async (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const { action, comment } = req.body || {};
@@ -14273,6 +14792,7 @@ async function startServer() {
           syncTorBudgetInDraft(draft, result.item.sourceTorId);
         }
       });
+      await db.commitPendingWrites(`POST /api/approval-hub/${id}/action`);
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: err.message || "Gagal memproses tindakan persetujuan." });
@@ -14300,8 +14820,12 @@ async function startServer() {
       if (!draft.programBudgets || typeof draft.programBudgets !== "object") {
         draft.programBudgets = {};
       }
+      const inferredProgId = dataset.programId || (key !== "__MASTER_BUDGET_ITEMS__" ? (draft.programs || []).find(
+        (p) => p.id === key || key.startsWith(`${p.id}::`) || key.startsWith(`${p.id}_`)
+      )?.id : void 0);
       savedDataset = {
         ...dataset,
+        ...inferredProgId ? { programId: inferredProgId } : {},
         id: key,
         updatedAt: nowIso,
         updatedBy: currentUser.name
@@ -14545,6 +15069,21 @@ async function startServer() {
       const fullName = String(body.fullName || "").trim();
       if (!fullName) {
         return res.status(400).json({ error: "Nama Lengkap wajib diisi." });
+      }
+      const normIndName = fullName.toLowerCase();
+      const normIndOrg = String(body.organizationInstitution || "").trim().toLowerCase();
+      const normIndReg = String(body.regionCommunity || "").trim().toLowerCase();
+      const dupInd = (db.getData().participantDatabase || []).find((p) => {
+        if (p.participantType !== "INDIVIDU") return false;
+        const sameIdentity = String(p.fullName || "").trim().toLowerCase() === normIndName && String(p.organizationInstitution || "").trim().toLowerCase() === normIndOrg && String(p.regionCommunity || "").trim().toLowerCase() === normIndReg;
+        if (!sameIdentity) return false;
+        const createdMs = p.createdAt ? Date.parse(p.createdAt) : 0;
+        return createdMs > 0 && Date.now() - createdMs < 3e4;
+      });
+      if (dupInd) {
+        return res.status(409).json({
+          error: `Data peserta individu "${fullName}" sudah baru saja terdaftar (${dupInd.participantCode}).`
+        });
       }
       db.update((draft) => {
         if (!Array.isArray(draft.participantDatabase)) {
@@ -14958,7 +15497,11 @@ async function startServer() {
     return user.role === "director" || user.role === "system_admin" || user.role === "admin";
   }
   function buildAttendanceBundleForUser(currentUser) {
+    const hadUncommittedBefore = db.hasUncommittedChanges();
     const bundle = ensureAttendanceSystemInitialized(db.getData());
+    if (!hadUncommittedBefore && db.hasUncommittedChanges()) {
+      db.syncCleanBaseline();
+    }
     const canViewAll = isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser);
     if (!canViewAll && bundle) {
       const redactedRecords = (bundle.records || []).map(

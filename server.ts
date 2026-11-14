@@ -1835,7 +1835,7 @@ async function startServer() {
     res.json(orgSettings);
   });
 
-  app.put('/api/organization-settings', (req: Request, res: Response) => {
+  app.put('/api/organization-settings', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
       currentUser.role !== 'system_admin' &&
@@ -1859,6 +1859,8 @@ async function startServer() {
     let savedSettings: any = null;
     db.update((draft: any) => {
       savedSettings = {
+        ...(draft.organizationSettings || {}),
+        ...body,
         organizationName,
         sidebarBrandName,
         sidebarSubtitle,
@@ -1884,6 +1886,7 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites('PUT /api/organization-settings');
     res.json(savedSettings);
   });
 
@@ -1921,7 +1924,9 @@ async function startServer() {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '');
-    const rawInitialPassword = String(req.body?.initialPassword || '').trim();
+    const rawInitialPassword = String(
+      req.body?.initialPassword ?? req.body?.password ?? ''
+    ).trim();
     const role = req.body?.role as User['role'];
     const rawRoleTitle = String(req.body?.roleTitle || '').trim();
     const rawDepartment = String(req.body?.department || '').trim();
@@ -1974,7 +1979,7 @@ async function startServer() {
       (u) => u.email.trim().toLowerCase() === rawEmail
     );
     if (duplicateEmail) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Email "${rawEmail}" sudah terdaftar atas nama ${duplicateEmail.name}. Gunakan email yang berbeda.`,
       });
     }
@@ -1985,7 +1990,7 @@ async function startServer() {
         resolvedUsername
     );
     if (duplicateUsername) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Username "${resolvedUsername}" sudah digunakan oleh ${duplicateUsername.name}. Gunakan username unik.`,
       });
     }
@@ -1994,7 +1999,7 @@ async function startServer() {
       (u) => u.name.trim().toLowerCase() === rawName.toLowerCase()
     );
     if (duplicateName) {
-      return res.status(400).json({
+      return res.status(409).json({
         error: `Pengguna dengan nama "${rawName}" sudah terdaftar (${duplicateName.email}). Hindari pembuatan akun ganda.`,
       });
     }
@@ -2577,6 +2582,24 @@ async function startServer() {
     }
 
     const data = db.getData();
+    const normProgName = name.trim().toLowerCase();
+    const normProgCode = typeof code === 'string' && code.trim() ? code.trim().toLowerCase() : '';
+    const duplicateProgram = (data.programs || []).find((p) => {
+      if (normProgCode && String(p.code || '').trim().toLowerCase() === normProgCode) {
+        return true;
+      }
+      return (
+        String(p.name || '').trim().toLowerCase() === normProgName &&
+        String(p.startDate || '') === cleanStart &&
+        String(p.endDate || '') === cleanEnd
+      );
+    });
+    if (duplicateProgram) {
+      return res.status(409).json({
+        error: `Program "${name.trim()}"${normProgCode ? ` (${code.trim()})` : ''} sudah terdaftar di database MySQL.`,
+      });
+    }
+
     const picUser = picId ? data.users.find((u) => u.id === picId) : currentUser;
     const resolvedBudget =
       totalBudget !== undefined
@@ -4299,6 +4322,23 @@ async function startServer() {
       return res.status(400).json({ error: 'Relasi Program atau PIC tidak valid' });
     }
 
+    const normTorTitle = String(title).trim().toLowerCase();
+    const recentDuplicateTor = (data.tors || []).find((t) => {
+      if (
+        t.activityId !== activityId ||
+        String(t.title || '').trim().toLowerCase() !== normTorTitle
+      ) {
+        return false;
+      }
+      const createdMs = t.createdAt ? Date.parse(t.createdAt) : 0;
+      return createdMs > 0 && Date.now() - createdMs < 15000;
+    });
+    if (recentDuplicateTor) {
+      return res.status(409).json({
+        error: `Dokumen ToR "${String(title).trim()}" baru saja disimpan (${recentDuplicateTor.torNumber}). Pengiriman ganda dibatalkan.`,
+      });
+    }
+
     // Enforce Output-level RACI Access Control (R, A1, A2 with Active Director-Approved RACI)
     const outputRaci = data.outputRaciRecords?.[outputId];
     if (!outputRaci || outputRaci.status !== 'Aktif') {
@@ -4310,13 +4350,23 @@ async function startServer() {
       });
     }
 
-    const isR = outputRaci.responsibleUserId === currentUser.id;
-    const isA1 = outputRaci.accountableUserId === currentUser.id;
+    const normCurrentName = String(currentUser.name || '').trim().toLowerCase();
+    const isPrivilegedSuperRole =
+      currentUser.role === 'system_admin' || currentUser.role === 'director';
+    const isR =
+      outputRaci.responsibleUserId === currentUser.id ||
+      (Boolean(normCurrentName) &&
+        String(outputRaci.responsibleUserName || '').trim().toLowerCase() === normCurrentName);
+    const isA1 =
+      outputRaci.accountableUserId === currentUser.id ||
+      (Boolean(normCurrentName) &&
+        String(outputRaci.accountableUserName || '').trim().toLowerCase() === normCurrentName);
     const isA2 =
+      outputRaci.accountableFinanceUserId === currentUser.id ||
       currentUser.role === 'finance' ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance');
 
-    if (!isR && !isA1 && !isA2) {
+    if (!isR && !isA1 && !isA2 && !isPrivilegedSuperRole) {
       return res.status(403).json({
         error: `Anda tidak memiliki penugasan R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) pada Output "${output.name}".`,
       });
@@ -4326,7 +4376,11 @@ async function startServer() {
       ? 'R – Responsible'
       : isA1
       ? 'A1 – Accountable Program'
-      : 'A2 – Accountable Finance';
+      : isA2
+      ? 'A2 – Accountable Finance'
+      : currentUser.role === 'system_admin'
+      ? 'System Administrator'
+      : 'Direktur';
 
     const program = outcome.programId
       ? (data.programs || []).find((p) => p.id === outcome.programId)
@@ -5625,6 +5679,18 @@ async function startServer() {
         error:
           'Tidak dapat mengajukan Cash Advance baru karena masih terdapat 2 Cash Advance yang belum dilaporkan. Silakan tutup laporan pada menu Ringkasan Cash Advance beserta lampiran link PDF Expensify terlebih dahulu.',
       });
+    }
+
+    if (body.advanceNumber) {
+      const normAdvNum = String(body.advanceNumber).trim().toLowerCase();
+      const dupAdv = (data.cashAdvances || []).find(
+        (c) => String(c.advanceNumber || '').trim().toLowerCase() === normAdvNum
+      );
+      if (dupAdv) {
+        return res.status(409).json({
+          error: `Nomor Cash Advance "${String(body.advanceNumber).trim()}" sudah terdaftar di database.`,
+        });
+      }
     }
 
     const now = new Date();
@@ -7634,7 +7700,10 @@ async function startServer() {
   // ============================================================================
   // MONITORING TOOLS – MEAL CONNECT (RACI PER OUTPUT & MONITORING TOOLS PER ACTIVITY)
   // ============================================================================
-  app.get('/api/monitoring-connect', (_req: Request, res: Response) => {
+  app.get('/api/monitoring-connect', async (_req: Request, res: Response) => {
+    if (db.isMysqlReady()) {
+      await db.refreshFromMysqlIfStale(500);
+    }
     const data = db.getData();
     res.json({
       outputRaciRecords: data.outputRaciRecords || {},
@@ -7642,7 +7711,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/monitoring-connect/raci/:outputId', (req: Request, res: Response) => {
+  app.post('/api/monitoring-connect/raci/:outputId', async (req: Request, res: Response) => {
     const { outputId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -7748,8 +7817,15 @@ async function startServer() {
         a1Name: accUser?.name || '-',
       };
 
-      const nextRecord: OutputRaciRecord = {
+      const nextRecord: OutputRaciRecord & {
+        outputCode?: string;
+        outputNumber?: string;
+        outputName?: string;
+      } = {
         outputId,
+        outputCode: outp?.code || (prev as any)?.outputCode,
+        outputNumber: outp?.outputNumber || (prev as any)?.outputNumber,
+        outputName: outp?.name || (prev as any)?.outputName,
         programId: body.programId || outc?.programId || prev?.programId || '',
         outcomeId: body.outcomeId || outp?.outcomeId || prev?.outcomeId || '',
         responsibleUserId: respUser?.id || '',
@@ -7775,8 +7851,9 @@ async function startServer() {
       draft.outputRaciRecords[outputId] = nextRecord;
       savedRecord = nextRecord;
 
-      // Sinkronkan PIC pada Output dengan R (Responsible) yang ditugaskan
+      // Sinkronkan PIC (ID & Nama) pada Output dengan R (Responsible) yang ditugaskan
       if (outp && respUser) {
+        outp.picId = respUser.id;
         outp.picName = respUser.name;
       }
 
@@ -7865,10 +7942,11 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites(`POST /api/monitoring-connect/raci/${outputId}`);
     res.json(savedRecord);
   });
 
-  app.post('/api/monitoring-connect/raci/:outputId/approve', (req: Request, res: Response) => {
+  app.post('/api/monitoring-connect/raci/:outputId/approve', async (req: Request, res: Response) => {
     const { outputId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -7986,10 +8064,11 @@ async function startServer() {
       return res.status(404).json({ error: 'Data RACI untuk Output ini belum tersedia.' });
     }
 
+    await db.commitPendingWrites(`POST /api/monitoring-connect/raci/${outputId}/approve`);
     res.json(savedRecord);
   });
 
-  app.post('/api/monitoring-connect/activity/:activityId', (req: Request, res: Response) => {
+  app.post('/api/monitoring-connect/activity/:activityId', async (req: Request, res: Response) => {
     const { activityId } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.isActive === false) {
@@ -8018,13 +8097,23 @@ async function startServer() {
       });
     }
 
+    const normCurrentName = String(currentUser.name || '').trim().toLowerCase();
+    const isSuperRole =
+      currentUser.role === 'system_admin' || currentUser.role === 'director';
     const isR =
-      targetRaci.responsibleUserId === currentUser.id || currentUser.role === 'system_admin';
+      targetRaci.responsibleUserId === currentUser.id ||
+      (Boolean(normCurrentName) &&
+        String(targetRaci.responsibleUserName || '').trim().toLowerCase() === normCurrentName) ||
+      isSuperRole;
     const isA1 =
-      targetRaci.accountableUserId === currentUser.id || currentUser.role === 'system_admin';
+      targetRaci.accountableUserId === currentUser.id ||
+      (Boolean(normCurrentName) &&
+        String(targetRaci.accountableUserName || '').trim().toLowerCase() === normCurrentName) ||
+      isSuperRole;
     const isA2 =
+      targetRaci.accountableFinanceUserId === currentUser.id ||
       currentUser.role === 'finance' ||
-      currentUser.role === 'system_admin' ||
+      isSuperRole ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance');
 
     if (!isR && !isA1 && !isA2) {
@@ -8092,6 +8181,7 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites(`POST /api/monitoring-connect/activity/${activityId}`);
     res.json(savedRecord);
   });
 
@@ -8418,7 +8508,7 @@ async function startServer() {
     });
   });
 
-  app.put('/api/monitoring-reports/:id', (req: Request, res: Response) => {
+  app.put('/api/monitoring-reports/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const body = req.body || {};
@@ -8621,6 +8711,7 @@ async function startServer() {
       return res.status(404).json({ error: 'Item monitoring tidak ditemukan.' });
     }
 
+    await db.commitPendingWrites(`PUT /api/monitoring-reports/${id}`);
     res.json(updatedItem);
   });
 
@@ -8674,7 +8765,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post('/api/approval-hub/:id/action', (req: Request, res: Response) => {
+  app.post('/api/approval-hub/:id/action', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const { action, comment } = req.body || {};
@@ -8693,6 +8784,7 @@ async function startServer() {
           syncTorBudgetInDraft(draft, result.item.sourceTorId);
         }
       });
+      await db.commitPendingWrites(`POST /api/approval-hub/${id}/action`);
       res.json(result);
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Gagal memproses tindakan persetujuan.' });
@@ -8731,8 +8823,16 @@ async function startServer() {
       if (!draft.programBudgets || typeof draft.programBudgets !== 'object') {
         draft.programBudgets = {};
       }
+      const inferredProgId =
+        dataset.programId ||
+        (key !== '__MASTER_BUDGET_ITEMS__'
+          ? (draft.programs || []).find(
+              (p) => p.id === key || key.startsWith(`${p.id}::`) || key.startsWith(`${p.id}_`)
+            )?.id
+          : undefined);
       savedDataset = {
         ...dataset,
+        ...(inferredProgId ? { programId: inferredProgId } : {}),
         id: key,
         updatedAt: nowIso,
         updatedBy: currentUser.name,
@@ -9069,6 +9169,24 @@ async function startServer() {
       const fullName = String(body.fullName || '').trim();
       if (!fullName) {
         return res.status(400).json({ error: 'Nama Lengkap wajib diisi.' });
+      }
+      const normIndName = fullName.toLowerCase();
+      const normIndOrg = String(body.organizationInstitution || '').trim().toLowerCase();
+      const normIndReg = String(body.regionCommunity || '').trim().toLowerCase();
+      const dupInd = (db.getData().participantDatabase || []).find((p: any) => {
+        if (p.participantType !== 'INDIVIDU') return false;
+        const sameIdentity =
+          String(p.fullName || '').trim().toLowerCase() === normIndName &&
+          String(p.organizationInstitution || '').trim().toLowerCase() === normIndOrg &&
+          String(p.regionCommunity || '').trim().toLowerCase() === normIndReg;
+        if (!sameIdentity) return false;
+        const createdMs = p.createdAt ? Date.parse(p.createdAt) : 0;
+        return createdMs > 0 && Date.now() - createdMs < 30000;
+      });
+      if (dupInd) {
+        return res.status(409).json({
+          error: `Data peserta individu "${fullName}" sudah baru saja terdaftar (${dupInd.participantCode}).`,
+        });
       }
       db.update((draft) => {
         if (!Array.isArray(draft.participantDatabase)) {
@@ -9602,7 +9720,11 @@ async function startServer() {
   }
 
   function buildAttendanceBundleForUser(currentUser: User): AttendanceSystemBundle {
+    const hadUncommittedBefore = db.hasUncommittedChanges();
     const bundle = ensureAttendanceSystemInitialized(db.getData());
+    if (!hadUncommittedBefore && db.hasUncommittedChanges()) {
+      db.syncCleanBaseline();
+    }
 
     const canViewAll = isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser);
     if (!canViewAll && bundle) {

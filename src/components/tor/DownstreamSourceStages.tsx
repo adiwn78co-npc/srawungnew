@@ -1447,7 +1447,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                               <span className="text-rose-600">*</span>
                             </label>
                             <input
-                              type="url"
+                              type="text"
                               value={slot.photoLink}
                               onChange={(e) =>
                                 handleUpdateBestPhoto(
@@ -1599,7 +1599,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                               <span className="text-stone-400 font-normal">(Opsional)</span>
                             </label>
                             <input
-                              type="url"
+                              type="text"
                               value={story.storyLink}
                               onChange={(e) =>
                                 handleUpdateHumanInterestStory(
@@ -1683,7 +1683,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                           <span className="text-rose-600">*</span>
                         </label>
                         <input
-                          type="url"
+                          type="text"
                           value={gpl.url}
                           onChange={(e) => handleUpdateGeneralPhotoLink(gpl.id, e.target.value)}
                           placeholder="https://drive.google.com/drive/folders/..."
