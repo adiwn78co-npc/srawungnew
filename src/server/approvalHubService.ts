@@ -1699,41 +1699,50 @@ export function resolveUserApprovalAccess(
   const raciList = Object.values(draft.outputRaciRecords || {});
 
   const isActiveUser = user.isActive !== false;
+  const isSystemAdmin = isActiveUser && user.role === 'system_admin';
   const isAdmin = user.role === 'admin';
   const isDirector =
     isActiveUser &&
     !isAdmin &&
-    (user.role === 'director' || items.some((i) => i.directorUserId === user.id));
-  const isFinance = isActiveUser && !isAdmin && user.role === 'finance';
+    (isSystemAdmin || user.role === 'director' || items.some((i) => i.directorUserId === user.id));
+  const isFinance = isActiveUser && !isAdmin && (isSystemAdmin || user.role === 'finance');
 
   // A1 ditentukan secara dinamis dari penugasan RACI (accountableUserId) atau penugasan A1 pada dokumen
   const isAssignedA1 =
     raciList.some((r) => r.accountableUserId === user.id) ||
     items.some((i) => i.accountableProgramUserId === user.id);
-  const isA1 = isActiveUser && !isAdmin && isAssignedA1 && user.permissions?.canApproveTor !== false;
+  const isA1 =
+    isActiveUser &&
+    !isAdmin &&
+    (isSystemAdmin || (isAssignedA1 && user.permissions?.canApproveTor !== false));
 
   // A2 ditentukan secara dinamis dari penugasan A2 (accountableFinanceUserId) dengan kewenangan persetujuan aktif
   const isAssignedA2 =
     raciList.some((r) => r.accountableFinanceUserId === user.id) ||
     items.some((i) => i.accountableFinanceUserId === user.id);
-  const isA2 = isActiveUser && isAssignedA2 && !isAdmin && user.permissions?.canApproveTor !== false;
+  const isA2 =
+    isActiveUser &&
+    !isAdmin &&
+    (isSystemAdmin || (isAssignedA2 && user.permissions?.canApproveTor !== false));
 
   // R ditentukan dari penugasan RACI (responsibleUserId) atau penugasan R pada dokumen / pelaksana
   const isR =
     isActiveUser &&
     !isAdmin &&
-    (raciList.some((r) => r.responsibleUserId === user.id) ||
+    (isSystemAdmin ||
+      raciList.some((r) => r.responsibleUserId === user.id) ||
       items.some((i) => i.responsibleUserId === user.id) ||
       user.role === 'staff' ||
       user.role === 'meal' ||
       user.role === 'program_manager');
 
-  // Menu Approval & Tracking Ticket dapat diakses oleh akun aktif: A1, A2, Direktur, Finance, serta R (Responsible) untuk Tracking Ticket.
-  // Admin mengatur konfigurasi akses di User Management dan tidak otomatis memiliki akses/kewenangan persetujuan.
+  // Menu Approval & Tracking Ticket dapat diakses oleh akun aktif: System Administrator, A1, A2, Direktur, Finance, serta R (Responsible).
+  // Admin biasa (role: 'admin') mengatur konfigurasi akses di User Management dan tetap tidak otomatis memiliki akses/kewenangan persetujuan.
   const canAccessApprovalMenu =
-    isActiveUser && !isAdmin && (isA1 || isA2 || isDirector || isFinance || isR);
+    isActiveUser && !isAdmin && (isSystemAdmin || isA1 || isA2 || isDirector || isFinance || isR);
 
   const activeApprovalRoles: ApprovalAccessProfile['activeApprovalRoles'] = [];
+  if (isSystemAdmin) activeApprovalRoles.push('System Administrator');
   if (isDirector) activeApprovalRoles.push('Direktur');
   if (isA1) activeApprovalRoles.push('A1 – Accountable Program');
   if (isA2) activeApprovalRoles.push('A2 – Accountable Finance');
@@ -1741,7 +1750,10 @@ export function resolveUserApprovalAccess(
   if (isR) activeApprovalRoles.push('R – Responsible');
 
   let scopeSummary = 'Tidak memiliki akses ke Menu Approval.';
-  if (isDirector) {
+  if (isSystemAdmin) {
+    scopeSummary =
+      'System Administrator (Recovery & Full Access): Akses penuh pemantauan, verifikasi, dan pengelolaan seluruh pengajuan program & keuangan.';
+  } else if (isDirector) {
     scopeSummary =
       'Direktur: Melihat seluruh pengajuan program & keuangan, persetujuan akhir keuangan, dan penerimaan laporan program.';
   } else if (isA1 && (isA2 || isFinance)) {
@@ -1771,10 +1783,11 @@ export function resolveUserApprovalAccess(
     isFinance,
     isR,
     isAdmin,
+    isSystemAdmin,
     canAccessApprovalMenu,
-    canApproveProgramDocs: !isAdmin && isA1,
-    canVerifyFinanceDocs: !isAdmin && isA2,
-    canFinalApproveDirector: !isAdmin && isDirector,
+    canApproveProgramDocs: !isAdmin && (isSystemAdmin || isA1),
+    canVerifyFinanceDocs: !isAdmin && (isSystemAdmin || isA2),
+    canFinalApproveDirector: !isAdmin && (isSystemAdmin || isDirector),
     activeApprovalRoles,
     scopeSummary,
   };
@@ -1795,7 +1808,7 @@ export function canUserViewApprovalItem(
 ): boolean {
   if (!access.canAccessApprovalMenu) return false;
 
-  if (access.isDirector) {
+  if (access.isSystemAdmin || access.isDirector) {
     return true;
   }
 
@@ -1893,20 +1906,22 @@ export function executeApprovalHubAction(params: {
 
   const access = resolveUserApprovalAccess(draft, actor, synced.items);
 
+  const isSystemAdminActor = actor.role === 'system_admin';
   // Determine actor's dynamic RACI role on this specific item
-  const isR = actor.id === item.responsibleUserId;
+  const isR = actor.id === item.responsibleUserId || (isSystemAdminActor && action === 'submit');
   const isA1 =
     !access.isAdmin &&
     item.groupType === 'program_documents' &&
-    actor.id === item.accountableProgramUserId &&
-    actor.permissions?.canApproveTor !== false;
+    (isSystemAdminActor ||
+      (actor.id === item.accountableProgramUserId && actor.permissions?.canApproveTor !== false));
   const isA2 =
     !access.isAdmin &&
     item.groupType === 'financial_documents' &&
-    actor.id === item.accountableFinanceUserId &&
-    actor.permissions?.canApproveTor !== false;
+    (isSystemAdminActor ||
+      (actor.id === item.accountableFinanceUserId && actor.permissions?.canApproveTor !== false));
   const isDirector =
-    !access.isAdmin && (actor.id === item.directorUserId || actor.role === 'director');
+    !access.isAdmin &&
+    (isSystemAdminActor || actor.id === item.directorUserId || actor.role === 'director');
   const isFinanceObserver =
     !access.isAdmin && actor.role === 'finance' && item.groupType === 'financial_documents';
   const isProgramDoc = item.groupType === 'program_documents';
@@ -2347,7 +2362,7 @@ export function executeApprovalHubAction(params: {
         'Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan persetujuan.'
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error(
         'Integritas Persetujuan: Pengaju dokumen (R) tidak diperbolehkan menyetujui pengajuannya sendiri pada tahap pemeriksaan/verifikasi.'
       );
@@ -2445,7 +2460,7 @@ export function executeApprovalHubAction(params: {
         `Hanya Direktur (${item.directorUserName}) yang berwenang memberikan persetujuan akhir.`
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error(
         'Integritas Persetujuan: Pengaju dokumen (R) tidak diperbolehkan memberikan persetujuan akhir atas pengajuannya sendiri pada tahap yang sama.'
       );
@@ -2514,7 +2529,7 @@ export function executeApprovalHubAction(params: {
         'Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan persetujuan/revisi.'
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error('Pengaju (R) tidak dapat meminta revisi atas dokumennya sendiri.');
     }
     const canReturnForRevision =
@@ -2547,7 +2562,7 @@ export function executeApprovalHubAction(params: {
         'Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan menolak pengajuan.'
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error('Pengaju (R) tidak dapat menolak dokumennya sendiri.');
     }
     const canReject =

@@ -7,4 +7,5 @@ coverage/
 .env*
 !.env.example
 data/.session_secret
+data/mysql_datadir/
 

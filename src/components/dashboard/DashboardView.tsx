@@ -220,7 +220,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onNavigateToPrograms,
   onRefreshData,
 }) => {
-  const { currentUser, isDirector } = useAuth();
+  const { currentUser, isDirector: rawIsDirector, isSystemAdmin } = useAuth();
+  const isDirector = rawIsDirector || isSystemAdmin;
   const [confirmDeleteTorId, setConfirmDeleteTorId] = useState<string | null>(null);
   const [deletingTorId, setDeletingTorId] = useState<string | null>(null);
 

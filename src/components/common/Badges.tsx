@@ -4,6 +4,7 @@ import { getDeadlineInfo } from '../../lib/dateUtils.js';
 
 export const RoleBadge: React.FC<{ role: UserRole; title?: string }> = ({ role, title }) => {
   const configs: Record<UserRole, { label: string; bg: string; text: string; border: string }> = {
+    system_admin: { label: 'System Administrator', bg: 'bg-[#FFF1F2]', text: 'text-[#9F1239]', border: 'border-[#FECDD3]' },
     admin: { label: 'Admin', bg: 'bg-[#F5F2F9]', text: 'text-[#6B46C1]', border: 'border-[#E9D8FD]' },
     director: { label: 'Director', bg: 'bg-[#EDF5FF]', text: 'text-[#2B6CB0]', border: 'border-[#D2E7FF]' },
     hr: { label: 'Finance & HR', bg: 'bg-[#EBF7EE]', text: 'text-[#1E7E34]', border: 'border-[#D1EED5]' },

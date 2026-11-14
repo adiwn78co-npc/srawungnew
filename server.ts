@@ -405,7 +405,9 @@ async function startServer() {
   }
 
   // --- SECURITY: PASSWORD HASHING, RATE LIMITING & CRYPTOGRAPHIC SESSION MANAGEMENT ---
-  const DEFAULT_TESTING_PASSWORD = process.env.DEFAULT_TESTING_PASSWORD || 'Wijna@2026';
+  const DEFAULT_TESTING_PASSWORD = (process.env.DEFAULT_TESTING_PASSWORD || '').trim();
+  const DEFAULT_FALLBACK_SCRYPT_HASH =
+    'scrypt$ba9df605a7e35320f89561247f82a861$ad8b4942bc71ce1fa283548b3a339832946411e6ed2096f7f52d5e7fb95120b31b7196388f6c833faeca3b68e704758a0d6266eb797d4e19a9fd6b6a0cf45860';
 
   function resolvePersistentSessionSecret(): string {
     const envSecret = String(process.env.SESSION_SECRET || '').trim();
@@ -601,7 +603,9 @@ async function startServer() {
     if (!storedHash) return false;
     const cached = defaultPasswordCheckCache.get(storedHash);
     if (cached !== undefined) return cached;
-    const result = verifyPassword(DEFAULT_TESTING_PASSWORD, storedHash);
+    const result = DEFAULT_TESTING_PASSWORD
+      ? verifyPassword(DEFAULT_TESTING_PASSWORD, storedHash)
+      : storedHash === DEFAULT_FALLBACK_SCRYPT_HASH;
     if (defaultPasswordCheckCache.size > 500) {
       defaultPasswordCheckCache.clear();
     }
@@ -674,7 +678,9 @@ async function startServer() {
     );
     if (!needsInit) return;
 
-    const defaultHash = hashPassword(DEFAULT_TESTING_PASSWORD);
+    const defaultHash = DEFAULT_TESTING_PASSWORD
+      ? hashPassword(DEFAULT_TESTING_PASSWORD)
+      : DEFAULT_FALLBACK_SCRYPT_HASH;
     db.update((draft) => {
       const usedUsernames = new Set<string>();
       for (const u of draft.users || []) {
@@ -704,7 +710,7 @@ async function startServer() {
           u.passwordUpdatedAt = u.createdAt || new Date().toISOString();
           u.mustChangePassword = true;
         } else if (u.mustChangePassword === undefined) {
-          u.mustChangePassword = verifyPassword(DEFAULT_TESTING_PASSWORD, u.passwordHash);
+          u.mustChangePassword = isDefaultTestingPasswordHash(u.passwordHash);
         }
       }
     });
@@ -1227,6 +1233,13 @@ async function startServer() {
     rawPermissions?: Partial<User['permissions']>
   ): User['permissions'] {
     const defaults: Record<User['role'], User['permissions']> = {
+      system_admin: {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true,
+      },
       admin: {
         canManagePrograms: false,
         canCreateTor: false,
@@ -1277,6 +1290,15 @@ async function startServer() {
         canViewAllTors: false,
       },
     };
+    if (role === 'system_admin') {
+      return {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true,
+      };
+    }
     const base = defaults[role] || defaults.staff;
     const merged: User['permissions'] = {
       canManagePrograms: rawPermissions?.canManagePrograms ?? base.canManagePrograms,
@@ -1285,7 +1307,7 @@ async function startServer() {
       canManageUsers: rawPermissions?.canManageUsers ?? base.canManageUsers,
       canViewAllTors: rawPermissions?.canViewAllTors ?? base.canViewAllTors,
     };
-    // Admin hanya untuk konfigurasi pengguna & tidak memiliki wewenang persetujuan operasional
+    // Admin biasa hanya untuk konfigurasi pengguna & tidak memiliki wewenang persetujuan operasional
     if (role === 'admin') {
       merged.canApproveTor = false;
       merged.canManageUsers = true;
@@ -1747,7 +1769,11 @@ async function startServer() {
 
   app.post('/api/auth/switch-user', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
+    if (
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManageUsers
+    ) {
       return res.status(403).json({
         error: 'Fitur peralihan sesi tanpa password telah dinonaktifkan demi keamanan produksi. Silakan login menggunakan kredensial resmi.',
       });
@@ -1758,6 +1784,11 @@ async function startServer() {
     const user = data.users.find((u) => u.id === userId);
     if (!user) {
       return res.status(404).json({ error: 'Pengguna tidak ditemukan' });
+    }
+    if (user.role === 'system_admin' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya System Administrator yang dapat mengakses sesi pemulihan System Administrator.',
+      });
     }
     if (user.isActive === false) {
       return res.status(403).json({
@@ -1807,12 +1838,13 @@ async function startServer() {
   app.put('/api/organization-settings', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'admin' &&
       currentUser.role !== 'director' &&
       !currentUser.permissions?.canManageUsers
     ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya System Administrator atau Direktur yang berwenang mengubah pengaturan organisasi terpusat.',
+        error: 'Akses ditolak: Hanya System Administrator, Administrator, atau Direktur yang berwenang mengubah pengaturan organisasi terpusat.',
       });
     }
     const body = req.body || {};
@@ -1860,7 +1892,11 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
     }
-    if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
+    if (
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManageUsers
+    ) {
       db.update((d) => {
         d.auditLogs.unshift({
           id: `log-unauth-create-${Date.now()}`,
@@ -1870,12 +1906,12 @@ async function startServer() {
           action: 'Percobaan Pembuatan Akun Tanpa Otorisasi',
           entityType: 'USER',
           entityId: 'unauthorized',
-          details: `Pengguna ${currentUser.name} (${currentUser.roleTitle}) mencoba membuat akun baru tanpa hak akses System Administrator.`,
+          details: `Pengguna ${currentUser.name} (${currentUser.roleTitle}) mencoba membuat akun baru tanpa hak akses manajemen pengguna.`,
           timestamp: new Date().toISOString(),
         });
       });
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya System Administrator yang berwenang membuat akun pengguna baru.',
+        error: 'Akses ditolak: Hanya System Administrator atau Administrator yang berwenang membuat akun pengguna baru.',
       });
     }
 
@@ -1908,13 +1944,14 @@ async function startServer() {
     }
 
     const passwordToHash = rawInitialPassword || DEFAULT_TESTING_PASSWORD;
-    if (passwordToHash.length < 6) {
+    if (!passwordToHash || passwordToHash.length < 6) {
       return res.status(400).json({
         error: 'Password awal minimal harus terdiri dari 6 karakter.',
       });
     }
 
     const validRoles: User['role'][] = [
+      'system_admin',
       'admin',
       'director',
       'hr',
@@ -1925,6 +1962,11 @@ async function startServer() {
     ];
     if (!validRoles.includes(role)) {
       return res.status(400).json({ error: 'Role pengguna tidak dikenali oleh sistem.' });
+    }
+    if (role === 'system_admin' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya System Administrator yang dapat membuat atau menetapkan role System Administrator.',
+      });
     }
 
     const currentData = db.getData();
@@ -2007,9 +2049,13 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
     }
-    if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
+    if (
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManageUsers
+    ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya System Administrator yang memiliki hak mengelola akun pengguna.',
+        error: 'Akses ditolak: Hanya System Administrator atau Administrator yang memiliki hak mengelola akun pengguna.',
       });
     }
 
@@ -2031,6 +2077,11 @@ async function startServer() {
     if (!targetUser) {
       return res.status(404).json({ error: 'Pengguna tidak ditemukan' });
     }
+    if (targetUser.role === 'system_admin' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Akun System Administrator (Recovery Access) hanya dapat dikelola oleh System Administrator.',
+      });
+    }
 
     const nextName = name !== undefined ? String(name).trim() : targetUser.name;
     const nextEmail =
@@ -2044,6 +2095,7 @@ async function startServer() {
         : targetUser.username || deriveDefaultUsername(targetUser.email, targetUser.name);
     const nextRole = (role ?? targetUser.role) as User['role'];
     const allowedUpdateRoles: User['role'][] = [
+      'system_admin',
       'admin',
       'director',
       'hr',
@@ -2054,6 +2106,11 @@ async function startServer() {
     ];
     if (!allowedUpdateRoles.includes(nextRole)) {
       return res.status(400).json({ error: 'Role pengguna tidak dikenali oleh sistem.' });
+    }
+    if (nextRole === 'system_admin' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya System Administrator yang dapat menetapkan role System Administrator.',
+      });
     }
 
     let nextAccountStatus: UserAccountStatus =
@@ -2114,17 +2171,28 @@ async function startServer() {
       });
     }
 
-    const activeAdmins = currentData.users.filter(
-      (u) => u.isActive && (u.role === 'admin' || u.permissions?.canManageUsers)
+    const activeSysAdmins = currentData.users.filter(
+      (u) => u.isActive !== false && u.role === 'system_admin'
     );
-    const isTargetAdmin =
-      targetUser.role === 'admin' || targetUser.permissions?.canManageUsers;
-    const willRemainActiveAdmin =
-      nextIsActive && (nextRole === 'admin' || permissions?.canManageUsers);
-
-    if (isTargetAdmin && !willRemainActiveAdmin && activeAdmins.length <= 1) {
+    if (
+      targetUser.role === 'system_admin' &&
+      !(nextIsActive && nextRole === 'system_admin') &&
+      activeSysAdmins.length <= 1
+    ) {
       return res.status(400).json({
-        error: 'Sistem wajib memiliki minimal 1 akun Administrator aktif.',
+        error: 'Sistem wajib mempertahankan minimal 1 akun System Administrator (Recovery Access) aktif di MySQL.',
+      });
+    }
+
+    const activeAdmins = currentData.users.filter(
+      (u) => u.isActive && u.role === 'admin'
+    );
+    const isTargetRegularAdmin = targetUser.role === 'admin';
+    const willRemainActiveRegularAdmin = nextIsActive && nextRole === 'admin';
+
+    if (isTargetRegularAdmin && !willRemainActiveRegularAdmin && activeAdmins.length <= 1) {
+      return res.status(400).json({
+        error: 'Sistem wajib mempertahankan akun Administrator yang sudah ada tetap aktif.',
       });
     }
 
@@ -2236,9 +2304,13 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
     }
-    if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
+    if (
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManageUsers
+    ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya System Administrator yang berwenang mereset password pengguna.',
+        error: 'Akses ditolak: Hanya System Administrator atau Administrator yang berwenang mereset password pengguna.',
       });
     }
 
@@ -2255,6 +2327,11 @@ async function startServer() {
     if (!targetUser) {
       return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
     }
+    if (targetUser.role === 'system_admin' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error: 'Akses ditolak: Password akun System Administrator (Recovery Access) hanya dapat diubah oleh System Administrator.',
+      });
+    }
 
     const nowIso = new Date().toISOString();
     const newHash = hashPassword(newPassword);
@@ -2267,7 +2344,7 @@ async function startServer() {
         d.users[idx].passwordUpdatedAt = nowIso;
         d.users[idx].mustChangePassword =
           id === currentUser.id
-            ? verifyPassword(DEFAULT_TESTING_PASSWORD, newHash)
+            ? isDefaultTestingPasswordHash(newHash)
             : true;
         updatedUser = d.users[idx];
       }
@@ -2303,8 +2380,12 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: 'Akun Anda sedang nonaktif.' });
     }
-    if (currentUser.role !== 'admin' && !currentUser.permissions?.canManageUsers) {
-      return res.status(403).json({ error: 'Hanya Admin yang memiliki hak menghapus akun pengguna' });
+    if (
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin' &&
+      !currentUser.permissions?.canManageUsers
+    ) {
+      return res.status(403).json({ error: 'Hanya System Administrator atau Administrator yang memiliki hak menghapus akun pengguna' });
     }
 
     const { id } = req.params;
@@ -2316,6 +2397,27 @@ async function startServer() {
     const targetUser = currentData.users.find((u) => u.id === id);
     if (!targetUser) {
       return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+    }
+    if (targetUser.role === 'system_admin') {
+      if (currentUser.role !== 'system_admin') {
+        return res.status(403).json({
+          error: 'Akses ditolak: Akun System Administrator (Recovery Access) tidak dapat dihapus oleh role lain.',
+        });
+      }
+      const sysAdminCount = currentData.users.filter((u) => u.role === 'system_admin').length;
+      if (sysAdminCount <= 1) {
+        return res.status(400).json({
+          error: 'Sistem wajib mempertahankan minimal 1 akun System Administrator di database MySQL sebagai akses pemulihan darurat.',
+        });
+      }
+    }
+    if (targetUser.role === 'admin') {
+      const regularAdminCount = currentData.users.filter((u) => u.role === 'admin').length;
+      if (regularAdminCount <= 1) {
+        return res.status(400).json({
+          error: 'Akun Administrator yang sudah ada wajib dipertahankan dan tidak boleh dihapus.',
+        });
+      }
     }
 
     // Periksa keterkaitan data pada Monitoring Tools (RACI & Activity Monitoring), ToR, dan Cash Advance
@@ -2386,10 +2488,11 @@ async function startServer() {
   });
 
   // Programs CRUD
-  app.post('/api/programs', (req: Request, res: Response) => {
+  app.post('/api/programs', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
       !currentUser.permissions?.canManagePrograms &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
@@ -2437,6 +2540,7 @@ async function startServer() {
         : budget !== undefined
         ? Number(budget) || 0
         : 0;
+    const nowIso = new Date().toISOString();
 
     const newProgram: Program = {
       id: `prog-${Date.now()}`,
@@ -2444,8 +2548,8 @@ async function startServer() {
       name: name.trim(),
       donor: typeof donor === 'string' && donor.trim() ? donor.trim() : undefined,
       location: location.trim(),
-      startDate,
-      endDate,
+      startDate: String(startDate).slice(0, 10),
+      endDate: String(endDate).slice(0, 10),
       totalBudget: resolvedBudget,
       currency: typeof currency === 'string' && currency.trim() ? currency.trim() : 'IDR',
       description: description ? description.trim() : '',
@@ -2453,7 +2557,8 @@ async function startServer() {
       picId: picUser ? picUser.id : currentUser.id,
       picName: picUser ? picUser.name : currentUser.name,
       status: (status as ProgramStatus) || 'Aktif',
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
     } as any;
 
     db.update((d) => {
@@ -2468,17 +2573,19 @@ async function startServer() {
         entityType: 'PROGRAM',
         entityId: newProgram.id,
         details: `Membuat Program baru: ${newProgram.name} di ${newProgram.location}`,
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso,
       });
     });
 
+    await db.commitPendingWrites('POST /api/programs');
     res.status(201).json(newProgram);
   });
 
-  app.put('/api/programs/:id', (req: Request, res: Response) => {
+  app.put('/api/programs/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
       !currentUser.permissions?.canManagePrograms &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
@@ -2510,6 +2617,7 @@ async function startServer() {
 
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = new Date().toISOString();
 
     let updated: Program | null = null;
     db.update((d) => {
@@ -2523,6 +2631,14 @@ async function startServer() {
             : budget !== undefined
             ? Number(budget) || 0
             : existingProg.totalBudget;
+        const cleanStart =
+          startDate !== undefined
+            ? String(startDate || '').slice(0, 10)
+            : existingProg.startDate;
+        const cleanEnd =
+          endDate !== undefined
+            ? String(endDate || '').slice(0, 10)
+            : existingProg.endDate;
         d.programs[idx] = {
           ...existingProg,
           code:
@@ -2535,8 +2651,8 @@ async function startServer() {
               ? String(donor).trim() || undefined
               : existingProg.donor,
           location: location ? location.trim() : existingProg.location,
-          startDate: startDate ?? existingProg.startDate,
-          endDate: endDate ?? existingProg.endDate,
+          startDate: cleanStart,
+          endDate: cleanEnd,
           totalBudget: nextBudget,
           currency:
             currency !== undefined
@@ -2547,23 +2663,36 @@ async function startServer() {
           picId: picUser ? picUser.id : existingProg.picId,
           picName: picUser ? picUser.name : existingProg.picName,
           status: status ?? existingProg.status,
-          updatedAt: new Date().toISOString(),
+          updatedAt: nowIso,
         } as any;
         updated = d.programs[idx];
 
-        // Keep programName in associated outcomes & tors synced
+        // Keep programName in associated outcomes, tors & budgets synced
         if (name && name.trim()) {
+          const cleanProgName = name.trim();
           d.outcomes.forEach((o) => {
             if (o.programId === id) {
-              o.programName = name.trim();
-              o.projectName = name.trim();
+              o.programName = cleanProgName;
+              o.projectName = cleanProgName;
             }
           });
           d.tors.forEach((t) => {
             if (t.programId === id) {
-              t.programName = name.trim();
+              t.programName = cleanProgName;
             }
           });
+          if (d.programBudgets && typeof d.programBudgets === 'object') {
+            for (const bKey of Object.keys(d.programBudgets)) {
+              const bDs = d.programBudgets[bKey];
+              if (bDs && bDs.programId === id) {
+                d.programBudgets[bKey] = {
+                  ...bDs,
+                  programName: cleanProgName,
+                  updatedAt: nowIso,
+                };
+              }
+            }
+          }
         }
 
         d.auditLogs.unshift({
@@ -2575,19 +2704,21 @@ async function startServer() {
           entityType: 'PROGRAM',
           entityId: id,
           details: `Memperbarui informasi Program: ${updated.name}`,
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
         });
       }
     });
 
     if (!updated) return res.status(404).json({ error: 'Program tidak ditemukan' });
+    await db.commitPendingWrites(`PUT /api/programs/${id}`);
     res.json(updated);
   });
 
-  app.delete('/api/programs/:id', (req: Request, res: Response) => {
+  app.delete('/api/programs/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
       !currentUser.permissions?.canManagePrograms &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager'
     ) {
@@ -2601,12 +2732,6 @@ async function startServer() {
     const targetProgram = (data.programs || []).find((p) => p.id === id);
     if (!targetProgram) {
       return res.status(404).json({ error: 'Program tidak ditemukan' });
-    }
-
-    if (targetProgram.status !== 'Selesai') {
-      return res.status(400).json({
-        error: 'Hanya Program yang sudah berstatus Selesai yang dapat dihapus.',
-      });
     }
 
     const progOutcomeIds = new Set(
@@ -2635,6 +2760,7 @@ async function startServer() {
     const linkedCasCount = (data.cashAdvances || []).filter(
       (ca) =>
         progTorIds.has(ca.torId) ||
+        (ca as any).programId === id ||
         (ca.programName || '').trim().toLowerCase() === normalizedTargetProgName
     ).length;
 
@@ -2645,6 +2771,7 @@ async function startServer() {
     }
 
     let deletedName = '';
+    const nowIso = new Date().toISOString();
     db.update((d) => {
       if (!d.programs) d.programs = [];
       const idx = d.programs.findIndex((p) => p.id === id);
@@ -2652,28 +2779,86 @@ async function startServer() {
         deletedName = d.programs[idx].name;
         d.programs.splice(idx, 1);
 
-        // Cascade delete child Outcomes, Outputs, Activities, and SubActivities for this completed program
+        // Cascade delete child Outcomes, Outputs, Activities, SubActivities & auxiliary records for this program
         const outcomeIds = new Set(
           (d.outcomes || []).filter((o) => o.programId === id).map((o) => o.id)
         );
         const outputIds = new Set(
-          (d.outputs || []).filter((op) => outcomeIds.has(op.outcomeId)).map((op) => op.id)
+          (d.outputs || [])
+            .filter((op) => op.programId === id || outcomeIds.has(op.outcomeId))
+            .map((op) => op.id)
         );
         const activityIds = new Set(
-          (d.activities || []).filter((act) => outputIds.has(act.outputId)).map((act) => act.id)
+          (d.activities || [])
+            .filter((act) => act.programId === id || outputIds.has(act.outputId))
+            .map((act) => act.id)
         );
 
         if (d.subActivities) {
-          d.subActivities = d.subActivities.filter((sa) => !activityIds.has(sa.activityId));
+          d.subActivities = d.subActivities.filter(
+            (sa) => sa.programId !== id && !activityIds.has(sa.activityId)
+          );
         }
         if (d.activities) {
-          d.activities = d.activities.filter((act) => !outputIds.has(act.outputId));
+          d.activities = d.activities.filter(
+            (act) => act.programId !== id && !outputIds.has(act.outputId)
+          );
         }
         if (d.outputs) {
-          d.outputs = d.outputs.filter((op) => !outcomeIds.has(op.outcomeId));
+          d.outputs = d.outputs.filter(
+            (op) => op.programId !== id && !outcomeIds.has(op.outcomeId)
+          );
         }
         if (d.outcomes) {
           d.outcomes = d.outcomes.filter((o) => o.programId !== id);
+        }
+
+        if (d.programBudgets && typeof d.programBudgets === 'object') {
+          for (const k of Object.keys(d.programBudgets)) {
+            const bgt = d.programBudgets[k];
+            if (bgt?.programId === id || k.startsWith(`${id}__`)) {
+              delete d.programBudgets[k];
+            }
+          }
+        }
+
+        if (d.outputRaciRecords && typeof d.outputRaciRecords === 'object') {
+          for (const outId of Object.keys(d.outputRaciRecords)) {
+            const raci = d.outputRaciRecords[outId];
+            if (outputIds.has(outId) || raci?.programId === id) {
+              delete d.outputRaciRecords[outId];
+            }
+          }
+        }
+
+        if (d.activityMonitoringRecords && typeof d.activityMonitoringRecords === 'object') {
+          for (const actId of Object.keys(d.activityMonitoringRecords)) {
+            const mon = d.activityMonitoringRecords[actId];
+            if (activityIds.has(actId) || mon?.programId === id) {
+              delete d.activityMonitoringRecords[actId];
+            }
+          }
+        }
+
+        if (d.approvalHubItems && typeof d.approvalHubItems === 'object') {
+          for (const itemId of Object.keys(d.approvalHubItems)) {
+            if (d.approvalHubItems[itemId]?.programId === id) {
+              delete d.approvalHubItems[itemId];
+            }
+          }
+        }
+
+        if (Array.isArray(d.participantDatabase)) {
+          d.participantDatabase = d.participantDatabase.map((pt) => {
+            if (!Array.isArray(pt.programInvolvements)) return pt;
+            const filteredInv = pt.programInvolvements.filter((inv) => inv.programId !== id);
+            if (filteredInv.length === pt.programInvolvements.length) return pt;
+            return {
+              ...pt,
+              programInvolvements: filteredInv,
+              updatedAt: nowIso,
+            };
+          });
         }
 
         d.auditLogs.unshift({
@@ -2684,19 +2869,21 @@ async function startServer() {
           action: 'Penghapusan Program',
           entityType: 'PROGRAM',
           entityId: id,
-          details: `Menghapus Program Selesai: ${deletedName}`,
-          timestamp: new Date().toISOString(),
+          details: `Menghapus Program: ${deletedName}`,
+          timestamp: nowIso,
         });
       }
     });
 
+    await db.commitPendingWrites(`DELETE /api/programs/${id}`);
     res.json({ message: 'Program berhasil dihapus' });
   });
 
   // Outcomes
-  app.post('/api/outcomes', (req: Request, res: Response) => {
+  app.post('/api/outcomes', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -2774,12 +2961,14 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites('POST /api/outcomes');
     res.status(201).json(newOutcome);
   });
 
-  app.put('/api/outcomes/:id', (req: Request, res: Response) => {
+  app.put('/api/outcomes/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -2842,7 +3031,7 @@ async function startServer() {
             req.body.budgetAllocated !== undefined
               ? Number(req.body.budgetAllocated) || 0
               : (d.outcomes[idx] as any).budgetAllocated,
-          indicators: indicators ?? d.outcomes[idx].indicators,
+          indicators: Array.isArray(indicators) ? indicators : d.outcomes[idx].indicators,
           status: status ?? d.outcomes[idx].status,
           updatedAt: nowIso,
         } as any;
@@ -2862,12 +3051,14 @@ async function startServer() {
     });
 
     if (!updated) return res.status(404).json({ error: 'Outcome tidak ditemukan' });
+    await db.commitPendingWrites(`PUT /api/outcomes/${id}`);
     res.json(updated);
   });
 
-  app.delete('/api/outcomes/:id', (req: Request, res: Response) => {
+  app.delete('/api/outcomes/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -2879,10 +3070,20 @@ async function startServer() {
 
     const { id } = req.params;
     const data = db.getData();
+    const targetOutcome = (data.outcomes || []).find((o) => o.id === id);
+    if (!targetOutcome) {
+      return res.status(404).json({ error: 'Outcome tidak ditemukan' });
+    }
     const hasOutputs = data.outputs.some((o) => o.outcomeId === id);
     if (hasOutputs) {
       return res.status(400).json({
         error: 'Tidak dapat menghapus Outcome ini karena masih memiliki Output terhubung. Hapus atau pindahkan Output terlebih dahulu.',
+      });
+    }
+    const hasTors = data.tors.some((t) => t.outcomeId === id);
+    if (hasTors) {
+      return res.status(400).json({
+        error: 'Tidak dapat menghapus Outcome ini karena masih memiliki dokumen ToR terhubung.',
       });
     }
 
@@ -2896,18 +3097,20 @@ async function startServer() {
         action: 'Penghapusan Outcome',
         entityType: 'PROGRAM',
         entityId: id,
-        details: `Menghapus Outcome ID: ${id}`,
+        details: `Menghapus Outcome: ${targetOutcome.name}`,
         timestamp: new Date().toISOString(),
       });
     });
 
+    await db.commitPendingWrites(`DELETE /api/outcomes/${id}`);
     res.json({ message: 'Outcome berhasil dihapus' });
   });
 
   // Outputs
-  app.post('/api/outputs', (req: Request, res: Response) => {
+  app.post('/api/outputs', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -2983,12 +3186,14 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites('POST /api/outputs');
     res.status(201).json(newOutput);
   });
 
-  app.put('/api/outputs/:id', (req: Request, res: Response) => {
+  app.put('/api/outputs/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3052,7 +3257,7 @@ async function startServer() {
             req.body.budgetAllocated !== undefined
               ? Number(req.body.budgetAllocated) || 0
               : (d.outputs[idx] as any).budgetAllocated,
-          indicators: indicators ?? d.outputs[idx].indicators,
+          indicators: Array.isArray(indicators) ? indicators : d.outputs[idx].indicators,
           status: status ?? d.outputs[idx].status,
           updatedAt: nowIso,
         } as any;
@@ -3072,12 +3277,14 @@ async function startServer() {
     });
 
     if (!updated) return res.status(404).json({ error: 'Output tidak ditemukan' });
+    await db.commitPendingWrites(`PUT /api/outputs/${id}`);
     res.json(updated);
   });
 
-  app.delete('/api/outputs/:id', (req: Request, res: Response) => {
+  app.delete('/api/outputs/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3089,15 +3296,28 @@ async function startServer() {
 
     const { id } = req.params;
     const data = db.getData();
+    const targetOutput = data.outputs.find((o) => o.id === id);
+    if (!targetOutput) {
+      return res.status(404).json({ error: 'Output tidak ditemukan' });
+    }
     const hasActivities = data.activities.some((a) => a.outputId === id);
     if (hasActivities) {
       return res.status(400).json({
         error: 'Tidak dapat menghapus Output ini karena masih memiliki Activity terhubung.',
       });
     }
+    const hasTors = data.tors.some((t) => t.outputId === id);
+    if (hasTors) {
+      return res.status(400).json({
+        error: 'Tidak dapat menghapus Output ini karena masih memiliki dokumen ToR terhubung.',
+      });
+    }
 
     db.update((d) => {
       d.outputs = d.outputs.filter((o) => o.id !== id);
+      if (d.outputRaciRecords && d.outputRaciRecords[id]) {
+        delete d.outputRaciRecords[id];
+      }
       d.auditLogs.unshift({
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
@@ -3106,18 +3326,20 @@ async function startServer() {
         action: 'Penghapusan Output',
         entityType: 'PROGRAM',
         entityId: id,
-        details: `Menghapus Output ID: ${id}`,
+        details: `Menghapus Output: ${targetOutput.name}`,
         timestamp: new Date().toISOString(),
       });
     });
 
+    await db.commitPendingWrites(`DELETE /api/outputs/${id}`);
     res.json({ message: 'Output berhasil dihapus' });
   });
 
   // Activities
-  app.post('/api/activities', (req: Request, res: Response) => {
+  app.post('/api/activities', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3185,8 +3407,8 @@ async function startServer() {
           : undefined,
       picId: picUser.id,
       picName: picUser.name,
-      startDate: startDate || nowIso.slice(0, 10),
-      endDate: endDate || nowIso.slice(0, 10),
+      startDate: startDate ? String(startDate).slice(0, 10) : nowIso.slice(0, 10),
+      endDate: endDate ? String(endDate).slice(0, 10) : nowIso.slice(0, 10),
       budgetAllocated:
         req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
@@ -3209,12 +3431,14 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites('POST /api/activities');
     res.status(201).json(newActivity);
   });
 
-  app.put('/api/activities/:id', (req: Request, res: Response) => {
+  app.put('/api/activities/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3263,13 +3487,11 @@ async function startServer() {
           activityNumber !== undefined
             ? typeof activityNumber === 'string' && activityNumber.trim()
               ? activityNumber.trim()
-              : undefined
+              : d.activities[idx].activityNumber
             : d.activities[idx].activityNumber;
         const nextCode =
-          code !== undefined
-            ? typeof code === 'string' && code.trim()
-              ? code.trim()
-              : undefined
+          typeof code === 'string' && code.trim()
+            ? code.trim()
             : d.activities[idx].code || nextActNum;
         d.activities[idx] = {
           ...d.activities[idx],
@@ -3277,7 +3499,7 @@ async function startServer() {
           outcomeId: resolvedOutcomeId,
           outputId: parentOutput.id,
           activityNumber: nextActNum,
-          name: name ?? d.activities[idx].name,
+          name: typeof name === 'string' && name.trim() ? name.trim() : d.activities[idx].name,
           code: nextCode,
           description: description ?? d.activities[idx].description,
           anticipatedInputs:
@@ -3294,8 +3516,14 @@ async function startServer() {
               : d.activities[idx].plannedParticipantsBreakdown,
           picId: picUser ? picUser.id : d.activities[idx].picId,
           picName: picUser ? picUser.name : d.activities[idx].picName,
-          startDate: startDate ?? d.activities[idx].startDate,
-          endDate: endDate ?? d.activities[idx].endDate,
+          startDate:
+            startDate !== undefined
+              ? String(startDate || '').slice(0, 10)
+              : d.activities[idx].startDate,
+          endDate:
+            endDate !== undefined
+              ? String(endDate || '').slice(0, 10)
+              : d.activities[idx].endDate,
           budgetAllocated:
             req.body.budgetAllocated !== undefined
               ? Number(req.body.budgetAllocated) || 0
@@ -3329,12 +3557,14 @@ async function startServer() {
     });
 
     if (!updated) return res.status(404).json({ error: 'Activity tidak ditemukan' });
+    await db.commitPendingWrites(`PUT /api/activities/${id}`);
     res.json(updated);
   });
 
-  app.delete('/api/activities/:id', (req: Request, res: Response) => {
+  app.delete('/api/activities/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3346,16 +3576,25 @@ async function startServer() {
 
     const { id } = req.params;
     const data = db.getData();
-    const hasTors = data.tors.some((t) => t.activityId === id);
+    const targetAct = data.activities.find((a) => a.id === id);
+    if (!targetAct) {
+      return res.status(404).json({ error: 'Activity tidak ditemukan' });
+    }
+    const hasTors = data.tors.some(
+      (t) => t.activityId === id || (t.activityId || '').startsWith(`${id}-`)
+    );
     if (hasTors) {
       return res.status(400).json({
-        error: 'Tidak dapat menghapus Activity ini karena masih memiliki TOR terhubung.',
+        error: 'Tidak dapat menghapus Activity ini karena masih memiliki dokumen TOR terhubung.',
       });
     }
 
     db.update((d) => {
       d.activities = d.activities.filter((a) => a.id !== id);
       d.subActivities = d.subActivities.filter((s) => s.activityId !== id);
+      if (d.activityMonitoringRecords && d.activityMonitoringRecords[id]) {
+        delete d.activityMonitoringRecords[id];
+      }
       d.auditLogs.unshift({
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
@@ -3364,18 +3603,20 @@ async function startServer() {
         action: 'Penghapusan Activity',
         entityType: 'PROGRAM',
         entityId: id,
-        details: `Menghapus Activity ID: ${id}`,
+        details: `Menghapus Activity: ${targetAct.name}`,
         timestamp: new Date().toISOString(),
       });
     });
 
+    await db.commitPendingWrites(`DELETE /api/activities/${id}`);
     res.json({ message: 'Activity berhasil dihapus' });
   });
 
   // Sub-Activities (optional)
-  app.post('/api/sub-activities', (req: Request, res: Response) => {
+  app.post('/api/sub-activities', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3411,8 +3652,8 @@ async function startServer() {
       name: String(name).trim(),
       description: description || '',
       picName: picName || '',
-      startDate: startDate || '',
-      endDate: endDate || '',
+      startDate: startDate ? String(startDate).slice(0, 10) : '',
+      endDate: endDate ? String(endDate).slice(0, 10) : '',
       budgetAllocated:
         req.body.budgetAllocated !== undefined ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || 'Belum Dimulai',
@@ -3435,12 +3676,14 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites('POST /api/sub-activities');
     res.status(201).json(newSub);
   });
 
-  app.put('/api/sub-activities/:id', (req: Request, res: Response) => {
+  app.put('/api/sub-activities/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -3460,12 +3703,18 @@ async function startServer() {
       if (idx !== -1) {
         d.subActivities[idx] = {
           ...d.subActivities[idx],
-          name: name ?? d.subActivities[idx].name,
+          name: typeof name === 'string' && name.trim() ? name.trim() : d.subActivities[idx].name,
           code: code !== undefined ? String(code).trim() || undefined : (d.subActivities[idx] as any).code,
           description: description ?? d.subActivities[idx].description,
           picName: picName ?? d.subActivities[idx].picName,
-          startDate: startDate ?? d.subActivities[idx].startDate,
-          endDate: endDate ?? d.subActivities[idx].endDate,
+          startDate:
+            startDate !== undefined
+              ? String(startDate || '').slice(0, 10)
+              : d.subActivities[idx].startDate,
+          endDate:
+            endDate !== undefined
+              ? String(endDate || '').slice(0, 10)
+              : d.subActivities[idx].endDate,
           budgetAllocated:
             req.body.budgetAllocated !== undefined
               ? Number(req.body.budgetAllocated) || 0
@@ -3489,12 +3738,14 @@ async function startServer() {
     });
 
     if (!updated) return res.status(404).json({ error: 'Sub-Activity tidak ditemukan' });
+    await db.commitPendingWrites(`PUT /api/sub-activities/${id}`);
     res.json(updated);
   });
 
-  app.delete('/api/sub-activities/:id', (req: Request, res: Response) => {
+  app.delete('/api/sub-activities/:id', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
@@ -3530,6 +3781,8 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
     });
+
+    await db.commitPendingWrites(`DELETE /api/sub-activities/${id}`);
     res.json({ message: 'Sub-Activity berhasil dihapus' });
   });
 
@@ -4249,9 +4502,11 @@ async function startServer() {
     // - Direktur dapat mengedit dokumen ToR secara langsung kapan saja.
     // - R (Responsible) dan A1 (Accountable Program) dapat mengedit saat status Draft / Perlu Perbaikan, atau setelah meminta izin edit (Request Edit) dan di-ACC Direktur.
     const outputRaci = data.outputRaciRecords?.[existing.outputId];
-    const isDirectorUser = currentUser.role === 'director';
+    const isDirectorUser =
+      currentUser.role === 'director' || currentUser.role === 'system_admin';
     const isA2OrFinanceUser =
       currentUser.role === 'finance' ||
+      currentUser.role === 'system_admin' ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance') ||
       outputRaci?.accountableFinanceUserId === currentUser.id;
     const isRUser =
@@ -4749,9 +5004,9 @@ async function startServer() {
     const { id } = req.params;
     const { decision, comment } = req.body as { decision: 'approve' | 'reject'; comment?: string };
 
-    if (currentUser.role !== 'director') {
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
-        error: 'Hanya Director yang berwenang menyetujui (ACC) atau menolak permintaan edit TOR.',
+        error: 'Hanya Director atau System Administrator yang berwenang menyetujui (ACC) atau menolak permintaan edit TOR.',
       });
     }
 
@@ -4801,7 +5056,8 @@ async function startServer() {
     if (
       tor.createdById !== currentUser.id &&
       tor.picId !== currentUser.id &&
-      currentUser.role !== 'director'
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'system_admin'
     ) {
       return res.status(403).json({ error: 'Hanya pembuat / PIC TOR yang dapat mengajukan dokumen' });
     }
@@ -4902,7 +5158,11 @@ async function startServer() {
 
     if (!tor) return res.status(404).json({ error: 'TOR tidak ditemukan' });
 
-    if (tor.createdById === currentUser.id && currentUser.role !== 'director') {
+    if (
+      tor.createdById === currentUser.id &&
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'system_admin'
+    ) {
       return res.status(403).json({ error: 'Pelanggaran Aturan: Pembuat TOR tidak diperbolehkan menyetujui dokumen yang dibuatnya sendiri.' });
     }
 
@@ -4925,7 +5185,7 @@ async function startServer() {
         } else {
           // action === 'Setujui'
           if (
-            currentUser.role === 'director' &&
+            (currentUser.role === 'director' || currentUser.role === 'system_admin') &&
             (hubItem.status === 'Pending Approval' ||
               hubItem.status === 'Approved' ||
               tor.submissionStatus === 'Menunggu Persetujuan Director')
@@ -4986,6 +5246,7 @@ async function startServer() {
       tor.picId !== currentUser.id &&
       tor.createdById !== currentUser.id &&
       !isRaciROrA1 &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal'
@@ -5107,9 +5368,9 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const { id } = req.params;
 
-    if (currentUser.role !== 'director') {
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
-        error: 'Hanya Direktur yang memiliki kewenangan untuk menghapus dokumen ToR.',
+        error: 'Hanya Direktur atau System Administrator yang memiliki kewenangan untuk menghapus dokumen ToR.',
       });
     }
 
@@ -5580,7 +5841,11 @@ async function startServer() {
         }
 
         if (stage === 'finance') {
-          if (currentUser.role !== 'finance' && currentUser.role !== 'admin') {
+          if (
+            currentUser.role !== 'finance' &&
+            currentUser.role !== 'system_admin' &&
+            currentUser.role !== 'admin'
+          ) {
             throw new Error('Hanya Finance (A2) yang berwenang memverifikasi laporan keuangan akhir.');
           }
           if (found.reportApprovalStatus === 'Telah Disetujui') {
@@ -5598,7 +5863,11 @@ async function startServer() {
             found.reportVerifiedNotes = notes || 'Laporan realisasi & lampiran Expensify telah diperiksa Finance.';
           }
         } else if (stage === 'director') {
-          if (currentUser.role !== 'director' && currentUser.role !== 'admin') {
+          if (
+            currentUser.role !== 'director' &&
+            currentUser.role !== 'system_admin' &&
+            currentUser.role !== 'admin'
+          ) {
             throw new Error('Hanya Executive Director yang berwenang memberikan persetujuan akhir laporan keuangan.');
           }
           if (found.reportApprovalStatus !== 'Menunggu Persetujuan Director' && action !== 'revision') {
@@ -5769,7 +6038,8 @@ async function startServer() {
         if (
           (existing.status === 'Disetujui' || existing.status === 'Dicairkan') &&
           currentUser.role !== 'director' &&
-          currentUser.role !== 'finance'
+          currentUser.role !== 'finance' &&
+          currentUser.role !== 'system_admin'
         ) {
           throw new Error(
             `Cash Advance ${existing.advanceNumber} telah berstatus '${existing.status}' dan rincian pengajuannya tidak dapat diubah lagi.`
@@ -5914,7 +6184,11 @@ async function startServer() {
   app.post('/api/cash-advances/:id/verify', (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'finance' && currentUser.role !== 'admin') {
+    if (
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin'
+    ) {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Finance (A2) yang berwenang memverifikasi pengajuan Cash Advance.',
       });
@@ -5930,7 +6204,11 @@ async function startServer() {
       const found = draft.cashAdvances.find((c) => c.id === id);
       if (!found) return;
 
-      if (found.requesterId === currentUser.id && currentUser.role !== 'director') {
+      if (
+        found.requesterId === currentUser.id &&
+        currentUser.role !== 'director' &&
+        currentUser.role !== 'system_admin'
+      ) {
         errMsg = 'Pemohon Cash Advance tidak diperbolehkan memverifikasi pengajuannya sendiri.';
         return;
       }
@@ -6057,7 +6335,7 @@ async function startServer() {
   app.post('/api/cash-advances/:id/approve', (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director') {
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Executive Director yang berwenang memberikan persetujuan akhir Cash Advance.',
       });
@@ -6188,7 +6466,11 @@ async function startServer() {
   app.post('/api/cash-advances/:id/disburse', (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'finance' && currentUser.role !== 'admin') {
+    if (
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin'
+    ) {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Finance yang berwenang mencairkan dana Cash Advance.',
       });
@@ -6312,14 +6594,19 @@ async function startServer() {
       const idx = draft.cashAdvances.findIndex((c) => c.id === id);
       if (idx !== -1) {
         const item = draft.cashAdvances[idx];
-        if (item.status !== 'Draft' && currentUser.role !== 'director') {
+        if (
+          item.status !== 'Draft' &&
+          currentUser.role !== 'director' &&
+          currentUser.role !== 'system_admin'
+        ) {
           errMsg = `Cash Advance berstatus '${item.status}' tidak dapat dihapus (hanya draf yang dapat dihapus).`;
           return;
         }
         if (
           item.requesterId !== currentUser.id &&
           currentUser.role !== 'finance' &&
-          currentUser.role !== 'director'
+          currentUser.role !== 'director' &&
+          currentUser.role !== 'system_admin'
         ) {
           errMsg = 'Hanya pembuat pengajuan, Finance, atau Direktur yang dapat menghapus draf Cash Advance.';
           return;
@@ -6554,13 +6841,14 @@ async function startServer() {
     }
     const isFinanceActor =
       currentUser.role === 'finance' ||
+      currentUser.role === 'system_admin' ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance');
     if (stage === 'finance' && !isFinanceActor) {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Finance yang berwenang memeriksa Laporan Keuangan Akhir pada tahap ini.',
       });
     }
-    if (stage === 'director' && currentUser.role !== 'director') {
+    if (stage === 'director' && currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Direktur Eksekutif yang berwenang memberikan persetujuan akhir Laporan Keuangan Akhir.',
       });
@@ -6873,6 +7161,7 @@ async function startServer() {
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'admin'
     ) {
       return res.status(403).json({
@@ -7061,6 +7350,7 @@ async function startServer() {
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'admin'
     ) {
       return res.status(403).json({
@@ -7269,6 +7559,7 @@ async function startServer() {
     }
 
     const canManageRaci =
+      currentUser.role === 'system_admin' ||
       currentUser.role === 'director' ||
       currentUser.role === 'program_manager' ||
       currentUser.role === 'meal' ||
@@ -7492,9 +7783,9 @@ async function startServer() {
         error: 'Akun Anda berstatus nonaktif dan tidak dapat memberikan pengesahan RACI.',
       });
     }
-    if (currentUser.role !== 'director') {
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
-        error: 'Hanya Direktur Eksekutif yang memiliki kewenangan mengesahkan atau meminta revisi penugasan RACI Output.',
+        error: 'Hanya Direktur Eksekutif atau System Administrator yang memiliki kewenangan mengesahkan atau meminta revisi penugasan RACI Output.',
       });
     }
     const body = req.body || {};
@@ -7634,10 +7925,13 @@ async function startServer() {
       });
     }
 
-    const isR = targetRaci.responsibleUserId === currentUser.id;
-    const isA1 = targetRaci.accountableUserId === currentUser.id;
+    const isR =
+      targetRaci.responsibleUserId === currentUser.id || currentUser.role === 'system_admin';
+    const isA1 =
+      targetRaci.accountableUserId === currentUser.id || currentUser.role === 'system_admin';
     const isA2 =
       currentUser.role === 'finance' ||
+      currentUser.role === 'system_admin' ||
       (currentUser.roleTitle || '').toLowerCase().includes('finance');
 
     if (!isR && !isA1 && !isA2) {
@@ -8318,13 +8612,14 @@ async function startServer() {
     res.json(data.programBudgets || {});
   });
 
-  app.put('/api/finance-workspace/budgets/:key', (req: Request, res: Response) => {
+  app.put('/api/finance-workspace/budgets/:key', async (req: Request, res: Response) => {
     const { key } = req.params;
     const currentUser = getCurrentUser(req);
     if (
       currentUser.role !== 'finance' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'admin' &&
       !currentUser.permissions?.canManagePrograms
     ) {
@@ -8351,6 +8646,45 @@ async function startServer() {
       };
       draft.programBudgets[key] = savedDataset;
 
+      // Sinkronkan Master Budget Codes & totalProgramBudget lintas tahun pada Program yang sama, serta update total_budget pada tabel programs
+      if (savedDataset.programId && key !== '__MASTER_BUDGET_ITEMS__') {
+        const effectiveTotalProgBudget =
+          Number(savedDataset.totalProgramBudget) ||
+          Number(savedDataset.annualApprovedBudget) ||
+          0;
+
+        for (const [otherKey, otherDs] of Object.entries(draft.programBudgets)) {
+          if (
+            otherKey !== key &&
+            otherKey !== '__MASTER_BUDGET_ITEMS__' &&
+            otherDs &&
+            otherDs.programId === savedDataset.programId
+          ) {
+            draft.programBudgets[otherKey] = {
+              ...otherDs,
+              ...(Array.isArray(savedDataset.masterBudgetCodes)
+                ? { masterBudgetCodes: savedDataset.masterBudgetCodes }
+                : {}),
+              ...(effectiveTotalProgBudget > 0
+                ? { totalProgramBudget: effectiveTotalProgBudget }
+                : {}),
+              updatedAt: nowIso,
+            };
+          }
+        }
+
+        if (Array.isArray(draft.programs)) {
+          const pIdx = draft.programs.findIndex((p) => p.id === savedDataset.programId);
+          if (pIdx !== -1 && (savedDataset.isBudgetConfigured || effectiveTotalProgBudget > 0)) {
+            draft.programs[pIdx] = {
+              ...draft.programs[pIdx],
+              totalBudget: effectiveTotalProgBudget,
+              updatedAt: nowIso,
+            } as any;
+          }
+        }
+      }
+
       draft.auditLogs.unshift({
         id: `log-fin-bgt-${Date.now()}`,
         actorId: currentUser.id,
@@ -8364,14 +8698,58 @@ async function startServer() {
       });
     });
 
+    await db.commitPendingWrites(`PUT /api/finance-workspace/budgets/${key}`);
     res.json(savedDataset);
+  });
+
+  app.delete('/api/finance-workspace/budgets/:key', async (req: Request, res: Response) => {
+    const { key } = req.params;
+    const currentUser = getCurrentUser(req);
+    if (
+      currentUser.role !== 'finance' &&
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'system_admin' &&
+      !currentUser.permissions?.canManagePrograms
+    ) {
+      return res.status(403).json({
+        error: 'Akses ditolak: Hanya Finance atau Direktur yang berwenang menghapus dataset anggaran.',
+      });
+    }
+    const existing = db.getData().programBudgets?.[key];
+    if (!existing) {
+      return res.status(404).json({ error: 'Dataset anggaran tidak ditemukan.' });
+    }
+    const nowIso = new Date().toISOString();
+    db.update((draft) => {
+      if (draft.programBudgets && draft.programBudgets[key]) {
+        delete draft.programBudgets[key];
+      }
+      draft.auditLogs.unshift({
+        id: `log-fin-bgt-del-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: 'Penghapusan Dataset Master Budget',
+        entityType: 'PROGRAM',
+        entityId: existing.programId || key,
+        details: `Menghapus dataset anggaran ${existing.programName || key} oleh ${currentUser.name}.`,
+        timestamp: nowIso,
+      });
+    });
+
+    await db.commitPendingWrites(`DELETE /api/finance-workspace/budgets/${key}`);
+    res.json({ message: 'Dataset anggaran berhasil dihapus', id: key });
   });
 
   app.post('/api/approval-hub/workflow-config', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director' && currentUser.role !== 'admin') {
+    if (
+      currentUser.role !== 'director' &&
+      currentUser.role !== 'system_admin' &&
+      currentUser.role !== 'admin'
+    ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya Direktur yang berwenang mengubah mekanisme alur persetujuan (Approval Hub).',
+        error: 'Akses ditolak: Hanya Direktur atau System Administrator yang berwenang mengubah mekanisme alur persetujuan (Approval Hub).',
       });
     }
     const { categoryCode, mechanism, parallelRule } = req.body || {};
@@ -8853,7 +9231,7 @@ async function startServer() {
   });
 
   // Hubungkan Peserta dari Database Peserta ke Program tertentu (tanpa duplikasi data master)
-  app.post('/api/programs/:programId/participants-link', (req: Request, res: Response) => {
+  app.post('/api/programs/:programId/participants-link', async (req: Request, res: Response) => {
     const { programId } = req.params;
     const currentUser = getCurrentUser(req);
     const { participantIds, roleInProgram, notes, joinedAt } = req.body || {};
@@ -8935,6 +9313,7 @@ async function startServer() {
     if (errorMsg) {
       return res.status(404).json({ error: errorMsg });
     }
+    await db.commitPendingWrites(`POST /api/programs/${programId}/participants-link`);
     res.json({
       message: `${updatedParticipants.length} peserta berhasil dihubungkan ke program.`,
       updatedParticipants,
@@ -8944,7 +9323,7 @@ async function startServer() {
   // Lepaskan keterlibatan peserta dari suatu program (tanpa menghapus profil master peserta di Database Peserta)
   app.delete(
     '/api/programs/:programId/participants-link/:participantId',
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const { programId, participantId } = req.params;
       const currentUser = getCurrentUser(req);
       const nowIso = new Date().toISOString();
@@ -8989,6 +9368,9 @@ async function startServer() {
       if (!updatedRecord) {
         return res.status(404).json({ error: 'Data peserta tidak ditemukan.' });
       }
+      await db.commitPendingWrites(
+        `DELETE /api/programs/${programId}/participants-link/${participantId}`
+      );
       res.json(updatedRecord);
     }
   );
@@ -9079,11 +9461,20 @@ async function startServer() {
   }
 
   function isHrAuthorized(user: User): boolean {
-    return user.role === 'finance' || user.role === 'hr' || user.role === 'admin';
+    return (
+      user.role === 'finance' ||
+      user.role === 'hr' ||
+      user.role === 'system_admin' ||
+      user.role === 'admin'
+    );
   }
 
   function isDirectorAuthorized(user: User): boolean {
-    return user.role === 'director' || user.role === 'admin';
+    return (
+      user.role === 'director' ||
+      user.role === 'system_admin' ||
+      user.role === 'admin'
+    );
   }
 
   function buildAttendanceBundleForUser(currentUser: User): AttendanceSystemBundle {
@@ -11636,7 +12027,7 @@ async function startServer() {
   // 11. RESET SELURUH DATA REKAP KERJA (KHUSUS DIREKTUR SAJA — MENGHAPUS HANYA DATA REKAP KERJA)
   app.post('/api/attendance-system/work-recap-reset', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== 'director') {
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Direktur yang berwenang melakukan reset data Rekap Kerja.',
       });
@@ -11684,6 +12075,7 @@ async function startServer() {
   app.post('/api/reset-data', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'admin' &&
       currentUser.role !== 'director' &&
       !currentUser.permissions?.canManageUsers

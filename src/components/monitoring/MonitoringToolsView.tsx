@@ -459,7 +459,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   notifications = [],
   onMarkNotificationRead,
 }) => {
-  const { currentUser, isDirector, isProgramManager, isAdmin } = useAuth();
+  const { currentUser, isDirector, isProgramManager, isAdmin, isSystemAdmin } = useAuth();
   const [showFollowUpInbox, setShowFollowUpInbox] = useState<boolean>(false);
 
   // Core data from server
@@ -479,6 +479,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
 
   // Scope filter: all active users can toggle 'ALL' vs 'ASSIGNED'; management/MEAL/Finance/HR default to 'ALL'
   const isGlobalViewerRole =
+    isSystemAdmin ||
     isProgramManager ||
     isDirector ||
     isAdmin ||
@@ -744,8 +745,8 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
   const isCurrentAccountActive = Boolean(currentUser && currentUser.isActive !== false);
   const canAssignRaci =
     isCurrentAccountActive &&
-    (isProgramManager || isAdmin || Boolean(currentUser?.permissions?.canManagePrograms));
-  const canApproveRaci = isCurrentAccountActive && isDirector;
+    (isSystemAdmin || isProgramManager || isAdmin || Boolean(currentUser?.permissions?.canManagePrograms));
+  const canApproveRaci = isCurrentAccountActive && (isDirector || isSystemAdmin);
 
   // Determine user's Responsible / Accountable assignment role on an Output
   const getUserRaciRoleForOutput = useCallback(
@@ -837,6 +838,10 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
       const raci = getOutputRaci(output);
       const userRoleOnOutput = getUserRaciRoleForOutput(output);
 
+      if (isSystemAdmin) {
+        return { allowed: true, roleLabel: 'System Administrator' };
+      }
+
       if (raci.status !== 'Aktif') {
         return {
           allowed: false,
@@ -857,7 +862,7 @@ export const MonitoringToolsView: React.FC<MonitoringToolsViewProps> = ({
           'Hanya user yang ditugaskan sebagai R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) pada Output ini yang dapat membuat ToR dan mengelola Monitoring Tools.',
       };
     },
-    [currentUser, getOutputRaci, getUserRaciRoleForOutput]
+    [currentUser, isSystemAdmin, getOutputRaci, getUserRaciRoleForOutput]
   );
 
   // Helper to get ToRs linked to an Activity

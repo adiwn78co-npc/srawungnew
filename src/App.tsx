@@ -49,6 +49,7 @@ function MainAppContent() {
     isDirector,
     isFinance,
     isAdmin,
+    isSystemAdmin,
     isAuthenticated,
     loading: authLoading,
     logout,
@@ -285,10 +286,11 @@ function MainAppContent() {
   // Also restrict 'work-recap' to HR/Finance and Director only
   useEffect(() => {
     if (!loading && approvalAccessProfile && !approvalAccessProfile.canAccessApprovalMenu && activeTab === 'approvals') {
-      setActiveTab(isAdmin ? 'users' : 'monitoring-tools');
+      setActiveTab(isAdmin || isSystemAdmin ? 'users' : 'monitoring-tools');
       setApprovalFilterActivityId(null);
     }
     const canSeeWorkRecap =
+      isSystemAdmin ||
       currentUser?.role === 'finance' ||
       currentUser?.role === 'hr' ||
       currentUser?.role === 'director';
@@ -296,14 +298,15 @@ function MainAppContent() {
       setActiveTab('attendance');
     }
     const canSeeFinance =
+      isSystemAdmin ||
       currentUser?.role === 'finance' ||
       currentUser?.role === 'director' ||
       currentUser?.role === 'program_manager' ||
       currentUser?.role === 'meal';
     if (!loading && activeTab === 'finance' && !canSeeFinance) {
-      setActiveTab(isAdmin ? 'users' : 'dashboard');
+      setActiveTab(isAdmin || isSystemAdmin ? 'users' : 'dashboard');
     }
-  }, [loading, approvalAccessProfile, activeTab, isAdmin, currentUser?.role]);
+  }, [loading, approvalAccessProfile, activeTab, isAdmin, isSystemAdmin, currentUser?.role]);
 
   // Pending approvals count for current user based on Role & RACI authority
   const approverActionCount = approvalHubItems.filter((item) => {

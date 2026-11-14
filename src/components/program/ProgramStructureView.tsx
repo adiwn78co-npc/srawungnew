@@ -66,6 +66,8 @@ import {
   ProgramMasterBudgetCode,
   ExcelImportPreviewRow,
   getOrCreateProgramBudgetDataset,
+  resolveAuthoritativeFiscalYearForProgram,
+  hydrateProgramBudgetDatasetsFromServer,
   saveProgramBudgetDataset,
   saveProgramBudgetDatasetAsync,
   saveAllProgramBudgetDatasets,
@@ -137,7 +139,16 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   onExternalChangeFiscalYear,
   onNavigateToFinanceTab,
 }) => {
-  const { currentUser, isDirector, isProgramManager, isFinance, allUsers } = useAuth();
+  const {
+    currentUser,
+    isDirector: rawIsDirector,
+    isProgramManager,
+    isFinance: rawIsFinance,
+    isSystemAdmin,
+    allUsers,
+  } = useAuth();
+  const isDirector = rawIsDirector || isSystemAdmin;
+  const isFinance = rawIsFinance || isSystemAdmin;
   const canManage = Boolean(
     isDirector ||
       isProgramManager ||
@@ -148,7 +159,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const canDeleteProgram = Boolean(
     isDirector || isProgramManager || currentUser?.permissions?.canManagePrograms
   );
-  // Hanya Director dan Finance yang dapat melihat dan mengelola kolom Pengaturan Finance Program
+  // Hanya Director, Finance, dan System Administrator yang dapat melihat dan mengelola kolom Pengaturan Finance Program
   const canEditFinance = isDirector || isFinance;
 
   // Active main section inside Program Detail: 'hierarchy', 'matrix' (Matriks Outcome & Output), 'activity_matrix' (Matriks Activity), 'participants' (Tracing Peserta), or 'finance'
@@ -180,13 +191,23 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     programs[0] ||
     null;
 
-  // Derive program fiscal year directly from the active program's start date (no duplicate fiscal year selector)
+  const [budgetCacheVersion, setBudgetCacheVersion] = useState(0);
+  const lastLoadedDatasetSigRef = useRef<string>('');
+
+  useEffect(() => {
+    const onBudgetCacheUpdated = () => {
+      setBudgetCacheVersion((v) => v + 1);
+    };
+    window.addEventListener('program-budget-updated', onBudgetCacheUpdated);
+    return () => {
+      window.removeEventListener('program-budget-updated', onBudgetCacheUpdated);
+    };
+  }, []);
+
+  // Derive program fiscal year from authoritative saved budget dataset or program's start date
   const selectedFiscalYear = useMemo<number>(() => {
-    if (externalFiscalYear) return externalFiscalYear;
-    const progYear = Number((activeBudgetProgram?.startDate || '').slice(0, 4));
-    if (progYear >= 2020 && progYear <= 2035) return progYear;
-    return new Date().getFullYear();
-  }, [externalFiscalYear, activeBudgetProgram]);
+    return resolveAuthoritativeFiscalYearForProgram(activeBudgetProgram, externalFiscalYear);
+  }, [externalFiscalYear, activeBudgetProgram, budgetCacheVersion]);
 
   const handleSelectBudgetProgram = (progId: string) => {
     setBudgetContextProgramId(progId);
@@ -277,24 +298,19 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       setAllMonitoringReports(Array.isArray(monRes?.items) ? monRes.items : []);
 
       if (serverBudgets && typeof serverBudgets === 'object') {
-        const localAll = loadAllProgramBudgetDatasets();
-        let changed = false;
-        for (const [k, v] of Object.entries(serverBudgets)) {
-          if (v && typeof v === 'object') {
-            localAll[k] = v as ProgramBudgetDataset;
-            changed = true;
-          }
-        }
-        if (changed) {
-          saveAllProgramBudgetDatasets(localAll);
-        }
+        hydrateProgramBudgetDatasetsFromServer(serverBudgets);
+        setBudgetCacheVersion((v) => v + 1);
       }
 
       if (activeBudgetProgram) {
+        const effectiveFy = resolveAuthoritativeFiscalYearForProgram(
+          activeBudgetProgram,
+          externalFiscalYear
+        );
         const currentDs = getOrCreateProgramBudgetDataset(
           activeBudgetProgram.id,
           activeBudgetProgram.name,
-          selectedFiscalYear,
+          effectiveFy,
           { outcomes, outputs, activities, tors, cashAdvances: caList }
         );
         const syncRes = syncProgramFinancialDataFromMealConnect({
@@ -310,12 +326,23 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           recordSyncLog: false,
         });
         setDataset(syncRes.updatedDataset);
-        setDraftTotalProgramBudget(Number(syncRes.updatedDataset.totalProgramBudget) || 0);
-        setDraftAnnualBudget(syncRes.updatedDataset.annualApprovedBudget);
-        setDraftStructureType('custom');
-        setDraftQuarterly(syncRes.updatedDataset.quarterlyPeriods);
-        setDraftSemester(syncRes.updatedDataset.semesterPeriods);
-        setDraftCustom(getActivePeriods(syncRes.updatedDataset));
+
+        const nextPeriods = getActivePeriods(syncRes.updatedDataset);
+        const datasetSig = `${syncRes.updatedDataset.id}__${
+          syncRes.updatedDataset.updatedAt || ''
+        }__${syncRes.updatedDataset.annualApprovedBudget}__${nextPeriods
+          .map((p) => `${p.id}:${p.code}:${p.allocatedAmount}:${p.isActiveForTor ? 1 : 0}`)
+          .join('|')}`;
+
+        if (lastLoadedDatasetSigRef.current !== datasetSig) {
+          lastLoadedDatasetSigRef.current = datasetSig;
+          setDraftTotalProgramBudget(Number(syncRes.updatedDataset.totalProgramBudget) || 0);
+          setDraftAnnualBudget(syncRes.updatedDataset.annualApprovedBudget);
+          setDraftStructureType('custom');
+          setDraftQuarterly(syncRes.updatedDataset.quarterlyPeriods);
+          setDraftSemester(syncRes.updatedDataset.semesterPeriods);
+          setDraftCustom(nextPeriods);
+        }
       }
     } catch (err) {
       console.error('Failed to sync program budget data:', err);
@@ -324,7 +351,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     }
   }, [
     activeBudgetProgram,
-    selectedFiscalYear,
+    externalFiscalYear,
     programs,
     outcomes,
     outputs,
@@ -348,7 +375,16 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         ...updated,
         id: key,
       });
+      const persistedPeriods = getActivePeriods(persisted);
+      lastLoadedDatasetSigRef.current = `${persisted.id}__${
+        persisted.updatedAt || ''
+      }__${persisted.annualApprovedBudget}__${persistedPeriods
+        .map((p) => `${p.id}:${p.code}:${p.allocatedAmount}:${p.isActiveForTor ? 1 : 0}`)
+        .join('|')}`;
       setDataset(persisted);
+      setDraftCustom(persistedPeriods);
+      setBudgetCacheVersion((v) => v + 1);
+      await Promise.resolve(onRefresh());
       return true;
     } catch (err: any) {
       const errMsg =
@@ -375,10 +411,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       }
     > = {};
     for (const prog of programs) {
+      const progFiscalYear = resolveAuthoritativeFiscalYearForProgram(prog, externalFiscalYear);
       const baseDs =
-        prog.id === dataset.programId
+        prog.id === dataset.programId && progFiscalYear === dataset.fiscalYear
           ? dataset
-          : getOrCreateProgramBudgetDataset(prog.id, prog.name, selectedFiscalYear, {
+          : getOrCreateProgramBudgetDataset(prog.id, prog.name, progFiscalYear, {
               outcomes,
               outputs,
               activities,
@@ -386,7 +423,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
               cashAdvances,
             });
       const syncedDs =
-        prog.id === dataset.programId
+        prog.id === dataset.programId && progFiscalYear === dataset.fiscalYear
           ? dataset
           : syncProgramFinancialDataFromMealConnect({
               dataset: baseDs,
@@ -425,7 +462,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   }, [
     programs,
     dataset,
-    selectedFiscalYear,
+    externalFiscalYear,
+    budgetCacheVersion,
     outcomes,
     outputs,
     activities,
@@ -720,7 +758,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const [showAddSubActivity, setShowAddSubActivity] = useState<{ activityId: string } | null>(null);
   const [editingSubActivity, setEditingSubActivity] = useState<SubActivity | null>(null);
   const [pendingDeleteConfirm, setPendingDeleteConfirm] = useState<{
-    type: 'program' | 'outcome' | 'output' | 'activity' | 'subActivity';
+    type: 'program' | 'outcome' | 'output' | 'activity' | 'subActivity' | 'tor';
     id: string;
     label: string;
     description: string;
@@ -729,6 +767,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   // Form states
   const [outcomeForm, setOutcomeForm] = useState({
+    outcomeNumber: '',
     name: '',
     projectName: '',
     description: '',
@@ -742,6 +781,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   });
 
   const [outputForm, setOutputForm] = useState({
+    outputNumber: '',
     name: '',
     description: '',
     indicatorName: '',
@@ -1163,11 +1203,22 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ...p,
       isActiveForTor: p.id === periodId,
     }));
+    const computedAnnual = nextPeriods.reduce(
+      (sum, p) => sum + (Number(p.allocatedAmount) || 0),
+      0
+    );
+    const effectiveAnnual = computedAnnual > 0 ? computedAnnual : dataset.annualApprovedBudget;
     setDraftCustom(nextPeriods);
 
     const nowIso = new Date().toISOString();
     const updated: ProgramBudgetDataset = {
       ...dataset,
+      isBudgetConfigured: Boolean(dataset.isBudgetConfigured || effectiveAnnual > 0),
+      annualApprovedBudget: effectiveAnnual,
+      totalProgramBudget:
+        Number(dataset.totalProgramBudget) > effectiveAnnual
+          ? Number(dataset.totalProgramBudget)
+          : effectiveAnnual,
       customPeriods: nextPeriods,
       ...(isDirector
         ? {
@@ -1188,7 +1239,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             targetPeriod?.code || ''
           } — ${targetPeriod?.label || ''}.`,
           previousAnnualBudget: dataset.annualApprovedBudget,
-          newAnnualBudget: dataset.annualApprovedBudget,
+          newAnnualBudget: effectiveAnnual,
         },
         ...(dataset.revisions || []),
       ],
@@ -1196,7 +1247,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
-      `Time Period Aktif (TOR) berhasil diatur ke "${targetPeriod?.code} — ${targetPeriod?.label}".`
+      `Time Period Aktif (TOR) berhasil diatur ke "${targetPeriod?.code} — ${targetPeriod?.label}" dan disimpan ke database.`
     );
   };
 
@@ -1296,16 +1347,22 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   };
 
   const handleDeleteMasterCode = async (item: ProgramMasterBudgetCode) => {
+    const cleanTargetCode = item.code.trim().toLowerCase();
     const usedInTor = tors.some(
       (t) =>
         (t.programId === activeBudgetProgram?.id ||
           t.programName === activeBudgetProgram?.name) &&
-        (t.activityCode === item.code || t.hierarchyCode === item.code)
+        ((t.activityCode || '').trim().toLowerCase() === cleanTargetCode ||
+          (t.hierarchyCode || '').trim().toLowerCase() === cleanTargetCode)
     );
-    const usedInAct = activities.some((a) => a.code === item.code);
-    if (usedInTor || usedInAct) {
+    const usedInCa = programScopedCashAdvances.some((ca) =>
+      (ca.items || []).some(
+        (caItem) => (caItem.budgetCode || '').trim().toLowerCase() === cleanTargetCode
+      )
+    );
+    if (usedInTor || usedInCa) {
       setErrorMessage(
-        `Kode anggaran ${item.code} sedang digunakan oleh Activity atau Dokumen ToR aktif dan tidak dapat dihapus.`
+        `Kode anggaran ${item.code} sedang digunakan pada Dokumen ToR atau Cash Advance aktif dan tidak dapat dihapus.`
       );
       return;
     }
@@ -1621,12 +1678,17 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleOpenEditProgram = (prog: Program, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const cleanStart = (prog.startDate || '').slice(0, 10) || todayIso;
+    const cleanEnd =
+      (prog.endDate || '').slice(0, 10) ||
+      new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     setEditingProgram(prog);
     setProgramForm({
       name: prog.name,
       location: prog.location,
-      startDate: prog.startDate,
-      endDate: prog.endDate,
+      startDate: cleanStart,
+      endDate: cleanEnd,
       description: prog.description || '',
       folderUrl: prog.folderUrl || '',
       picId: prog.picId || currentUser?.id || '',
@@ -1642,10 +1704,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         ...prog,
         folderUrl: cleanUrl,
       });
+      await Promise.resolve(onRefresh());
       setEditingInlineFolderProgId(null);
-      setSuccessMessage('Link Folder Program berhasil disimpan.');
-      onRefresh();
+      setErrorMessage(null);
+      setSuccessMessage('Link Folder Program berhasil disimpan ke database.');
     } catch (err: any) {
+      setSuccessMessage(null);
       setErrorMessage(err.message || 'Gagal menyimpan Link Folder Program.');
     }
   };
@@ -1687,12 +1751,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         await api.updateProgram(editingProgram.id, payload);
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
-        setSuccessMessage('Program berhasil diperbarui.');
+        setSuccessMessage('Program berhasil diperbarui dan tersimpan ke database.');
       } else {
         const created = await api.createProgram(payload);
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
-        setSuccessMessage('Program baru berhasil dibuat.');
+        setSuccessMessage('Program baru berhasil dibuat dan tersimpan ke database.');
         setSelectedProgramId(created.id);
         handleSelectBudgetProgram(created.id);
       }
@@ -1706,21 +1770,17 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleDeleteProgram = (progId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     if (!canDeleteProgram) {
-      setErrorMessage('Hanya Director atau Program Manager yang memiliki kewenangan menghapus Program.');
+      setErrorMessage('Hanya Director, Program Manager, atau System Administrator yang memiliki kewenangan menghapus Program.');
       return;
     }
     const targetProg = programs.find((p) => p.id === progId);
     if (!targetProg) return;
-    if (targetProg.status !== 'Selesai') {
-      setErrorMessage('Hanya Program yang sudah berstatus Selesai yang dapat dihapus.');
-      return;
-    }
     setPendingDeleteConfirm({
       type: 'program',
       id: progId,
       label: `Program "${targetProg.name}"`,
       description:
-        'Penghapusan Program bersifat permanen. Sistem akan memverifikasi bahwa tidak ada Outcome, Dokumen ToR, atau Cash Advance yang masih terhubung.',
+        'Penghapusan Program bersifat permanen ke database MySQL. Program hanya dapat dihapus apabila belum memiliki Dokumen ToR atau Cash Advance yang terhubung.',
     });
   };
 
@@ -1732,7 +1792,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       id,
       label: `Outcome "${target?.name || id}"`,
       description:
-        'Outcome ini akan dihapus secara permanen apabila tidak memiliki Output turunan yang masih aktif.',
+        'Outcome ini akan dihapus secara permanen dari database MySQL apabila tidak memiliki Output turunan yang masih aktif.',
     });
   };
 
@@ -1743,7 +1803,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       id,
       label: `Output "${target?.name || id}"`,
       description:
-        'Output ini akan dihapus secara permanen apabila tidak memiliki Activity turunan yang masih aktif.',
+        'Output ini akan dihapus secara permanen dari database MySQL apabila tidak memiliki Activity turunan yang masih aktif.',
     });
   };
 
@@ -1754,7 +1814,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       id,
       label: `Activity "${target?.name || id}"`,
       description:
-        'Activity ini akan dihapus secara permanen apabila belum memiliki Sub-Activity atau Dokumen ToR yang terhubung.',
+        'Activity ini akan dihapus secara permanen dari database MySQL apabila belum memiliki Sub-Activity atau Dokumen ToR yang terhubung.',
     });
   };
 
@@ -1765,7 +1825,18 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       id,
       label: `Sub-Activity "${target?.name || id}"`,
       description:
-        'Sub-Activity ini akan dihapus secara permanen apabila belum digunakan pada Dokumen ToR mana pun.',
+        'Sub-Activity ini akan dihapus secara permanen dari database MySQL apabila belum digunakan pada Dokumen ToR mana pun.',
+    });
+  };
+
+  const handleDeleteTorFromHierarchy = (tor: Tor, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setPendingDeleteConfirm({
+      type: 'tor',
+      id: tor.id,
+      label: `Dokumen ToR "${tor.torNumber || tor.title}"`,
+      description:
+        'Dokumen ToR beserta catatan terkait akan dihapus secara permanen dari database MySQL.',
     });
   };
 
@@ -1779,6 +1850,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         if (selectedProgramId === id) {
           setSelectedProgramId(null);
         }
+        await fetchBudgetAndFinancialRecords();
       } else if (type === 'outcome') {
         await api.deleteOutcome(id);
       } else if (type === 'output') {
@@ -1787,10 +1859,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         await api.deleteActivity(id);
       } else if (type === 'subActivity') {
         await api.deleteSubActivity(id);
+      } else if (type === 'tor') {
+        await api.deleteTor(id);
       }
       await Promise.resolve(onRefresh());
       setErrorMessage(null);
-      setSuccessMessage(`${label} berhasil dihapus.`);
+      setSuccessMessage(`${label} berhasil dihapus permanen dari database.`);
       setPendingDeleteConfirm(null);
     } catch (err: any) {
       setSuccessMessage(null);
@@ -1799,6 +1873,27 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     } finally {
       setIsDeletingConfirm(false);
     }
+  };
+
+  const openEditActivityModal = (actItem: Activity, fallbackPrefix = '') => {
+    const actPrefix =
+      actItem.activityNumber ||
+      (actItem.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? fallbackPrefix);
+    const cleanActName =
+      actItem.name.replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '').trim() || actItem.name;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    setShowAddActivity(null);
+    setEditingActivity(actItem);
+    setActivityForm({
+      activityNumber: actPrefix,
+      name: cleanActName,
+      code: actItem.code || '',
+      description: actItem.description || '',
+      anticipatedInputs: actItem.anticipatedInputs || '',
+      plannedParticipantsBreakdown: actItem.plannedParticipantsBreakdown || '',
+      startDate: (actItem.startDate || '').slice(0, 10) || todayIso,
+      endDate: (actItem.endDate || '').slice(0, 10) || todayIso,
+    });
   };
 
   // Hierarchy Creation / Update Submits
@@ -1813,31 +1908,44 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     try {
       const indicators: Indicator[] = [];
-      if (outcomeForm.indicatorName) {
+      if (outcomeForm.indicatorName.trim()) {
         indicators.push({
           id: `ind-${Date.now()}`,
-          name: outcomeForm.indicatorName,
+          name: outcomeForm.indicatorName.trim(),
           description: '',
-          baseline: outcomeForm.baseline || '0',
-          target: outcomeForm.target || '100%',
-          unit: outcomeForm.unit || '%',
-          verificationMethod: outcomeForm.verificationMethod || 'Laporan MEAL',
+          baseline: outcomeForm.baseline.trim() || '0',
+          target: outcomeForm.target.trim() || '100%',
+          endOfProjectGoal: outcomeForm.target.trim() || '100%',
+          unit: outcomeForm.unit.trim() || '%',
+          verificationMethod: outcomeForm.verificationMethod.trim() || 'Laporan MEAL',
           reportingFrequency: outcomeForm.reportingFrequency,
-          dataSource: outcomeForm.dataSource || 'Data Lapangan',
+          dataSource: outcomeForm.dataSource.trim() || 'Data Lapangan',
         });
       }
 
-      await api.createOutcome({
+      const cleanOutcomeNum = outcomeForm.outcomeNumber.trim();
+      const cleanRawName = outcomeForm.name.trim();
+      const combinedName =
+        cleanOutcomeNum && !cleanRawName.toLowerCase().startsWith(cleanOutcomeNum.toLowerCase())
+          ? `${cleanOutcomeNum}: ${cleanRawName}`
+          : cleanRawName;
+
+      const created = await api.createOutcome({
         programId: targetProgId,
-        name: outcomeForm.name.trim(),
+        outcomeNumber: cleanOutcomeNum || undefined,
+        name: combinedName,
         projectName: currentProg?.name || outcomeForm.projectName,
-        description: outcomeForm.description,
+        description: outcomeForm.description.trim() || cleanRawName,
         indicators,
         status: 'Belum Dimulai',
-      });
+      } as any);
       await Promise.resolve(onRefresh());
+      if (created?.id) {
+        setExpandedOutcomes((prev) => ({ ...prev, [created.id]: true }));
+      }
       setShowAddOutcome(false);
       setOutcomeForm({
+        outcomeNumber: '',
         name: '',
         projectName: '',
         description: '',
@@ -1862,29 +1970,45 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     if (!showAddOutput) return;
     try {
       const indicators: Indicator[] = [];
-      if (outputForm.indicatorName) {
+      if (outputForm.indicatorName.trim()) {
         indicators.push({
           id: `ind-${Date.now()}`,
-          name: outputForm.indicatorName,
+          name: outputForm.indicatorName.trim(),
           description: '',
-          baseline: outputForm.baseline || '0',
-          target: outputForm.target || '100',
-          unit: outputForm.unit || 'Unit',
-          verificationMethod: outputForm.verificationMethod || 'Dokumentasi & Berita Acara',
+          baseline: outputForm.baseline.trim() || '0',
+          target: outputForm.target.trim() || '100',
+          endOfProjectGoal: outputForm.target.trim() || '100',
+          unit: outputForm.unit.trim() || 'Unit',
+          verificationMethod:
+            outputForm.verificationMethod.trim() || 'Dokumentasi & Berita Acara',
+          dataSource:
+            outputForm.verificationMethod.trim() || 'Dokumentasi & Berita Acara',
           reportingFrequency: outputForm.reportingFrequency,
         });
       }
 
-      await api.createOutput({
+      const cleanOutputNum = outputForm.outputNumber.trim();
+      const cleanRawName = outputForm.name.trim();
+      const combinedName =
+        cleanOutputNum && !cleanRawName.toLowerCase().startsWith(cleanOutputNum.toLowerCase())
+          ? `${cleanOutputNum}: ${cleanRawName}`
+          : cleanRawName;
+
+      const created = await api.createOutput({
         outcomeId: showAddOutput.outcomeId,
-        name: outputForm.name,
-        description: outputForm.description,
+        outputNumber: cleanOutputNum || undefined,
+        name: combinedName,
+        description: outputForm.description.trim() || cleanRawName,
         indicators,
         status: 'Belum Dimulai',
-      });
+      } as any);
       await Promise.resolve(onRefresh());
+      if (created?.id) {
+        setExpandedOutputs((prev) => ({ ...prev, [created.id]: true }));
+      }
       setShowAddOutput(null);
       setOutputForm({
+        outputNumber: '',
         name: '',
         description: '',
         indicatorName: '',
@@ -1908,15 +2032,21 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     const wasEditing = Boolean(editingActivity);
     try {
       const cleanActNum = (activityForm.activityNumber || '').trim();
-      const rawName = activityForm.name.trim();
+      const strippedName =
+        activityForm.name
+          .trim()
+          .replace(/^Activity\s*[\d.]+\s*[:\-–]?\s*/i, '')
+          .trim() || activityForm.name.trim();
       const cleanName =
-        cleanActNum && !rawName.toLowerCase().startsWith(cleanActNum.toLowerCase())
-          ? `${cleanActNum} ${rawName}`
-          : rawName;
+        cleanActNum && !strippedName.toLowerCase().startsWith(cleanActNum.toLowerCase())
+          ? `${cleanActNum} ${strippedName}`
+          : strippedName;
+      const cleanCode = (activityForm.code || '').trim();
 
       if (editingActivity) {
         await api.updateActivity(editingActivity.id, {
           activityNumber: cleanActNum || undefined,
+          code: cleanCode || editingActivity.code || undefined,
           name: cleanName,
           description: activityForm.description,
           anticipatedInputs: activityForm.anticipatedInputs || '',
@@ -1925,9 +2055,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           endDate: activityForm.endDate,
         } as any);
       } else if (showAddActivity) {
-        await api.createActivity({
+        const created = await api.createActivity({
           outputId: showAddActivity.outputId,
           activityNumber: cleanActNum || undefined,
+          code: cleanCode || undefined,
           name: cleanName,
           description: activityForm.description,
           anticipatedInputs: activityForm.anticipatedInputs || '',
@@ -1936,6 +2067,9 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           endDate: activityForm.endDate,
           status: 'Belum Dimulai',
         } as any);
+        if (created?.id) {
+          setExpandedActivities((prev) => ({ ...prev, [created.id]: true }));
+        }
       }
 
       await Promise.resolve(onRefresh());
@@ -2348,7 +2482,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                   <Edit3 className="w-3.5 h-3.5 text-[#787774]" />
                                   <span>Edit Program</span>
                                 </button>
-                                {prog.status === 'Selesai' && (
+                                {canDeleteProgram && (
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -2439,8 +2573,18 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {canManage && currentProg.status === 'Selesai' && (
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {canManage && (
+                      <button
+                        type="button"
+                        onClick={(e) => handleOpenEditProgram(currentProg, e)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-[#2F3437] bg-white border border-[#E3E2E0] hover:bg-[#F7F7F5] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-[#787774]" />
+                        <span>Edit Program</span>
+                      </button>
+                    )}
+                    {canDeleteProgram && (
                       <button
                         type="button"
                         onClick={(e) => handleDeleteProgram(currentProg.id, e)}
@@ -2452,6 +2596,22 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     )}
                     {programDetailSection === 'hierarchy' && (
                       <>
+                        {canManage && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOutcomeForm((prev) => ({
+                                ...prev,
+                                outcomeNumber: `Outcome ${programOutcomes.length + 1}`,
+                              }));
+                              setShowAddOutcome(true);
+                            }}
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Tambah Outcome</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() =>
@@ -2468,19 +2628,21 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           <Download className="w-3.5 h-3.5 text-[#15803D]" />
                           <span>Template Excel Hirarki</span>
                         </button>
-                        <button
-                          type="button"
-                          disabled={importingHierarchyExcel}
-                          onClick={() => hierarchyFileInputRef.current?.click()}
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-white bg-[#0F7B6C] hover:bg-[#0B5E52] px-3 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
-                        >
-                          <Upload className="w-3.5 h-3.5" />
-                          <span>
-                            {importingHierarchyExcel
-                              ? 'Memasukkan dari Excel...'
-                              : 'Import Excel Hirarki'}
-                          </span>
-                        </button>
+                        {canManage && (
+                          <button
+                            type="button"
+                            disabled={importingHierarchyExcel}
+                            onClick={() => hierarchyFileInputRef.current?.click()}
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-white bg-[#0F7B6C] hover:bg-[#0B5E52] px-3 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>
+                              {importingHierarchyExcel
+                                ? 'Memasukkan dari Excel...'
+                                : 'Import Excel Hirarki'}
+                            </span>
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -3206,19 +3368,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                   .trim() || actItem.name;
 
                                               const openActivityManualEdit = () => {
-                                                setEditingActivity(actItem);
-                                                setActivityForm({
-                                                  activityNumber: actPrefix,
-                                                  name: cleanActName,
-                                                  code: actItem.code || '',
-                                                  description: actItem.description || '',
-                                                  anticipatedInputs:
-                                                    actItem.anticipatedInputs || '',
-                                                  plannedParticipantsBreakdown:
-                                                    actItem.plannedParticipantsBreakdown || '',
-                                                  startDate: actItem.startDate,
-                                                  endDate: actItem.endDate,
-                                                });
+                                                openEditActivityModal(
+                                                  actItem,
+                                                  `Activity ${ocIdx + 1}.${opIdx + 1}`
+                                                );
                                               };
 
                                               return (
@@ -4280,14 +4433,33 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     <div className="animate-in fade-in duration-150">
                       {/* HIERARKI 3 LEVEL RINGKAS: OUTCOME -> OUTPUT -> ACTIVITY (+ TOR) */}
                       {programOutcomes.length === 0 ? (
-                        <div className="bg-white rounded-md border border-dashed border-[#EAEAEA] p-6 text-center space-y-2">
+                        <div className="bg-white rounded-md border border-dashed border-[#EAEAEA] p-6 text-center space-y-2.5">
                           <h4 className="text-[13px] font-semibold text-[#171717]">
                             Belum ada Hirarki pada Program ini
                           </h4>
                           <p className="text-[11.5px] text-[#787774] max-w-md mx-auto">
-                            Gunakan tombol <strong>Template Excel Hirarki</strong> dan{' '}
-                            <strong>Masukkan Otomatis via Excel</strong> di atas untuk mengimpor Outcome, Output, dan Activity.
+                            Tambahkan Outcome secara manual atau gunakan tombol{' '}
+                            <strong>Template Excel Hirarki</strong> dan{' '}
+                            <strong>Import Excel Hirarki</strong> di atas untuk mengimpor Outcome, Output, dan Activity ke database MySQL.
                           </p>
+                          {canManage && (
+                            <div className="pt-1 flex flex-wrap items-center justify-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOutcomeForm((prev) => ({
+                                    ...prev,
+                                    outcomeNumber: 'Outcome 1',
+                                  }));
+                                  setShowAddOutcome(true);
+                                }}
+                                className="inline-flex items-center gap-1.5 h-[32px] px-3.5 bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[12px] font-semibold rounded transition-colors cursor-pointer"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Tambah Outcome Manual</span>
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="bg-white rounded-md border border-[#E2E8F0] divide-y divide-[#E2E8F0]">
@@ -4309,7 +4481,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
                             return (
                               <div key={outcome.id} className="px-3 py-2 space-y-1">
-                                {/* 1. OUTCOME (1 Baris Ringkas: Nomor Outcome + Nama Outcome) */}
+                                {/* 1. OUTCOME (1 Baris Ringkas: Nomor Outcome + Nama Outcome + CRUD Actions) */}
                                 <div className="flex items-center justify-between gap-2 group py-0.5">
                                   <div className="flex items-center gap-1.5 flex-1 min-w-0">
                                     <button
@@ -4337,6 +4509,45 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                       </span>
                                     </button>
                                   </div>
+
+                                  {canManage && (
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOutputForm((prev) => ({
+                                            ...prev,
+                                            outputNumber: `Output ${ocIdx + 1}.${relatedOutputs.length + 1}`,
+                                          }));
+                                          setShowAddOutput({ outcomeId: outcome.id });
+                                        }}
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-semibold text-[#0F7B6C] bg-[#ECFDF5] hover:bg-[#D1FAE5] border border-[#A7F3D0] transition-colors cursor-pointer"
+                                        title="Tambah Output pada Outcome ini"
+                                      >
+                                        <Plus className="w-2.5 h-2.5" />
+                                        <span>Output</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleOpenOutcomeDetailModal(outcome, ocIdx, true)
+                                        }
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-[#475569] hover:text-[#1D4ED8] hover:bg-[#EFF6FF] border border-transparent hover:border-[#BFDBFE] transition-colors cursor-pointer"
+                                        title="Edit Outcome & Indikator"
+                                      >
+                                        <Edit3 className="w-3 h-3" />
+                                        <span>Edit</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteOutcome(outcome.id)}
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer"
+                                        title="Hapus Outcome"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
                                 </div>
 
                                 {/* 2. OUTPUT (1 Baris Ringkas di bawah Outcome) */}
@@ -4389,12 +4600,73 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                 </span>
                                               </button>
                                             </div>
+
+                                            {canManage && (
+                                              <div className="flex items-center gap-1 shrink-0">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    const todayIso = new Date()
+                                                      .toISOString()
+                                                      .slice(0, 10);
+                                                    setEditingActivity(null);
+                                                    setShowAddActivity({ outputId: output.id });
+                                                    setActivityForm({
+                                                      activityNumber: `Activity ${ocIdx + 1}.${opIdx + 1}.${relatedActivities.length + 1}`,
+                                                      name: '',
+                                                      code: `${ocIdx + 1}.${opIdx + 1}.${relatedActivities.length + 1}`,
+                                                      description: '',
+                                                      anticipatedInputs: '',
+                                                      plannedParticipantsBreakdown: '',
+                                                      startDate:
+                                                        (currentProg.startDate || '').slice(0, 10) ||
+                                                        todayIso,
+                                                      endDate:
+                                                        (currentProg.endDate || '').slice(0, 10) ||
+                                                        todayIso,
+                                                    });
+                                                  }}
+                                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-semibold text-[#1D4ED8] bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] transition-colors cursor-pointer"
+                                                  title="Tambah Activity pada Output ini"
+                                                >
+                                                  <Plus className="w-2.5 h-2.5" />
+                                                  <span>Activity</span>
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleOpenOutputDetailModal(
+                                                      output,
+                                                      ocIdx,
+                                                      opIdx,
+                                                      true
+                                                    )
+                                                  }
+                                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-[#475569] hover:text-[#0F7B6C] hover:bg-[#ECFDF5] border border-transparent hover:border-[#A7F3D0] transition-colors cursor-pointer"
+                                                  title="Edit Output & Indikator"
+                                                >
+                                                  <Edit3 className="w-3 h-3" />
+                                                  <span>Edit</span>
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleDeleteOutput(output.id)}
+                                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer"
+                                                  title="Hapus Output"
+                                                >
+                                                  <Trash2 className="w-3 h-3" />
+                                                </button>
+                                              </div>
+                                            )}
                                           </div>
 
                                           {/* 3. ACTIVITY (1 Baris Ringkas di bawah Output) */}
                                           {isOpExpanded && relatedActivities.length > 0 && (
                                             <div className="pl-4 ml-2 border-l border-[#F1F5F9] space-y-0.5">
                                               {relatedActivities.map((act, actIdx) => {
+                                                const relatedSubActs = subActivities.filter(
+                                                  (sa) => sa.activityId === act.id
+                                                );
                                                 const relatedTors = tors.filter(
                                                   (t) =>
                                                     t.activityId === act.id ||
@@ -4426,7 +4698,6 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                   (activePeriodObj?.label || '').trim();
 
                                                 const resolveTorPeriodCode = (t: Tor): string => {
-                                                  // Prioritaskan kecocokan ID periode di Gambar 2 agar perubahan Kode (misal P1 -> q1) langsung sinkron
                                                   if (t.customPeriodId) {
                                                     const byId = effectivePeriodsForTor.find(
                                                       (p) => p.id === t.customPeriodId
@@ -4435,7 +4706,6 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                       return byId.code.split('—')[0].trim();
                                                     }
                                                   }
-                                                  // Cocokkan berdasarkan rentang tanggal periode di Gambar 2
                                                   if (t.startDate) {
                                                     const byDate = effectivePeriodsForTor.find(
                                                       (p) =>
@@ -4466,7 +4736,6 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                         .split('—')[0]
                                                         .trim();
                                                     }
-                                                    // Jika TOR dibuat pada periode pertama (P1) dan kode periode pertama di Gambar 2 diubah (mis. ke q1)
                                                     if (
                                                       rawCode.toUpperCase() === 'P1' &&
                                                       effectivePeriodsForTor[0]?.code
@@ -4526,6 +4795,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                         <span className="text-[11px] font-bold text-[#475569] shrink-0">
                                                           {displayActivityNumber}
                                                         </span>
+                                                        {act.code && (
+                                                          <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200 shrink-0">
+                                                            {act.code}
+                                                          </span>
+                                                        )}
                                                         <span className="text-[12px] text-[#334155] group-hover/act:text-[#0F172A] truncate">
                                                           {displayActivityTitle}
                                                         </span>
@@ -4537,16 +4811,134 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                           onClick={() =>
                                                             setSelectedActivityDetail(act)
                                                           }
-                                                          className="opacity-0 group-hover/act:opacity-100 focus:opacity-100 text-[10.5px] font-medium text-[#64748B] hover:text-[#1D4ED8] px-1.5 py-0.5 rounded hover:bg-[#F1F5F9] transition-all cursor-pointer"
+                                                          className="text-[10.5px] font-medium text-[#64748B] hover:text-[#1D4ED8] px-1.5 py-0.5 rounded hover:bg-[#F1F5F9] transition-colors cursor-pointer"
                                                         >
                                                           Detail
                                                         </button>
+                                                        {canManage && (
+                                                          <>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => {
+                                                                setEditingSubActivity(null);
+                                                                setSubActivityForm({
+                                                                  code: '',
+                                                                  name: '',
+                                                                  description: '',
+                                                                  picName: '',
+                                                                  status: 'Belum Dimulai',
+                                                                });
+                                                                setShowAddSubActivity({
+                                                                  activityId: act.id,
+                                                                });
+                                                              }}
+                                                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-[#475569] hover:text-[#0F7B6C] hover:bg-[#ECFDF5] border border-[#E2E8F0] transition-colors cursor-pointer"
+                                                              title="Tambah Sub-Activity"
+                                                            >
+                                                              <Plus className="w-2.5 h-2.5" />
+                                                              <span>Sub</span>
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() =>
+                                                                openEditActivityModal(
+                                                                  act,
+                                                                  displayActivityNumber
+                                                                )
+                                                              }
+                                                              className="p-1 rounded text-[#64748B] hover:text-[#1D4ED8] hover:bg-[#EFF6FF] transition-colors cursor-pointer"
+                                                              title="Edit Activity"
+                                                            >
+                                                              <Edit3 className="w-3 h-3" />
+                                                            </button>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() =>
+                                                                handleDeleteActivity(act.id)
+                                                              }
+                                                              className="p-1 rounded text-rose-500 hover:text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer"
+                                                              title="Hapus Activity"
+                                                            >
+                                                              <Trash2 className="w-3 h-3" />
+                                                            </button>
+                                                          </>
+                                                        )}
                                                       </div>
                                                     </div>
 
-                                                    {/* 4. TOR LIST RINGKAS: • Nomor TOR | Judul TOR | Status */}
+                                                    {/* 4. SUB-ACTIVITY & TOR LIST RINGKAS */}
                                                     {isActExpanded && (
-                                                      <div className="pl-5 ml-1.5 border-l border-[#E2E8F0] py-1 space-y-0.5">
+                                                      <div className="pl-5 ml-1.5 border-l border-[#E2E8F0] py-1 space-y-1">
+                                                        {relatedSubActs.length > 0 && (
+                                                          <div className="space-y-0.5 pb-1 border-b border-dashed border-[#E2E8F0]">
+                                                            <div className="text-[10.5px] font-semibold text-[#64748B]">
+                                                              Sub-Activity ({relatedSubActs.length})
+                                                            </div>
+                                                            <ul className="space-y-0.5">
+                                                              {relatedSubActs.map((sa) => (
+                                                                <li
+                                                                  key={sa.id}
+                                                                  className="flex items-center justify-between gap-2 text-[11px] py-0.5 px-1.5 -mx-1.5 rounded hover:bg-[#F8FAFC]"
+                                                                >
+                                                                  <div className="flex items-center gap-1.5 min-w-0">
+                                                                    <span className="text-[#94A3B8] shrink-0">
+                                                                      ◦
+                                                                    </span>
+                                                                    {sa.code && (
+                                                                      <span className="font-mono text-[10px] font-semibold text-[#475569] shrink-0">
+                                                                        {sa.code}
+                                                                      </span>
+                                                                    )}
+                                                                    <span className="truncate text-[#1E293B]">
+                                                                      {sa.name}
+                                                                    </span>
+                                                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 shrink-0">
+                                                                      {sa.status}
+                                                                    </span>
+                                                                  </div>
+                                                                  {canManage && (
+                                                                    <div className="flex items-center gap-1 shrink-0">
+                                                                      <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                          setShowAddSubActivity(null);
+                                                                          setEditingSubActivity(sa);
+                                                                          setSubActivityForm({
+                                                                            code: sa.code || '',
+                                                                            name: sa.name || '',
+                                                                            description:
+                                                                              sa.description || '',
+                                                                            picName: sa.picName || '',
+                                                                            status:
+                                                                              sa.status ||
+                                                                              'Belum Dimulai',
+                                                                          });
+                                                                        }}
+                                                                        className="p-0.5 text-slate-500 hover:text-amber-700 rounded cursor-pointer"
+                                                                        title="Edit Sub-Activity"
+                                                                      >
+                                                                        <Edit3 className="w-2.5 h-2.5" />
+                                                                      </button>
+                                                                      <button
+                                                                        type="button"
+                                                                        onClick={() =>
+                                                                          handleDeleteSubActivity(
+                                                                            sa.id
+                                                                          )
+                                                                        }
+                                                                        className="p-0.5 text-rose-500 hover:text-rose-700 rounded cursor-pointer"
+                                                                        title="Hapus Sub-Activity"
+                                                                      >
+                                                                        <Trash2 className="w-2.5 h-2.5" />
+                                                                      </button>
+                                                                    </div>
+                                                                  )}
+                                                                </li>
+                                                              ))}
+                                                            </ul>
+                                                          </div>
+                                                        )}
+
                                                         <div className="flex items-center justify-between gap-2 text-[11px]">
                                                           <div className="flex flex-wrap items-center gap-1.5">
                                                             <span className="font-semibold text-[#475569]">
@@ -4656,15 +5048,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                                                                   {isDirector && (
                                                                     <button
                                                                       type="button"
-                                                                      onClick={async (e) => {
-                                                                        e.stopPropagation();
-                                                                        try {
-                                                                          await api.deleteTor(tor.id);
-                                                                          onRefresh();
-                                                                        } catch {
-                                                                          // ignore
-                                                                        }
-                                                                      }}
+                                                                      onClick={(e) =>
+                                                                        handleDeleteTorFromHierarchy(
+                                                                          tor,
+                                                                          e
+                                                                        )
+                                                                      }
                                                                       title="Hapus TOR (Khusus Direktur)"
                                                                       className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer"
                                                                     >
@@ -6148,20 +6537,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     onClick={() => {
                       const actToEdit = selectedActivityDetail;
                       setSelectedActivityDetail(null);
-                      setEditingActivity(actToEdit);
-                      setActivityForm({
-                        activityNumber:
-                          actToEdit.activityNumber ||
-                          (actToEdit.name.match(/^(Activity\s*[\d.]+)/i)?.[1] ?? ''),
-                        name: actToEdit.name,
-                        code: '',
-                        description: actToEdit.description || '',
-                        anticipatedInputs: actToEdit.anticipatedInputs || '',
-                        plannedParticipantsBreakdown:
-                          actToEdit.plannedParticipantsBreakdown || '',
-                        startDate: actToEdit.startDate,
-                        endDate: actToEdit.endDate,
-                      });
+                      openEditActivityModal(actToEdit);
                     }}
                     className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded cursor-pointer"
                   >
@@ -6209,18 +6585,34 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Nama Outcome <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Peningkatan Akses Air Bersih dan Sanitasi..."
-                  value={outcomeForm.name}
-                  onChange={(e) => setOutcomeForm({ ...outcomeForm, name: e.target.value })}
-                  className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Nomor Outcome
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Mis. Outcome 1"
+                    value={outcomeForm.outcomeNumber}
+                    onChange={(e) =>
+                      setOutcomeForm({ ...outcomeForm, outcomeNumber: e.target.value })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Nama Outcome <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Masukkan nama atau judul Outcome..."
+                    value={outcomeForm.name}
+                    onChange={(e) => setOutcomeForm({ ...outcomeForm, name: e.target.value })}
+                    className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
               </div>
 
               <div>
@@ -6245,7 +6637,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                     </label>
                     <input
                       type="text"
-                      placeholder="Contoh: % Rumah tangga dengan akses air bersih"
+                      placeholder="Masukkan indikator capaian Outcome..."
                       value={outcomeForm.indicatorName}
                       onChange={(e) =>
                         setOutcomeForm({ ...outcomeForm, indicatorName: e.target.value })
@@ -6261,7 +6653,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                       </label>
                       <input
                         type="text"
-                        placeholder="Contoh: 30%"
+                        placeholder="Mis. TBA / 0"
                         value={outcomeForm.baseline}
                         onChange={(e) =>
                           setOutcomeForm({ ...outcomeForm, baseline: e.target.value })
@@ -6275,7 +6667,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                       </label>
                       <input
                         type="text"
-                        placeholder="Contoh: 85%"
+                        placeholder="Target akhir proyek"
                         value={outcomeForm.target}
                         onChange={(e) =>
                           setOutcomeForm({ ...outcomeForm, target: e.target.value })
@@ -6289,7 +6681,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                       </label>
                       <input
                         type="text"
-                        placeholder="Contoh: % KK"
+                        placeholder="Satuan ukur"
                         value={outcomeForm.unit}
                         onChange={(e) => setOutcomeForm({ ...outcomeForm, unit: e.target.value })}
                         className="w-full p-1.5 bg-white border border-slate-300 rounded"
@@ -6337,18 +6729,34 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             </div>
 
             <div className="p-5 space-y-4 text-xs md:text-sm">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Nama Output <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Pembangunan 15 Titik Sarana Air..."
-                  value={outputForm.name}
-                  onChange={(e) => setOutputForm({ ...outputForm, name: e.target.value })}
-                  className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Nomor Output
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Mis. Output 1.1"
+                    value={outputForm.outputNumber}
+                    onChange={(e) =>
+                      setOutputForm({ ...outputForm, outputNumber: e.target.value })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Nama Output <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Masukkan nama atau judul Output..."
+                    value={outputForm.name}
+                    onChange={(e) => setOutputForm({ ...outputForm, name: e.target.value })}
+                    className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
               </div>
 
               <div>
@@ -6364,11 +6772,11 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Indikator Output (Target Fisik)
+                  Indikator Output (Opsional)
                 </label>
                 <input
                   type="text"
-                  placeholder="Contoh: Jumlah unit sarana terbangun"
+                  placeholder="Masukkan indikator capaian Output..."
                   value={outputForm.indicatorName}
                   onChange={(e) => setOutputForm({ ...outputForm, indicatorName: e.target.value })}
                   className="w-full p-1.5 text-xs border border-slate-300 rounded mb-2"
@@ -6376,21 +6784,21 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                 <div className="grid grid-cols-3 gap-2 text-xs">
                   <input
                     type="text"
-                    placeholder="Baseline: 0"
+                    placeholder="Baseline"
                     value={outputForm.baseline}
                     onChange={(e) => setOutputForm({ ...outputForm, baseline: e.target.value })}
                     className="p-1.5 border border-slate-300 rounded"
                   />
                   <input
                     type="text"
-                    placeholder="Target: 15"
+                    placeholder="Target"
                     value={outputForm.target}
                     onChange={(e) => setOutputForm({ ...outputForm, target: e.target.value })}
                     className="p-1.5 border border-slate-300 rounded"
                   />
                   <input
                     type="text"
-                    placeholder="Satuan: Unit"
+                    placeholder="Satuan"
                     value={outputForm.unit}
                     onChange={(e) => setOutputForm({ ...outputForm, unit: e.target.value })}
                     className="p-1.5 border border-slate-300 rounded"
@@ -6445,19 +6853,35 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
             <div className="p-3 bg-[#F8FAFC] max-h-[78vh] overflow-y-auto">
               <div className="bg-white border border-[#CBD5E1] rounded p-2.5 grid grid-cols-1 gap-1.5">
-                <div>
-                  <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
-                    1. Nomor activity
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Contoh: Activity 1.1"
-                    value={activityForm.activityNumber}
-                    onChange={(e) =>
-                      setActivityForm({ ...activityForm, activityNumber: e.target.value })
-                    }
-                    className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono font-bold text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                      1. Nomor activity
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Mis. Activity 1.1.1"
+                      value={activityForm.activityNumber}
+                      onChange={(e) =>
+                        setActivityForm({ ...activityForm, activityNumber: e.target.value })
+                      }
+                      className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono font-bold text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#334155] mb-0.5">
+                      Kode Activity / Hirarki (Opsional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Mis. 1.1.1"
+                      value={activityForm.code}
+                      onChange={(e) =>
+                        setActivityForm({ ...activityForm, code: e.target.value })
+                      }
+                      className="w-full px-2.5 py-1.5 bg-white border border-[#CBD5E1] rounded text-xs font-mono text-[#0F172A] focus:outline-none focus:border-[#1D4ED8]"
+                    />
+                  </div>
                 </div>
 
                 <div>

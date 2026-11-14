@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'director' | 'hr' | 'finance' | 'program_manager' | 'meal' | 'staff';
+export type UserRole = 'system_admin' | 'admin' | 'director' | 'hr' | 'finance' | 'program_manager' | 'meal' | 'staff';
 
 export interface UserPermissions {
   canManagePrograms: boolean;
@@ -1026,11 +1026,13 @@ export interface ApprovalAccessProfile {
   isFinance: boolean;
   isR: boolean;
   isAdmin: boolean;
+  isSystemAdmin?: boolean;
   canAccessApprovalMenu: boolean;
   canApproveProgramDocs: boolean;
   canVerifyFinanceDocs: boolean;
   canFinalApproveDirector: boolean;
   activeApprovalRoles: (
+    | 'System Administrator'
     | 'A1 – Accountable Program'
     | 'A2 – Accountable Finance'
     | 'Direktur'

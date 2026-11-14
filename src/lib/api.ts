@@ -704,6 +704,13 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(dataset),
     }),
+  deleteFinanceProgramBudget: (key: string) =>
+    request<{ message: string; id: string }>(
+      `/api/finance-workspace/budgets/${encodeURIComponent(key)}`,
+      {
+        method: 'DELETE',
+      }
+    ),
 
   // Database Peserta (Master Data Mandiri Lintas Program)
   getParticipantDatabase: () =>

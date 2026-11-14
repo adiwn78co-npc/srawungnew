@@ -27,6 +27,7 @@ import {
   checkMysqlWritePrivileges,
   deleteMysqlUserRow,
   ensureMysqlSchema,
+  fetchSystemAdminFromMysql,
   fetchUsersFromMysql,
   getMysqlPool,
   importProgramHierarchyToMysql,
@@ -36,6 +37,7 @@ import {
   isProductionHostingerEnvironment,
   loadDatabaseFromMysql,
   type MysqlHierarchyImportBatchParams,
+  type MysqlPoolLike,
   type MysqlPrivilegeSummary,
   resetMysqlPool,
   saveDatabaseToMysql,
@@ -203,11 +205,35 @@ const INITIAL_USERS: User[] = [
   },
 ];
 
-function buildInitialPasswordHash(): string {
-  const defaultPass = process.env.DEFAULT_TESTING_PASSWORD || 'Wijna@2026';
+const DEFAULT_INITIAL_USER_SCRYPT_HASH =
+  'scrypt$ba9df605a7e35320f89561247f82a861$ad8b4942bc71ce1fa283548b3a339832946411e6ed2096f7f52d5e7fb95120b31b7196388f6c833faeca3b68e704758a0d6266eb797d4e19a9fd6b6a0cf45860';
+const DEFAULT_SYSADMIN_BOOTSTRAP_SCRYPT_HASH =
+  'scrypt$3a3328cdf4519f0a5c7e323a59a5ff48$bcee9184fb18bf6ab468182ed8169745a64842e69eac0bb9d4bb4fd559defe3b07f6c3a4a437c66fc6f5d8d94761f6ba9470b7c2e5cca8402338620d832093d3';
+
+function buildPasswordHashFromSecret(secret: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
-  const derivedHex = crypto.scryptSync(defaultPass, salt, 64).toString('hex');
+  const derivedHex = crypto.scryptSync(secret, salt, 64).toString('hex');
   return `scrypt$${salt}$${derivedHex}`;
+}
+
+function buildInitialPasswordHash(): string {
+  const configuredPass = (process.env.DEFAULT_TESTING_PASSWORD || '').trim();
+  if (configuredPass) {
+    return buildPasswordHashFromSecret(configuredPass);
+  }
+  return DEFAULT_INITIAL_USER_SCRYPT_HASH;
+}
+
+function buildSystemAdminDefaultPasswordHash(): string {
+  const configuredSysAdminPass = (
+    process.env.SYSADMIN_DEFAULT_PASSWORD ||
+    process.env.DEFAULT_TESTING_PASSWORD ||
+    ''
+  ).trim();
+  if (configuredSysAdminPass) {
+    return buildPasswordHashFromSecret(configuredSysAdminPass);
+  }
+  return DEFAULT_SYSADMIN_BOOTSTRAP_SCRYPT_HASH;
 }
 
 function cloneInitialUsers(): User[] {
@@ -311,6 +337,7 @@ function normalizeSchema(
   }
 
   const defaultPermsByRole: Record<User['role'], User['permissions']> = {
+    system_admin: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: true, canViewAllTors: true },
     admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
     director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
     hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
@@ -325,6 +352,18 @@ function normalizeSchema(
     parsed.users = isFromMysql ? [] : cloneInitialUsers();
   } else {
     parsed.users = parsed.users.map((u) => {
+      if (u.role === 'system_admin') {
+        return {
+          ...u,
+          permissions: {
+            canManagePrograms: true,
+            canCreateTor: true,
+            canApproveTor: true,
+            canManageUsers: true,
+            canViewAllTors: true,
+          },
+        };
+      }
       const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
       const rawPerms = (u.permissions && typeof u.permissions === 'object' ? u.permissions : {}) as Partial<User['permissions']>;
       const repairedManagePrograms =
@@ -1365,6 +1404,8 @@ class Database {
             }
 
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
+            await this.ensureSystemAdministratorInMysql(pool);
+
             this.lastCommittedJson = JSON.stringify(this.data);
             this.committedVersion = this.mutationVersion;
             this.mysqlStatus = 'ready';
@@ -1391,9 +1432,40 @@ class Database {
 
           // 4. Hanya jika seluruh tabel di database MySQL benar-benar kosong (0 baris di semua tabel)
           console.log('[DB] Database is empty. Initial seed is being created.');
-          const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
+          let baseSeedSource: DatabaseSchema | null = null;
+          try {
+            if (fs.existsSync(DB_FILE)) {
+              const existingJsonText = fs.readFileSync(DB_FILE, 'utf-8');
+              const parsedLocal = JSON.parse(existingJsonText) as DatabaseSchema;
+              if (parsedLocal && typeof parsedLocal === 'object') {
+                const initialHash = buildInitialPasswordHash();
+                if (Array.isArray(parsedLocal.users)) {
+                  parsedLocal.users = parsedLocal.users.map((u) => ({
+                    ...u,
+                    username:
+                      u.username ||
+                      (u.email || '').split('@')[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '') ||
+                      u.id,
+                    accountStatus: u.accountStatus || (u.isActive === false ? 'Nonaktif' : 'Aktif'),
+                    passwordHash: u.passwordHash || initialHash,
+                    passwordUpdatedAt: u.passwordUpdatedAt || u.createdAt,
+                  }));
+                }
+                baseSeedSource = parsedLocal;
+              }
+            }
+          } catch {
+            baseSeedSource = null;
+          }
+
+          const initialSeed = normalizeSchema(
+            baseSeedSource || createDefaultSeed(),
+            { isFromMysql: false }
+          );
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
+          await this.ensureSystemAdministratorInMysql(pool);
+
           this.lastCommittedJson = JSON.stringify(this.data);
           this.committedVersion = this.mutationVersion;
           this.mysqlStatus = 'ready';
@@ -1424,6 +1496,120 @@ class Database {
     } finally {
       this.isInitializing = false;
     }
+  }
+
+  /**
+   * Memastikan tepat satu akun System Administrator (`role = 'system_admin'`) tersedia di MySQL
+   * sebagai recovery & high-level system management access tanpa pernah menghapus, mengubah,
+   * atau menimpa akun Administrator (`role = 'admin'`) maupun akun System Administrator yang sudah ada.
+   */
+  private async ensureSystemAdministratorInMysql(pool: MysqlPoolLike): Promise<void> {
+    const existingSysAdmin = await fetchSystemAdminFromMysql(pool);
+
+    if (existingSysAdmin && existingSysAdmin.id) {
+      // Jika System Administrator sudah ada di MySQL: JANGAN duplikasi dan JANGAN timpa password_hash / data user.
+      // Hanya perbaiki jika password_hash benar-benar kosong/rusak agar akses pemulihan tetap berfungsi.
+      if (!existingSysAdmin.passwordHash || !String(existingSysAdmin.passwordHash).trim()) {
+        const repairedSysAdmin: User = {
+          ...existingSysAdmin,
+          role: 'system_admin',
+          passwordHash: buildSystemAdminDefaultPasswordHash(),
+          passwordUpdatedAt: new Date().toISOString(),
+          permissions: {
+            canManagePrograms: true,
+            canCreateTor: true,
+            canApproveTor: true,
+            canManageUsers: true,
+            canViewAllTors: true,
+          },
+        };
+        await upsertMysqlUserRow(pool, repairedSysAdmin);
+      }
+
+      const refreshedUsers = await fetchUsersFromMysql(pool);
+      if (Array.isArray(refreshedUsers) && refreshedUsers.length > 0) {
+        this.data = normalizeSchema(
+          { ...this.data, users: refreshedUsers as User[] },
+          { isFromMysql: true }
+        );
+      }
+      console.log(
+        `[AUTH-INIT] System Administrator account verified in MySQL (id=${existingSysAdmin.id}, role=system_admin).`
+      );
+      return;
+    }
+
+    // Jika System Administrator belum ada di MySQL: buat 1 akun default dengan hash password kriptografis (scrypt)
+    const nowIso = new Date().toISOString();
+    const currentUsers = await fetchUsersFromMysql(pool);
+    const takenUsernames = new Set(
+      currentUsers.map((u: any) => String(u.username || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const takenEmails = new Set(
+      currentUsers.map((u: any) => String(u.email || '').trim().toLowerCase()).filter(Boolean)
+    );
+
+    const preferredUsername = String(process.env.SYSADMIN_DEFAULT_USERNAME || 'sysadmin')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '') || 'sysadmin';
+    const resolvedUsername = takenUsernames.has(preferredUsername)
+      ? 'system.admin'
+      : preferredUsername;
+
+    const preferredEmail = String(process.env.SYSADMIN_DEFAULT_EMAIL || 'sysadmin@wijna.org')
+      .trim()
+      .toLowerCase();
+    const resolvedEmail = takenEmails.has(preferredEmail)
+      ? 'sysadmin.recovery@wijna.org'
+      : preferredEmail;
+
+    const resolvedName =
+      String(process.env.SYSADMIN_DEFAULT_NAME || 'System Administrator').trim() ||
+      'System Administrator';
+
+    const newSysAdmin: User = {
+      id: 'user-sysadmin',
+      username: resolvedUsername,
+      name: resolvedName,
+      email: resolvedEmail,
+      role: 'system_admin',
+      roleTitle: 'System Administrator',
+      department: 'Pemulihan & Tata Kelola Sistem Utama',
+      isActive: true,
+      accountStatus: 'Aktif',
+      mustChangePassword: false,
+      passwordHash: buildSystemAdminDefaultPasswordHash(),
+      passwordUpdatedAt: nowIso,
+      permissions: {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true,
+      },
+      createdAt: nowIso,
+    };
+
+    // INSERT ke tabel users MySQL
+    await upsertMysqlUserRow(pool, newSysAdmin);
+
+    // SELECT kembali langsung dari MySQL untuk memastikan data benar-benar tersimpan
+    const verifiedSysAdmin = await fetchSystemAdminFromMysql(pool);
+    if (!verifiedSysAdmin || !verifiedSysAdmin.id) {
+      throw new Error(
+        'Failed to verify newly created System Administrator account in MySQL users table.'
+      );
+    }
+
+    const allUsersFromMysql = await fetchUsersFromMysql(pool);
+    this.data = normalizeSchema(
+      { ...this.data, users: allUsersFromMysql as User[] },
+      { isFromMysql: true }
+    );
+    console.log(
+      `[AUTH-INIT] System Administrator account created and stored in MySQL (id=${verifiedSysAdmin.id}, role=system_admin).`
+    );
   }
 
   public getData(): DatabaseSchema {

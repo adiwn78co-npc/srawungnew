@@ -86,7 +86,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   showBackToMobileQuickMode = false,
   onBackToMobileQuickMode,
 }) => {
-  const { currentUser, isAdmin } = useAuth();
+  const { currentUser, isAdmin, isSystemAdmin } = useAuth();
   const { sidebarBrandName, sidebarSubtitle } = useOrganizationSettings();
 
   const [attendanceBundle, setAttendanceBundle] = useState<AttendanceSystemBundle | null>(null);
@@ -223,6 +223,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Finance & Budget',
       icon: Wallet,
       show:
+        isSystemAdmin ||
         currentUser?.role === 'finance' ||
         currentUser?.role === 'director' ||
         currentUser?.role === 'program_manager' ||
@@ -245,7 +246,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'users' as NavTab,
       label: 'System Organisator',
       icon: Users,
-      show: isAdmin,
+      show: isAdmin || isSystemAdmin || Boolean(currentUser?.permissions?.canManageUsers),
     },
     {
       id: 'audit' as NavTab,

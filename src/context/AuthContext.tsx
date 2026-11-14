@@ -21,6 +21,7 @@ interface AuthContextType {
   isMeal: boolean;
   isStaff: boolean;
   isAdmin: boolean;
+  isSystemAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -172,6 +173,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const isMeal = currentUser?.role === 'meal';
   const isStaff = currentUser?.role === 'staff';
   const isAdmin = currentUser?.role === 'admin';
+  const isSystemAdmin = currentUser?.role === 'system_admin';
 
   return (
     <AuthContext.Provider
@@ -192,6 +194,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         isMeal,
         isStaff,
         isAdmin,
+        isSystemAdmin,
       }}
     >
       {children}

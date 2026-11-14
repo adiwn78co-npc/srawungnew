@@ -1,3 +1,4 @@
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -43,11 +44,289 @@ export interface ResolvedMysqlConfig {
   password: string;
   database: string;
   socketPath?: string;
+  isLocalMariaDbBootstrap?: boolean;
 }
 
 let cachedPool: MysqlPoolLike | null = null;
 let cachedPoolHostOverride: string | null = null;
 let loggedCloudRunLoopbackNotice = false;
+let localMariaDbReadyPromise: Promise<void> | null = null;
+
+const LOCAL_MARIADB_BIN = '/usr/sbin/mariadbd';
+const LOCAL_MYSQL_CLI = '/usr/bin/mysql';
+const LOCAL_MYSQLADMIN_CLI = '/usr/bin/mysqladmin';
+const LOCAL_MARIADB_SOCKET = '/run/mysqld/mysqld.sock';
+const LOCAL_MARIADB_DB = 'meal_connect';
+const LOCAL_MARIADB_USER = 'meal_app';
+
+const LOCAL_MARIADB_INSTALL_DB = '/usr/bin/mariadb-install-db';
+const LOCAL_MYSQL_INSTALL_DB = '/usr/bin/mysql_install_db';
+const LOCAL_APT_GET = '/usr/bin/apt-get';
+
+function getPersistentLocalMariaDbDataDir(): string {
+  return path.resolve(process.cwd(), 'data', 'mysql_datadir');
+}
+
+function canAutoProvisionPreviewMariaDb(): boolean {
+  try {
+    return (
+      isCloudRunEnvironment() &&
+      typeof process.getuid === 'function' &&
+      process.getuid() === 0 &&
+      fs.existsSync(LOCAL_APT_GET)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasLocalMariaDbDaemonAvailable(): boolean {
+  if (process.env.DISABLE_LOCAL_MARIADB === 'true') {
+    return false;
+  }
+  try {
+    if (fs.existsSync(LOCAL_MARIADB_BIN) && fs.existsSync(LOCAL_MYSQL_CLI)) {
+      return true;
+    }
+    return canAutoProvisionPreviewMariaDb();
+  } catch {
+    return false;
+  }
+}
+
+async function ensureLocalMariaDbReady(): Promise<void> {
+  if (!hasLocalMariaDbDaemonAvailable()) {
+    return;
+  }
+  if (localMariaDbReadyPromise) {
+    return localMariaDbReadyPromise;
+  }
+
+  const cleanCliEnv = {
+    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    HOME: '/root',
+    DEBIAN_FRONTEND: 'noninteractive',
+  };
+
+  localMariaDbReadyPromise = (async () => {
+    // 1. Jika container preview baru bangun dari sleep dan binary mariadbd belum terpasang, pasang otomatis
+    if (
+      (!fs.existsSync(LOCAL_MARIADB_BIN) || !fs.existsSync(LOCAL_MYSQL_CLI)) &&
+      canAutoProvisionPreviewMariaDb()
+    ) {
+      for (let waitIdx = 0; waitIdx < 20; waitIdx++) {
+        if (fs.existsSync(LOCAL_MARIADB_BIN) && fs.existsSync(LOCAL_MYSQL_CLI)) {
+          break;
+        }
+        try {
+          execFileSync(LOCAL_APT_GET, ['update', '-qq'], {
+            env: cleanCliEnv,
+            stdio: 'ignore',
+            timeout: 45_000,
+          });
+          execFileSync(
+            LOCAL_APT_GET,
+            ['install', '-y', '-qq', 'mariadb-server', 'mariadb-client'],
+            {
+              env: cleanCliEnv,
+              stdio: 'ignore',
+              timeout: 90_000,
+            }
+          );
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+    }
+
+    if (!fs.existsSync(LOCAL_MARIADB_BIN) || !fs.existsSync(LOCAL_MYSQL_CLI)) {
+      localMariaDbReadyPromise = null;
+      throw new Error('MariaDB server binary is unavailable in this environment.');
+    }
+
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        [
+          '--protocol=socket',
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          '-u',
+          LOCAL_MARIADB_USER,
+          LOCAL_MARIADB_DB,
+          '-e',
+          'SELECT 1;',
+        ],
+        { env: cleanCliEnv, stdio: 'ignore', timeout: 3000 }
+      );
+      return;
+    } catch {
+      // Lanjutkan proses bootstrap service MariaDB lokal apabila socket/user belum aktif
+    }
+
+    const persistentDataDir = getPersistentLocalMariaDbDataDir();
+    try {
+      fs.mkdirSync(persistentDataDir, { recursive: true });
+      execFileSync('/bin/mkdir', ['-p', '/run/mysqld'], {
+        env: cleanCliEnv,
+        stdio: 'ignore',
+        timeout: 3000,
+      });
+      execFileSync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
+        env: cleanCliEnv,
+        stdio: 'ignore',
+        timeout: 5000,
+      });
+    } catch {
+      // Abaikan jika direktori sudah siap
+    }
+
+    // Hentikan instance default /var/lib/mysql dari apt postinst jika sedang berjalan agar port 3306 memakai persistentDataDir
+    const markerFile = path.join(persistentDataDir, '.meal_connect_datadir_ready');
+    let needRestartForPersistentDir = false;
+    if (!fs.existsSync(path.join(persistentDataDir, 'mysql'))) {
+      const installDbBin = fs.existsSync(LOCAL_MARIADB_INSTALL_DB)
+        ? LOCAL_MARIADB_INSTALL_DB
+        : LOCAL_MYSQL_INSTALL_DB;
+      execFileSync(
+        installDbBin,
+        [
+          '--user=mysql',
+          `--datadir=${persistentDataDir}`,
+          '--auth-root-authentication-method=normal',
+        ],
+        { env: cleanCliEnv, stdio: 'ignore', timeout: 30_000 }
+      );
+      fs.writeFileSync(markerFile, new Date().toISOString(), 'utf-8');
+      needRestartForPersistentDir = true;
+    }
+
+    // Cek apakah daemon yang aktif saat ini sudah menggunakan persistentDataDir
+    try {
+      const activeDataDirOut = execFileSync(
+        LOCAL_MYSQL_CLI,
+        [
+          '--protocol=socket',
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          '-u',
+          'root',
+          '-N',
+          '-s',
+          '-e',
+          'SELECT @@datadir;',
+        ],
+        { env: cleanCliEnv, encoding: 'utf-8', timeout: 2500 }
+      ).trim();
+      const normalizedActive = activeDataDirOut.replace(/\/+$/, '');
+      const normalizedTarget = persistentDataDir.replace(/\/+$/, '');
+      if (normalizedActive && normalizedActive !== normalizedTarget) {
+        needRestartForPersistentDir = true;
+      }
+    } catch {
+      // belum berjalan
+    }
+
+    if (needRestartForPersistentDir) {
+      try {
+        execFileSync(
+          LOCAL_MYSQLADMIN_CLI,
+          ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', 'shutdown'],
+          { env: cleanCliEnv, stdio: 'ignore', timeout: 5000 }
+        );
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      } catch {
+        // abaikan jika daemon belum berjalan
+      }
+    }
+
+    let sqlReady = false;
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', '-e', 'SELECT 1;'],
+        { env: cleanCliEnv, stdio: 'ignore', timeout: 2500 }
+      );
+      sqlReady = true;
+    } catch {
+      sqlReady = false;
+    }
+
+    if (!sqlReady) {
+      execFileSync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
+        env: cleanCliEnv,
+        stdio: 'ignore',
+        timeout: 5000,
+      });
+
+      const child = spawn(
+        LOCAL_MARIADB_BIN,
+        [
+          '--user=mysql',
+          `--datadir=${persistentDataDir}`,
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          '--pid-file=/run/mysqld/mysqld.pid',
+          '--bind-address=127.0.0.1',
+          '--port=3306',
+        ],
+        {
+          detached: true,
+          env: cleanCliEnv,
+          stdio: 'ignore',
+        }
+      );
+      child.unref();
+
+      for (let i = 0; i < 45; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        try {
+          execFileSync(
+            LOCAL_MYSQL_CLI,
+            [
+              '--protocol=socket',
+              `--socket=${LOCAL_MARIADB_SOCKET}`,
+              '-u',
+              'root',
+              '-e',
+              'SELECT 1;',
+            ],
+            { env: cleanCliEnv, stdio: 'ignore', timeout: 2500 }
+          );
+          sqlReady = true;
+          break;
+        } catch {
+          // tunggu hingga daemon MariaDB siap menerima query SQL penuh
+        }
+      }
+    }
+
+    if (!sqlReady) {
+      localMariaDbReadyPromise = null;
+      throw new Error('Local MariaDB service failed to accept SQL connections within timeout.');
+    }
+
+    const bootstrapSql = [
+      `CREATE DATABASE IF NOT EXISTS \`${LOCAL_MARIADB_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+      `CREATE USER IF NOT EXISTS '${LOCAL_MARIADB_USER}'@'localhost';`,
+      `CREATE USER IF NOT EXISTS '${LOCAL_MARIADB_USER}'@'127.0.0.1';`,
+      `GRANT ALL PRIVILEGES ON \`${LOCAL_MARIADB_DB}\`.* TO '${LOCAL_MARIADB_USER}'@'localhost';`,
+      `GRANT ALL PRIVILEGES ON \`${LOCAL_MARIADB_DB}\`.* TO '${LOCAL_MARIADB_USER}'@'127.0.0.1';`,
+      'FLUSH PRIVILEGES;',
+    ].join(' ');
+
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', '-e', bootstrapSql],
+        { env: cleanCliEnv, stdio: 'ignore', timeout: 6000 }
+      );
+    } catch (err) {
+      localMariaDbReadyPromise = null;
+      throw err;
+    }
+  })();
+
+  return localMariaDbReadyPromise;
+}
 
 export function isCloudRunEnvironment(): boolean {
   return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
@@ -166,6 +445,23 @@ export function resolveMysqlConfig(): ResolvedMysqlConfig {
     process.env.MYSQL_SOCKET_PATH || process.env.DB_SOCKET_PATH || ''
   ).trim() || undefined;
 
+  const externalLoopbackInCloudRun =
+    isCloudRunEnvironment() &&
+    Boolean(host) &&
+    isLoopbackMysqlHost(host);
+
+  if ((!host || !user || !database || externalLoopbackInCloudRun) && hasLocalMariaDbDaemonAvailable()) {
+    return {
+      host: '127.0.0.1',
+      port: 3306,
+      user: LOCAL_MARIADB_USER,
+      password: '',
+      database: LOCAL_MARIADB_DB,
+      socketPath: fs.existsSync(LOCAL_MARIADB_SOCKET) ? LOCAL_MARIADB_SOCKET : undefined,
+      isLocalMariaDbBootstrap: true,
+    };
+  }
+
   return {
     host,
     port,
@@ -173,6 +469,7 @@ export function resolveMysqlConfig(): ResolvedMysqlConfig {
     password,
     database,
     socketPath,
+    isLocalMariaDbBootstrap: false,
   };
 }
 
@@ -208,9 +505,11 @@ export function isMysqlConfigured(): boolean {
     return false;
   }
 
-  // Di container Cloud Run / AI Studio Preview tidak terdapat service MySQL lokal pada 127.0.0.1:3306.
-  // Jika host bernilai localhost/127.0.0.1 pada Cloud Run Preview, gunakan penyimpanan preview,
-  // sedangkan pada server Hostinger produksi (tanpa K_SERVICE) koneksi MySQL localhost tetap berjalan penuh.
+  if (cfg.isLocalMariaDbBootstrap) {
+    return true;
+  }
+
+  // Di container Cloud Run / AI Studio Preview tanpa daemon MySQL lokal dan tanpa MYSQL_REMOTE_HOST:
   if (
     isCloudRunEnvironment() &&
     isLoopbackMysqlHost(cfg.host) &&
@@ -230,6 +529,9 @@ export function isMysqlConfigured(): boolean {
 
 export function isMysqlLoopbackInCloudRun(): boolean {
   const cfg = resolveMysqlConfig();
+  if (cfg.isLocalMariaDbBootstrap) {
+    return false;
+  }
   return Boolean(
     isCloudRunEnvironment() &&
       cfg.host &&
@@ -260,6 +562,10 @@ export async function getMysqlPool(hostOverride?: string): Promise<MysqlPoolLike
   if (!isMysqlConfigured()) {
     return null;
   }
+  const initialCfg = resolveMysqlConfig();
+  if (initialCfg.isLocalMariaDbBootstrap) {
+    await ensureLocalMariaDbReady();
+  }
   if (cachedPool && (!hostOverride || cachedPoolHostOverride === hostOverride)) {
     return cachedPool;
   }
@@ -285,6 +591,7 @@ export async function getMysqlPool(hostOverride?: string): Promise<MysqlPoolLike
     connectionLimit: 10,
     queueLimit: 0,
     charset: 'utf8mb4',
+    dateStrings: true,
   };
   if (cfg.socketPath) {
     poolConfig.socketPath = cfg.socketPath;
@@ -333,6 +640,11 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   column: string;
   definition: string;
 }> = [
+  { table: 'users', column: 'username', definition: 'VARCHAR(128) NULL' },
+  { table: 'users', column: 'password_hash', definition: 'VARCHAR(255) NULL' },
+  { table: 'users', column: 'account_status', definition: 'VARCHAR(64) NULL' },
+  { table: 'users', column: 'permissions_json', definition: 'LONGTEXT NULL' },
+  { table: 'users', column: 'last_login_at', definition: 'VARCHAR(64) NULL' },
   { table: 'users', column: 'must_change_password', definition: 'TINYINT(1) NOT NULL DEFAULT 0' },
   { table: 'users', column: 'password_updated_at', definition: 'VARCHAR(64) NULL' },
   { table: 'users', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
@@ -363,6 +675,8 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'activities', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
   { table: 'activities', column: 'start_date', definition: 'VARCHAR(32) NULL' },
   { table: 'activities', column: 'end_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'activities', column: 'anticipated_inputs', definition: 'TEXT NULL' },
+  { table: 'activities', column: 'planned_participants_breakdown', definition: 'TEXT NULL' },
   { table: 'activities', column: 'status', definition: 'VARCHAR(64) NULL' },
   { table: 'activities', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'activities', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
@@ -379,6 +693,7 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'tors', column: 'sub_activity_id', definition: 'VARCHAR(128) NULL' },
   { table: 'tors', column: 'activity_status', definition: 'VARCHAR(64) NULL' },
   { table: 'tors', column: 'budget_approved', definition: 'DECIMAL(18, 2) NULL' },
+  { table: 'program_budgets', column: 'budget_approval_status', definition: 'VARCHAR(64) NULL' },
   { table: 'meeting_minutes', column: 'document_number', definition: 'VARCHAR(128) NULL' },
   { table: 'meeting_minutes', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
   { table: 'participants', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
@@ -464,6 +779,7 @@ function safeJsonParse<T>(raw: any, fallback: T): T {
 }
 
 const DEFAULT_PERMS_BY_ROLE: Record<string, any> = {
+  system_admin: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: true, canViewAllTors: true },
   admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
   director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
   hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
@@ -475,7 +791,16 @@ const DEFAULT_PERMS_BY_ROLE: Record<string, any> = {
 
 function normalizeMysqlUserRole(rawRole: any): string {
   const clean = String(rawRole || '').trim().toLowerCase();
-  if (clean === 'admin' || clean === 'administrator' || clean === 'system administrator' || clean === 'superadmin') {
+  if (
+    clean === 'system_admin' ||
+    clean === 'system administrator' ||
+    clean === 'sysadmin' ||
+    clean === 'superadmin' ||
+    clean === 'super_admin'
+  ) {
+    return 'system_admin';
+  }
+  if (clean === 'admin' || clean === 'administrator') {
     return 'admin';
   }
   if (clean === 'director' || clean === 'direktur' || clean === 'executive director') {
@@ -530,21 +855,30 @@ export function hydrateMysqlUserRow(r: any): any {
       : colPerms && typeof colPerms === 'object'
       ? colPerms
       : {};
-  const mergedPerms = {
-    canManagePrograms:
-      colPerms?.canManagePrograms ?? rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
-    canCreateTor: colPerms?.canCreateTor ?? rawPerms.canCreateTor ?? basePerms.canCreateTor,
-    canApproveTor:
-      resolvedRole === 'admin'
-        ? false
-        : colPerms?.canApproveTor ?? rawPerms.canApproveTor ?? basePerms.canApproveTor,
-    canManageUsers:
-      resolvedRole === 'admin'
-        ? true
-        : colPerms?.canManageUsers ?? rawPerms.canManageUsers ?? basePerms.canManageUsers,
-    canViewAllTors:
-      colPerms?.canViewAllTors ?? rawPerms.canViewAllTors ?? basePerms.canViewAllTors,
-  };
+  const mergedPerms =
+    resolvedRole === 'system_admin'
+      ? {
+          canManagePrograms: true,
+          canCreateTor: true,
+          canApproveTor: true,
+          canManageUsers: true,
+          canViewAllTors: true,
+        }
+      : {
+          canManagePrograms:
+            colPerms?.canManagePrograms ?? rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+          canCreateTor: colPerms?.canCreateTor ?? rawPerms.canCreateTor ?? basePerms.canCreateTor,
+          canApproveTor:
+            resolvedRole === 'admin'
+              ? false
+              : colPerms?.canApproveTor ?? rawPerms.canApproveTor ?? basePerms.canApproveTor,
+          canManageUsers:
+            resolvedRole === 'admin'
+              ? true
+              : colPerms?.canManageUsers ?? rawPerms.canManageUsers ?? basePerms.canManageUsers,
+          canViewAllTors:
+            colPerms?.canViewAllTors ?? rawPerms.canViewAllTors ?? basePerms.canViewAllTors,
+        };
 
   const sqlColPasswordHash =
     (typeof r?.password_hash === 'string' && r.password_hash.trim()) ||
@@ -640,6 +974,19 @@ export async function fetchUsersFromMysql(pool: MysqlPoolLike): Promise<any[]> {
     }
     throw err;
   }
+}
+
+/**
+ * Mencari akun System Administrator (`role = 'system_admin'`) langsung dari tabel `users` MySQL.
+ */
+export async function fetchSystemAdminFromMysql(pool: MysqlPoolLike): Promise<any | null> {
+  const [rows]: any = await pool.query(
+    "SELECT * FROM `users` WHERE `role` = 'system_admin' OR `id` = 'user-sysadmin' ORDER BY `created_at` ASC LIMIT 1"
+  );
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+  return hydrateMysqlUserRow(rows[0]);
 }
 
 async function safeSelectTableRows(
@@ -754,6 +1101,27 @@ export async function loadDatabaseFromMysql(
       .filter((item: any) => Boolean(item && item.id));
   };
 
+  const cleanHydratedDateOnly = (val: unknown): string => {
+    if (!val) return '';
+    if (val instanceof Date) {
+      return Number.isNaN(val.getTime()) ? '' : val.toISOString().slice(0, 10);
+    }
+    const str = String(val).trim();
+    if (!str || str === '-' || str.startsWith('0000-00-00')) return '';
+    const isoMatch = str.match(/^(\d{4}-\d{2}-\d{2})/);
+    return isoMatch ? isoMatch[1] : str;
+  };
+
+  const cleanHydratedTimestamp = (val: unknown): string | undefined => {
+    if (!val) return undefined;
+    if (val instanceof Date) {
+      return Number.isNaN(val.getTime()) ? undefined : val.toISOString();
+    }
+    const str = String(val).trim();
+    if (!str || str.startsWith('0000-00-00')) return undefined;
+    return str;
+  };
+
   const programs = parseAndHydrateRows<any>(programRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ''),
@@ -765,8 +1133,8 @@ export async function loadDatabaseFromMysql(
     picName: r?.pic_name || raw.picName || '',
     description: r?.description ?? raw.description ?? '',
     donor: r?.donor ?? raw.donor ?? '',
-    startDate: r?.start_date || raw.startDate || '',
-    endDate: r?.end_date || raw.endDate || '',
+    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
     totalBudget:
       r?.total_budget !== undefined && r?.total_budget !== null
         ? Number(r.total_budget)
@@ -779,8 +1147,11 @@ export async function loadDatabaseFromMysql(
         : Number(raw.totalBudget ?? 0),
     currency: r?.currency || raw.currency || 'IDR',
     status: r?.status || raw.status || 'Aktif',
-    createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
-    updatedAt: r?.updated_at || raw.updatedAt || undefined,
+    createdAt:
+      cleanHydratedTimestamp(r?.created_at) ||
+      cleanHydratedTimestamp(raw.createdAt) ||
+      new Date().toISOString(),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
   })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const stripInternalCodePrefix = (val: unknown): string => {
@@ -788,56 +1159,66 @@ export async function loadDatabaseFromMysql(
     return s.includes('::') ? s.split('::').slice(1).join('::') : s;
   };
 
-  const outcomes = parseAndHydrateRows<any>(outcomeRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    programId: r?.program_id || raw.programId || '',
-    outcomeNumber:
-      raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || undefined,
-    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || '',
-    name: r?.name || raw.name || raw.title || '',
-    title: raw.title || r?.name || raw.name || '',
-    description: r?.description ?? raw.description ?? '',
-    indicators: Array.isArray(raw.indicators)
+  const outcomes = parseAndHydrateRows<any>(outcomeRows, (r, raw) => {
+    const colInd = safeJsonParse<any[] | null>(r?.indicators_json ?? r?.indicators, null);
+    const resolvedIndicators = Array.isArray(raw.indicators)
       ? raw.indicators
-      : (() => {
-          const parsedInd = safeJsonParse(r?.indicators_json ?? r?.indicators, []);
-          return Array.isArray(parsedInd) ? parsedInd : [];
-        })(),
-    status: r?.status || raw.status || 'Belum Dimulai',
-    budgetAllocated:
-      r?.budget_allocated !== undefined && r?.budget_allocated !== null
-        ? Number(r.budget_allocated)
-        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || undefined,
-    updatedAt: r?.updated_at || raw.updatedAt || undefined,
-  }));
+      : Array.isArray(colInd)
+      ? colInd
+      : [];
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      programId: r?.program_id || raw.programId || '',
+      outcomeNumber:
+        raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || undefined,
+      code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || '',
+      name: r?.name || raw.name || raw.title || '',
+      title: raw.title || r?.name || raw.name || '',
+      description: r?.description ?? raw.description ?? '',
+      picId: r?.pic_id || raw.picId || '',
+      picName: r?.pic_name || raw.picName || '',
+      indicators: resolvedIndicators,
+      status: r?.status || raw.status || 'Belum Dimulai',
+      budgetAllocated:
+        r?.budget_allocated !== undefined && r?.budget_allocated !== null
+          ? Number(r.budget_allocated)
+          : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
+    };
+  });
 
-  const outputs = parseAndHydrateRows<any>(outputRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    programId: r?.program_id || raw.programId || '',
-    outcomeId: r?.outcome_id || raw.outcomeId || '',
-    outputNumber:
-      raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || undefined,
-    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || '',
-    name: r?.name || raw.name || raw.title || '',
-    title: raw.title || r?.name || raw.name || '',
-    description: r?.description ?? raw.description ?? '',
-    indicators: Array.isArray(raw.indicators)
+  const outputs = parseAndHydrateRows<any>(outputRows, (r, raw) => {
+    const colInd = safeJsonParse<any[] | null>(r?.indicators_json ?? r?.indicators, null);
+    const resolvedIndicators = Array.isArray(raw.indicators)
       ? raw.indicators
-      : (() => {
-          const parsedInd = safeJsonParse(r?.indicators_json ?? r?.indicators, []);
-          return Array.isArray(parsedInd) ? parsedInd : [];
-        })(),
-    status: r?.status || raw.status || 'Belum Dimulai',
-    budgetAllocated:
-      r?.budget_allocated !== undefined && r?.budget_allocated !== null
-        ? Number(r.budget_allocated)
-        : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || undefined,
-    updatedAt: r?.updated_at || raw.updatedAt || undefined,
-  }));
+      : Array.isArray(colInd)
+      ? colInd
+      : [];
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ''),
+      programId: r?.program_id || raw.programId || '',
+      outcomeId: r?.outcome_id || raw.outcomeId || '',
+      outputNumber:
+        raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || undefined,
+      code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || '',
+      name: r?.name || raw.name || raw.title || '',
+      title: raw.title || r?.name || raw.name || '',
+      description: r?.description ?? raw.description ?? '',
+      picId: r?.pic_id || raw.picId || '',
+      picName: r?.pic_name || raw.picName || '',
+      indicators: resolvedIndicators,
+      status: r?.status || raw.status || 'Belum Dimulai',
+      budgetAllocated:
+        r?.budget_allocated !== undefined && r?.budget_allocated !== null
+          ? Number(r.budget_allocated)
+          : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
+    };
+  });
 
   const activities = parseAndHydrateRows<any>(activityRows, (r, raw) => ({
     ...raw,
@@ -850,15 +1231,20 @@ export async function loadDatabaseFromMysql(
     name: r?.name || raw.name || raw.title || '',
     title: raw.title || r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
-    startDate: r?.start_date || raw.startDate || '',
-    endDate: r?.end_date || raw.endDate || '',
+    anticipatedInputs: r?.anticipated_inputs ?? raw.anticipatedInputs ?? '',
+    plannedParticipantsBreakdown:
+      r?.planned_participants_breakdown ?? raw.plannedParticipantsBreakdown ?? '',
+    picId: r?.pic_id || raw.picId || '',
+    picName: r?.pic_name || raw.picName || '',
+    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || undefined,
-    updatedAt: r?.updated_at || raw.updatedAt || undefined,
+    createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
   }));
 
   const subActivities = parseAndHydrateRows<any>(subActivityRows, (r, raw) => ({
@@ -872,13 +1258,15 @@ export async function loadDatabaseFromMysql(
     name: r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
     picName: r?.pic_name || raw.picName || '',
+    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
         ? Number(r.budget_allocated)
         : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || undefined,
-    updatedAt: r?.updated_at || raw.updatedAt || undefined,
+    createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
   }));
 
   const tors = parseAndHydrateRows<any>(torRows, (r, raw) => {
@@ -1333,11 +1721,12 @@ export async function loadDatabaseFromMysql(
   const programBudgets: Record<string, any> =
     progBudgetRows.length > 0
       ? (() => {
-          const map: Record<string, any> = { ...(kvMap['programBudgets'] || {}) };
+          const map: Record<string, any> = {};
           for (const r of progBudgetRows) {
             const raw = safeJsonParse<Record<string, any>>(r?.raw_json, {});
             const key = String(r?.id || raw.id || '');
             if (!key) continue;
+            const isMasterListKey = key === '__MASTER_BUDGET_ITEMS__';
             map[key] = {
               ...raw,
               id: key,
@@ -1346,7 +1735,21 @@ export async function loadDatabaseFromMysql(
               ...(r?.fiscal_year !== null && r?.fiscal_year !== undefined
                 ? { fiscalYear: Number(r.fiscal_year) }
                 : {}),
-              updatedAt: r?.updated_at || raw.updatedAt,
+              ...(!isMasterListKey &&
+              r?.total_program_budget !== null &&
+              r?.total_program_budget !== undefined
+                ? { totalProgramBudget: Number(r.total_program_budget) }
+                : {}),
+              ...(!isMasterListKey &&
+              r?.annual_approved_budget !== null &&
+              r?.annual_approved_budget !== undefined
+                ? { annualApprovedBudget: Number(r.annual_approved_budget) }
+                : {}),
+              ...(r?.budget_approval_status
+                ? { budgetApprovalStatus: r.budget_approval_status }
+                : {}),
+              ...(r?.updated_by ? { updatedBy: r.updated_by } : {}),
+              updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt,
             };
           }
           return map;
@@ -1862,6 +2265,12 @@ function buildUserCandidateRow(u: any, nowIso: string): Record<string, any> {
   const effectiveUsername =
     u.username || deriveUsernameFallback(u.email || '', u.name || '', String(u.id || ''));
   const permsJson = JSON.stringify(u.permissions || {});
+  const {
+    passwordHash: _omitPasswordHash,
+    password_hash: _omitSnakePasswordHash,
+    password: _omitPassword,
+    ...safeRawUser
+  } = u && typeof u === 'object' ? u : {};
   return {
     id: String(u.id).slice(0, 128),
     username: truncStr(effectiveUsername, 128),
@@ -1881,7 +2290,7 @@ function buildUserCandidateRow(u: any, nowIso: string): Record<string, any> {
     last_login_at: u.lastLoginAt || null,
     created_at: u.createdAt || nowIso,
     updated_at: nowIso,
-    raw_json: JSON.stringify(u),
+    raw_json: JSON.stringify(safeRawUser),
   };
 }
 
@@ -1988,6 +2397,8 @@ function buildActivityCandidateRow(
     name: effectiveName,
     title: truncStr(ac.title || ac.name, 500) || effectiveName,
     description: ac.description || null,
+    anticipated_inputs: ac.anticipatedInputs || null,
+    planned_participants_breakdown: ac.plannedParticipantsBreakdown || null,
     pic_id: validFkOrNull(ac.picId, rels?.userIds, 128),
     pic_name: truncStr(ac.picName, 255),
     start_date: truncStr(ac.startDate, 32),
@@ -2277,6 +2688,7 @@ function buildProgramBudgetCandidateRow(
     fiscal_year: safeFiniteNumber(bgt.fiscalYear, null),
     total_program_budget: safeFiniteNumber(bgt.totalProgramBudget, 0),
     annual_approved_budget: safeFiniteNumber(bgt.annualApprovedBudget, 0),
+    budget_approval_status: truncStr(bgt.budgetApprovalStatus, 64),
     updated_by: truncStr(bgt.updatedBy, 255),
     updated_at: bgt.updatedAt || nowIso,
     raw_json: JSON.stringify(bgt),
@@ -2730,13 +3142,49 @@ export async function saveDiffToMysql(
       activeTable = op.spec.tableName;
       activeOperation = 'DELETE';
       for (const delId of op.toDeleteIds) {
+        const safeDelId = delId.slice(0, 128);
         if (op.spec.tableName === 'tors') {
           try {
             await conn.query('UPDATE `audit_logs` SET `tor_id` = NULL WHERE `tor_id` = ?', [
-              delId.slice(0, 128),
+              safeDelId,
             ]);
           } catch {
             // abaikan jika kolom tor_id tidak ada
+          }
+        } else if (op.spec.tableName === 'activities') {
+          try {
+            await conn.query(
+              'DELETE FROM `activity_monitoring_records` WHERE `activity_id` = ?',
+              [safeDelId]
+            );
+          } catch {
+            // abaikan jika tabel tidak ada
+          }
+        } else if (op.spec.tableName === 'outputs') {
+          try {
+            await conn.query('DELETE FROM `output_raci_records` WHERE `output_id` = ?', [
+              safeDelId,
+            ]);
+          } catch {
+            // abaikan jika tabel tidak ada
+          }
+        } else if (op.spec.tableName === 'programs') {
+          try {
+            await conn.query('DELETE FROM `program_budgets` WHERE `program_id` = ?', [
+              safeDelId,
+            ]);
+            await conn.query('DELETE FROM `output_raci_records` WHERE `program_id` = ?', [
+              safeDelId,
+            ]);
+            await conn.query(
+              'DELETE FROM `activity_monitoring_records` WHERE `program_id` = ?',
+              [safeDelId]
+            );
+            await conn.query('DELETE FROM `approval_hub_items` WHERE `program_id` = ?', [
+              safeDelId,
+            ]);
+          } catch {
+            // abaikan jika kolom/tabel tidak ada
           }
         }
         const [delRes]: any = await conn.query(

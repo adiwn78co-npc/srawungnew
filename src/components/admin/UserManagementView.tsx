@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 
 const ROLE_LABELS: Record<UserRole, string> = {
+  system_admin: 'System Administrator (Recovery & Full Access)',
   admin: 'System Organisator (Administrator)',
   director: 'Executive Director',
   hr: 'HR & People Operations',
@@ -40,6 +41,7 @@ const ROLE_LABELS: Record<UserRole, string> = {
 };
 
 const ROLE_BADGE_STYLES: Record<UserRole, string> = {
+  system_admin: 'bg-rose-50 text-rose-900 border-rose-300',
   admin: 'bg-slate-100 text-slate-800 border-slate-300',
   director: 'bg-purple-50 text-purple-800 border-purple-200',
   hr: 'bg-teal-50 text-teal-800 border-teal-200',
@@ -50,6 +52,13 @@ const ROLE_BADGE_STYLES: Record<UserRole, string> = {
 };
 
 const DEFAULT_PERMISSIONS_BY_ROLE: Record<UserRole, User['permissions']> = {
+  system_admin: {
+    canManagePrograms: true,
+    canCreateTor: true,
+    canApproveTor: true,
+    canManageUsers: true,
+    canViewAllTors: true,
+  },
   admin: {
     canManagePrograms: false,
     canCreateTor: false,
@@ -114,6 +123,15 @@ function resolveSafePermissions(
     canManageUsers: rawPermissions?.canManageUsers ?? base.canManageUsers,
     canViewAllTors: rawPermissions?.canViewAllTors ?? base.canViewAllTors,
   };
+  if (role === 'system_admin') {
+    return {
+      canManagePrograms: true,
+      canCreateTor: true,
+      canApproveTor: true,
+      canManageUsers: true,
+      canViewAllTors: true,
+    };
+  }
   if (role === 'admin') {
     merged.canApproveTor = false;
     merged.canManageUsers = true;
@@ -126,7 +144,7 @@ interface UserManagementViewProps {
 }
 
 export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefresh }) => {
-  const { currentUser, refreshUsers } = useAuth();
+  const { currentUser, isSystemAdmin, refreshUsers } = useAuth();
   const { settings: orgSettings, updateSettings: updateOrgSettings } = useOrganizationSettings();
   const [orgNameInput, setOrgNameInput] = useState(orgSettings.organizationName);
   const [sidebarBrandInput, setSidebarBrandInput] = useState(orgSettings.sidebarBrandName);
@@ -161,7 +179,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
   const [emailManuallyEdited, setEmailManuallyEdited] = useState(false);
   const [username, setUsername] = useState('');
   const [usernameManuallyEdited, setUsernameManuallyEdited] = useState(false);
-  const [initialPassword, setInitialPassword] = useState('Wijna@2026');
+  const [initialPassword, setInitialPassword] = useState('');
   const [showInitialPassword, setShowInitialPassword] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('tpl-staff-sfo');
   const [role, setRole] = useState<UserRole>('staff');
@@ -284,13 +302,26 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
       },
       {
         id: 'tpl-admin',
-        label: 'System Administrator',
+        label: 'Administrator (System Organisator)',
         referenceUser: 'Bambang Sudiro',
         role: 'admin',
-        roleTitle: 'System Administrator',
+        roleTitle: 'System Organisator',
         department: 'Teknologi & Tata Kelola Sistem',
         permissions: { ...DEFAULT_PERMISSIONS_BY_ROLE.admin },
       },
+      ...(isSystemAdmin
+        ? [
+            {
+              id: 'tpl-sysadmin',
+              label: 'System Administrator (Recovery Access)',
+              referenceUser: 'System Administrator',
+              role: 'system_admin' as UserRole,
+              roleTitle: 'System Administrator',
+              department: 'Pemulihan & Tata Kelola Sistem Utama',
+              permissions: { ...DEFAULT_PERMISSIONS_BY_ROLE.system_admin },
+            },
+          ]
+        : []),
     ];
 
     // Tambahkan template dinamis dari pengguna yang sudah ada jika memiliki kombinasi jabatan/unit kerja unik
@@ -300,6 +331,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
       )
     );
     for (const u of users) {
+      if (u.role === 'system_admin' && !isSystemAdmin) continue;
       const key = `${u.role}|${(u.roleTitle || '').toLowerCase()}|${(u.department || '').toLowerCase()}`;
       if (!seenKeys.has(key) && u.roleTitle) {
         seenKeys.add(key);
@@ -316,7 +348,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     }
 
     return baseTemplates;
-  }, [users]);
+  }, [users, isSystemAdmin]);
 
   const loadUsersAndMonitoring = useCallback(async () => {
     setLoading(true);
@@ -481,7 +513,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     setEmailManuallyEdited(false);
     setUsername('');
     setUsernameManuallyEdited(false);
-    setInitialPassword('Wijna@2026');
+    setInitialPassword('');
     setShowInitialPassword(false);
     setSelectedTemplateId(defaultTpl?.id || 'tpl-staff-sfo');
     setRole(defaultTpl?.role || 'staff');
@@ -503,7 +535,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     setEmailManuallyEdited(false);
     setUsername('');
     setUsernameManuallyEdited(false);
-    setInitialPassword('Wijna@2026');
+    setInitialPassword('');
     setShowInitialPassword(false);
     const matchingTpl = roleTemplates.find(
       (t) =>
@@ -690,7 +722,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
 
   const handleOpenResetPassword = (user: User) => {
     setResetPasswordUser(user);
-    setNewPasswordInput('Wijna@2026');
+    setNewPasswordInput('');
     setShowNewPassword(false);
     setResetPasswordError(null);
   };
@@ -737,19 +769,29 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
     }
   };
 
-  if (currentUser?.role !== 'admin' && !currentUser?.permissions?.canManageUsers) {
+  if (
+    currentUser?.role !== 'system_admin' &&
+    currentUser?.role !== 'admin' &&
+    !currentUser?.permissions?.canManageUsers
+  ) {
     return (
       <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
         <Shield className="w-12 h-12 text-rose-500 mx-auto mb-3" />
         <h3 className="text-lg font-bold text-slate-900">Akses Terbatas</h3>
         <p className="text-sm text-slate-500 mt-1">
-          Hanya System Administrator yang dapat mengakses modul Kelola Pengguna & Hak Akses.
+          Hanya Administrator atau System Administrator yang dapat mengakses modul Kelola Pengguna &amp; Hak Akses.
         </p>
       </div>
     );
   }
 
   const totalActiveUsers = users.filter((u) => u.isActive).length;
+  const activeSystemAdminCount = users.filter(
+    (u) => u.role === 'system_admin' && u.isActive !== false
+  ).length;
+  const assignableRoleKeys = (Object.keys(ROLE_LABELS) as UserRole[]).filter(
+    (rKey) => isSystemAdmin || rKey !== 'system_admin'
+  );
   const totalInactiveUsers = users.filter((u) => !u.isActive).length;
   const totalRaciAssignedUsers = users.filter((u) => {
     const asg = userMonitoringAssignmentsMap[u.id];
@@ -1051,9 +1093,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                     monitoringToolsCount: 0,
                     totalAssignments: 0,
                   };
+                  const isProtectedSystemAdminRow =
+                    user.role === 'system_admin' && (!isSystemAdmin || activeSystemAdminCount <= 1);
                   const canHardDelete =
                     user.id !== currentUser?.id &&
                     user.role !== 'admin' &&
+                    !isProtectedSystemAdminRow &&
                     monAsg.totalAssignments === 0;
 
                   return (
@@ -1093,7 +1138,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
 
                       {/* Kolom Integrasi Penugasan Monitoring Tools (RACI) */}
                       <td className="py-3.5 px-4">
-                        {user.role === 'admin' ? (
+                        {user.role === 'system_admin' ? (
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-50 text-rose-900 border border-rose-200 text-[10.5px] font-semibold">
+                              <Shield className="w-3 h-3" />
+                              <span>Pemulihan &amp; Akses Penuh Seluruh Modul Sistem</span>
+                            </span>
+                          </div>
+                        ) : user.role === 'admin' ? (
                           <span className="text-[11px] text-slate-400 italic">
                             Konfigurasi Sistem (Non-Operasional)
                           </span>
@@ -1220,63 +1272,70 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                       </td>
 
                       <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                        <div className="inline-flex items-center justify-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenCreateFromUserTemplate(user)}
-                            className="px-2 py-1 text-[11px] font-semibold text-[#0f2b5c] bg-blue-50/80 hover:bg-blue-100 border border-blue-200/80 rounded-md transition-colors cursor-pointer"
-                            title={`Buat pengguna baru dengan template jabatan "${user.roleTitle}" seperti ${user.name} (tinggal isi nama)`}
-                          >
-                            + Buat Serupa
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenResetPassword(user)}
-                            className="px-2 py-1 text-[11px] font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md transition-colors cursor-pointer inline-flex items-center gap-1"
-                            title={`Reset Password untuk ${user.name}`}
-                          >
-                            <KeyRound className="w-3 h-3" />
-                            <span>Reset Password</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenEdit(user)}
-                            className="p-1.5 text-slate-600 hover:text-[#0f2b5c] hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                            title="Edit Informasi, Role & Permission"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          {user.id !== currentUser?.id && (
-                            <select
-                              value={
-                                user.accountStatus ||
-                                (user.isActive === false ? 'Nonaktif' : 'Aktif')
-                              }
-                              onChange={(e) =>
-                                handleChangeAccountStatus(
-                                  user,
-                                  e.target.value as UserAccountStatus
-                                )
-                              }
-                              className="text-[11px] px-2 py-1 rounded-md font-semibold border border-slate-200 bg-white text-slate-700 hover:border-slate-300 cursor-pointer"
-                              title="Ubah Status Akun (Aktif / Ditangguhkan / Nonaktif)"
-                            >
-                              <option value="Aktif">Status: Aktif</option>
-                              <option value="Ditangguhkan">Tangguhkan</option>
-                              <option value="Nonaktif">Nonaktifkan</option>
-                            </select>
-                          )}
-                          {canHardDelete && (
+                        {user.role === 'system_admin' && !isSystemAdmin ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-rose-50/80 text-rose-800 border border-rose-200 text-[11px] font-semibold">
+                            <Shield className="w-3 h-3" />
+                            <span>Akun Pemulihan Sistem (Dilindungi)</span>
+                          </span>
+                        ) : (
+                          <div className="inline-flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => setConfirmDeleteUser(user)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              title="Hapus akun yang belum memiliki riwayat penugasan"
+                              onClick={() => handleOpenCreateFromUserTemplate(user)}
+                              className="px-2 py-1 text-[11px] font-semibold text-[#0f2b5c] bg-blue-50/80 hover:bg-blue-100 border border-blue-200/80 rounded-md transition-colors cursor-pointer"
+                              title={`Buat pengguna baru dengan template jabatan "${user.roleTitle}" seperti ${user.name} (tinggal isi nama)`}
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              + Buat Serupa
                             </button>
-                          )}
-                        </div>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenResetPassword(user)}
+                              className="px-2 py-1 text-[11px] font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md transition-colors cursor-pointer inline-flex items-center gap-1"
+                              title={`Reset Password untuk ${user.name}`}
+                            >
+                              <KeyRound className="w-3 h-3" />
+                              <span>Reset Password</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEdit(user)}
+                              className="p-1.5 text-slate-600 hover:text-[#0f2b5c] hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                              title="Edit Informasi, Role & Permission"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            {user.id !== currentUser?.id && !isProtectedSystemAdminRow && (
+                              <select
+                                value={
+                                  user.accountStatus ||
+                                  (user.isActive === false ? 'Nonaktif' : 'Aktif')
+                                }
+                                onChange={(e) =>
+                                  handleChangeAccountStatus(
+                                    user,
+                                    e.target.value as UserAccountStatus
+                                  )
+                                }
+                                className="text-[11px] px-2 py-1 rounded-md font-semibold border border-slate-200 bg-white text-slate-700 hover:border-slate-300 cursor-pointer"
+                                title="Ubah Status Akun (Aktif / Ditangguhkan / Nonaktif)"
+                              >
+                                <option value="Aktif">Status: Aktif</option>
+                                <option value="Ditangguhkan">Tangguhkan</option>
+                                <option value="Nonaktif">Nonaktifkan</option>
+                              </select>
+                            )}
+                            {canHardDelete && (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteUser(user)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                title="Hapus akun yang belum memiliki riwayat penugasan"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1536,7 +1595,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:border-[#0f2b5c]"
                   >
-                    {(Object.keys(ROLE_LABELS) as UserRole[]).map((rKey) => (
+                    {assignableRoleKeys.map((rKey) => (
                       <option key={rKey} value={rKey}>
                         {ROLE_LABELS[rKey]}
                       </option>
@@ -1577,7 +1636,10 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   </label>
                   <select
                     value={accountStatus}
-                    disabled={editingUser?.id === currentUser?.id}
+                    disabled={
+                      editingUser?.id === currentUser?.id ||
+                      (editingUser?.role === 'system_admin' && activeSystemAdminCount <= 1)
+                    }
                     onChange={(e) => {
                       const nextSt = e.target.value as UserAccountStatus;
                       setAccountStatus(nextSt);
@@ -1600,11 +1662,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   <label className="flex items-center gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={permissions.canManagePrograms}
+                      disabled={role === 'system_admin'}
+                      checked={role === 'system_admin' ? true : permissions.canManagePrograms}
                       onChange={(e) =>
                         setPermissions({ ...permissions, canManagePrograms: e.target.checked })
                       }
-                      className="rounded text-[#0f2b5c]"
+                      className="rounded text-[#0f2b5c] disabled:opacity-50"
                     />
                     <span className="text-slate-700 font-medium">
                       Dapat mengelola Struktur Program, Indikator &amp; Penugasan RACI Output
@@ -1614,11 +1677,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   <label className="flex items-center gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={permissions.canCreateTor}
+                      disabled={role === 'system_admin'}
+                      checked={role === 'system_admin' ? true : permissions.canCreateTor}
                       onChange={(e) =>
                         setPermissions({ ...permissions, canCreateTor: e.target.checked })
                       }
-                      className="rounded text-[#0f2b5c]"
+                      className="rounded text-[#0f2b5c] disabled:opacity-50"
                     />
                     <span className="text-slate-700 font-medium">
                       Dapat menyusun Dokumen ToR, Cash Advance &amp; Monitoring Tools Kegiatan
@@ -1628,8 +1692,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   <label className="flex items-center gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      disabled={role === 'admin'}
-                      checked={role === 'admin' ? false : permissions.canApproveTor}
+                      disabled={role === 'admin' || role === 'system_admin'}
+                      checked={
+                        role === 'system_admin'
+                          ? true
+                          : role === 'admin'
+                          ? false
+                          : permissions.canApproveTor
+                      }
                       onChange={(e) =>
                         setPermissions({ ...permissions, canApproveTor: e.target.checked })
                       }
@@ -1643,11 +1713,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   <label className="flex items-center gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={permissions.canViewAllTors}
+                      disabled={role === 'system_admin'}
+                      checked={role === 'system_admin' ? true : permissions.canViewAllTors}
                       onChange={(e) =>
                         setPermissions({ ...permissions, canViewAllTors: e.target.checked })
                       }
-                      className="rounded text-[#0f2b5c]"
+                      className="rounded text-[#0f2b5c] disabled:opacity-50"
                     />
                     <span className="text-slate-700 font-medium">
                       Dapat memantau seluruh dokumen lintas divisi (Monitoring &amp; Oversight)
@@ -1657,8 +1728,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({ onRefres
                   <label className="flex items-center gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={role === 'admin' ? true : permissions.canManageUsers}
-                      disabled={role === 'admin'}
+                      checked={
+                        role === 'admin' || role === 'system_admin'
+                          ? true
+                          : permissions.canManageUsers
+                      }
+                      disabled={role === 'admin' || role === 'system_admin'}
                       onChange={(e) =>
                         setPermissions({ ...permissions, canManageUsers: e.target.checked })
                       }

@@ -79,16 +79,29 @@ export const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
   onShowError,
 }) => {
   const activeEmployees = useMemo(
-    () => allUsers.filter((u) => u.isActive && u.role !== 'admin'),
+    () =>
+      allUsers.filter(
+        (u) => u.isActive && u.role !== 'admin' && u.role !== 'system_admin'
+      ),
     [allUsers]
   );
 
   const [selectedUserId, setSelectedUserId] = useState<string>(
-    () => currentUser?.id || activeEmployees[0]?.id || ''
+    () =>
+      (currentUser &&
+      currentUser.role !== 'admin' &&
+      currentUser.role !== 'system_admin'
+        ? currentUser.id
+        : activeEmployees[0]?.id) || ''
   );
 
   useEffect(() => {
-    if (currentUser && currentUser.role !== 'admin' && !selectedUserId) {
+    if (
+      currentUser &&
+      currentUser.role !== 'admin' &&
+      currentUser.role !== 'system_admin' &&
+      !selectedUserId
+    ) {
       setSelectedUserId(currentUser.id);
     } else if (!selectedUserId && activeEmployees.length > 0) {
       setSelectedUserId(activeEmployees[0].id);

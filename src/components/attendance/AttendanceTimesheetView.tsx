@@ -381,16 +381,22 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   const isHR =
     currentUser?.role === 'finance' ||
     currentUser?.role === 'hr' ||
-    currentUser?.role === 'admin';
-  const isDirector = currentUser?.role === 'director' || currentUser?.role === 'admin';
-  const isStrictDirector = currentUser?.role === 'director';
-  // Detail lintas staf hanya dapat dilihat oleh Finance (HR) dan Director
+    currentUser?.role === 'admin' ||
+    currentUser?.role === 'system_admin';
+  const isDirector =
+    currentUser?.role === 'director' ||
+    currentUser?.role === 'admin' ||
+    currentUser?.role === 'system_admin';
+  const isStrictDirector =
+    currentUser?.role === 'director' || currentUser?.role === 'system_admin';
+  // Detail lintas staf hanya dapat dilihat oleh Finance (HR), Director, dan System Administrator
   const canViewDetails = isHR || isDirector;
-  // Rekap Kerja HANYA bisa dilihat oleh HR/Finance dan Director
+  // Rekap Kerja dapat dilihat oleh HR/Finance, Director, dan System Administrator
   const canViewWorkRecap =
     currentUser?.role === 'finance' ||
     currentUser?.role === 'hr' ||
-    currentUser?.role === 'director';
+    currentUser?.role === 'director' ||
+    currentUser?.role === 'system_admin';
 
   const [bundle, setBundle] = useState<AttendanceSystemBundle | null>(null);
   const [loading, setLoading] = useState<boolean>(true);

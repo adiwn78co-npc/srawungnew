@@ -120,11 +120,12 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   onSelectTor,
   onCreateTor,
 }) => {
-  const { currentUser, isDirector, isFinance, isAdmin } = useAuth();
-  const canEditFinance = isFinance || isDirector || isAdmin;
+  const { currentUser, isDirector, isFinance, isAdmin, isSystemAdmin } = useAuth();
+  const canEditFinance = isFinance || isDirector || isAdmin || isSystemAdmin;
   const canManagePrograms =
     Boolean(currentUser?.permissions?.canManagePrograms) ||
     isDirector ||
+    isSystemAdmin ||
     currentUser?.role === 'program_manager';
 
   // Derive available fiscal years strictly from actual database records (Programs, ToRs, Cash Advances)
@@ -3110,7 +3111,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                               {/* Disbursement Action */}
                               {rawCa &&
                                 rawCa.status === 'Disetujui' &&
-                                (isFinance || isDirector || isAdmin) && (
+                                (isFinance || isDirector || isAdmin || isSystemAdmin) && (
                                   <button
                                     type="button"
                                     disabled={isBusy}

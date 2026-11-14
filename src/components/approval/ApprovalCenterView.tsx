@@ -717,18 +717,25 @@ export function ApprovalCenterView({
 
       const isProgramDoc = item.groupType === 'program_documents';
       const isFinanceDoc = item.groupType === 'financial_documents';
-      const isSelfSubmitter = item.responsibleUserId === currentUser.id;
+      const isSystemAdminUser = Boolean(
+        accessProfile.isSystemAdmin || currentUser.role === 'system_admin'
+      );
+      const isSelfSubmitter = !isSystemAdminUser && item.responsibleUserId === currentUser.id;
 
       const isDesignatedA1 =
-        isProgramDoc && accessProfile.isA1 && item.accountableProgramUserId === currentUser.id;
+        isProgramDoc &&
+        (isSystemAdminUser ||
+          (accessProfile.isA1 && item.accountableProgramUserId === currentUser.id));
       const isDesignatedA2 =
         isFinanceDoc &&
-        accessProfile.isA2 &&
-        item.accountableFinanceUserId === currentUser.id &&
-        currentUser.permissions?.canApproveTor !== false;
+        (isSystemAdminUser ||
+          (accessProfile.isA2 &&
+            item.accountableFinanceUserId === currentUser.id &&
+            currentUser.permissions?.canApproveTor !== false));
       const isDesignatedDirector =
-        accessProfile.isDirector &&
-        (currentUser.role === 'director' || item.directorUserId === currentUser.id);
+        isSystemAdminUser ||
+        (accessProfile.isDirector &&
+          (currentUser.role === 'director' || item.directorUserId === currentUser.id));
       const isFinanceMonitorOnly =
         isFinanceDoc && accessProfile.isFinance && !isDesignatedA2 && !isDesignatedDirector;
 
@@ -768,7 +775,10 @@ export function ApprovalCenterView({
         item.categoryCode === 'cash_advance' &&
           item.status === 'Approved' &&
           !item.previewData?.isDisbursed &&
-          (accessProfile.isFinance || accessProfile.isA2 || currentUser.role === 'finance')
+          (isSystemAdminUser ||
+            accessProfile.isFinance ||
+            accessProfile.isA2 ||
+            currentUser.role === 'finance')
       );
 
       const needsImmediateActionFromMe =
@@ -780,7 +790,9 @@ export function ApprovalCenterView({
         (isDesignatedDirector && !isSelfSubmitter && isWaitingDirectorProgramReport);
 
       let authorityLabel = 'Pemantauan Sesuai Peran';
-      if (canApproveTorEditRequest) {
+      if (isSystemAdminUser) {
+        authorityLabel = 'System Administrator · Otorisasi Penuh & Pemulihan Sistem';
+      } else if (canApproveTorEditRequest) {
         authorityLabel = 'Direktur · Keputusan ACC / Tolak Request Edit ToR';
       } else if (canDisburseCashAdvance) {
         authorityLabel = 'Finance / Kasir · Eksekusi Pencairan Dana ke Pengaju';

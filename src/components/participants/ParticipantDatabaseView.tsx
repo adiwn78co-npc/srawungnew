@@ -197,6 +197,7 @@ export const ParticipantDatabaseView: React.FC<ParticipantDatabaseViewProps> = (
 }) => {
   const { currentUser } = useAuth();
   const canViewAuditTrail =
+    currentUser?.role === 'system_admin' ||
     currentUser?.role === 'director' ||
     currentUser?.role === 'hr' ||
     currentUser?.role === 'finance' ||

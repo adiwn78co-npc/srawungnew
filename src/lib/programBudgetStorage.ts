@@ -703,6 +703,65 @@ export function getRegisteredProgramBudgetCodes(params: {
   return [];
 }
 
+export function resolveAuthoritativeFiscalYearForProgram(
+  program: { id?: string; startDate?: string } | null | undefined,
+  externalFiscalYear?: number
+): number {
+  if (externalFiscalYear && externalFiscalYear >= 2020 && externalFiscalYear <= 2035) {
+    return externalFiscalYear;
+  }
+  const fallbackYear = new Date().getFullYear();
+  if (!program?.id) {
+    const rawYear = Number((program?.startDate || '').slice(0, 4));
+    return rawYear >= 2020 && rawYear <= 2035 ? rawYear : fallbackYear;
+  }
+
+  const progStartYear = Number((program.startDate || '').slice(0, 4));
+  const hasValidStartYear = progStartYear >= 2020 && progStartYear <= 2035;
+  const all = loadAllProgramBudgetDatasets();
+  const siblings = Object.values(all).filter((ds) => ds && ds.programId === program.id);
+
+  if (siblings.length > 0) {
+    if (hasValidStartYear) {
+      const exactMatch = siblings.find((ds) => ds.fiscalYear === progStartYear);
+      if (
+        exactMatch &&
+        (exactMatch.isBudgetConfigured ||
+          (Number(exactMatch.annualApprovedBudget) || 0) > 0 ||
+          (exactMatch.masterBudgetCodes?.length || 0) > 0)
+      ) {
+        return progStartYear;
+      }
+    }
+
+    const configuredSiblings = siblings
+      .filter(
+        (ds) =>
+          ds.isBudgetConfigured ||
+          (Number(ds.annualApprovedBudget) || 0) > 0 ||
+          getActivePeriods(ds).some((p) => (Number(p.allocatedAmount) || 0) > 0)
+      )
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    if (configuredSiblings.length > 0) {
+      return configuredSiblings[0].fiscalYear;
+    }
+
+    const codedSiblings = siblings
+      .filter((ds) => (ds.masterBudgetCodes?.length || 0) > 0)
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    if (codedSiblings.length > 0) {
+      return codedSiblings[0].fiscalYear;
+    }
+
+    if (hasValidStartYear && siblings.some((ds) => ds.fiscalYear === progStartYear)) {
+      return progStartYear;
+    }
+    return siblings[0].fiscalYear;
+  }
+
+  return hasValidStartYear ? progStartYear : fallbackYear;
+}
+
 export function getOrCreateProgramBudgetDataset(
   programId: string,
   programName: string,
@@ -771,7 +830,12 @@ export function getOrCreateProgramBudgetDataset(
       0
     );
     const computedAnnual = periodSum > 0 ? periodSum : Number(existing.annualApprovedBudget) || 0;
-    const totalProg = computedAnnual;
+    const rawTotalProg = Number(existing.totalProgramBudget) || sharedTotalProgramBudget || 0;
+    const totalProg =
+      rawTotalProg > computedAnnual &&
+      rawTotalProg !== (Number(existing.annualApprovedBudget) || 0)
+        ? rawTotalProg
+        : computedAnnual;
 
     return {
       ...existing,
@@ -805,9 +869,10 @@ export function getOrCreateProgramBudgetDataset(
     fiscalYear,
     inheritedCodes
   );
-  created.totalProgramBudget = created.annualApprovedBudget;
-  all[key] = created;
-  saveAllProgramBudgetDatasets(all);
+  created.totalProgramBudget =
+    sharedTotalProgramBudget > created.annualApprovedBudget
+      ? sharedTotalProgramBudget
+      : created.annualApprovedBudget;
   return created;
 }
 
@@ -820,7 +885,12 @@ function normalizeDatasetForSave(dataset: ProgramBudgetDataset): ProgramBudgetDa
   // The total budget for one year automatically reflects the sum of all budget periods entered for that year
   const effectiveAnnualBudget =
     periodSum > 0 ? periodSum : Number(dataset.annualApprovedBudget) || 0;
-  const effectiveTotalProgramBudget = effectiveAnnualBudget;
+  const rawTotalProg = Number(dataset.totalProgramBudget) || 0;
+  const effectiveTotalProgramBudget =
+    rawTotalProg > effectiveAnnualBudget &&
+    rawTotalProg !== (Number(dataset.annualApprovedBudget) || 0)
+      ? rawTotalProg
+      : effectiveAnnualBudget;
 
   return {
     ...dataset,
