@@ -648,11 +648,21 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'users', column: 'must_change_password', definition: 'TINYINT(1) NOT NULL DEFAULT 0' },
   { table: 'users', column: 'password_updated_at', definition: 'VARCHAR(64) NULL' },
   { table: 'users', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'programs', column: 'code', definition: 'VARCHAR(64) NULL' },
   { table: 'programs', column: 'location', definition: 'VARCHAR(255) NULL' },
   { table: 'programs', column: 'folder_url', definition: 'TEXT NULL' },
+  { table: 'programs', column: 'description', definition: 'TEXT NULL' },
+  { table: 'programs', column: 'donor', definition: 'VARCHAR(255) NULL' },
   { table: 'programs', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
   { table: 'programs', column: 'pic_name', definition: 'VARCHAR(255) NULL' },
+  { table: 'programs', column: 'start_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'programs', column: 'end_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'programs', column: 'total_budget', definition: 'DECIMAL(18, 2) NOT NULL DEFAULT 0' },
+  { table: 'programs', column: 'currency', definition: "VARCHAR(16) DEFAULT 'IDR'" },
+  { table: 'programs', column: 'status', definition: 'VARCHAR(64) NULL' },
+  { table: 'programs', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'programs', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'programs', column: 'raw_json', definition: 'LONGTEXT NULL' },
   { table: 'outcomes', column: 'outcome_number', definition: 'VARCHAR(64) NULL' },
   { table: 'outcomes', column: 'title', definition: 'TEXT NULL' },
   { table: 'outcomes', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
@@ -661,6 +671,8 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'outcomes', column: 'indicators_json', definition: 'LONGTEXT NULL' },
   { table: 'outcomes', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'outcomes', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outcomes', column: 'raw_json', definition: 'LONGTEXT NULL' },
+  { table: 'outputs', column: 'program_id', definition: 'VARCHAR(128) NULL' },
   { table: 'outputs', column: 'output_number', definition: 'VARCHAR(64) NULL' },
   { table: 'outputs', column: 'title', definition: 'TEXT NULL' },
   { table: 'outputs', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
@@ -669,6 +681,9 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'outputs', column: 'indicators_json', definition: 'LONGTEXT NULL' },
   { table: 'outputs', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'outputs', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'outputs', column: 'raw_json', definition: 'LONGTEXT NULL' },
+  { table: 'activities', column: 'program_id', definition: 'VARCHAR(128) NULL' },
+  { table: 'activities', column: 'outcome_id', definition: 'VARCHAR(128) NULL' },
   { table: 'activities', column: 'activity_number', definition: 'VARCHAR(64) NULL' },
   { table: 'activities', column: 'title', definition: 'TEXT NULL' },
   { table: 'activities', column: 'pic_id', definition: 'VARCHAR(128) NULL' },
@@ -680,6 +695,7 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'activities', column: 'status', definition: 'VARCHAR(64) NULL' },
   { table: 'activities', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'activities', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'activities', column: 'raw_json', definition: 'LONGTEXT NULL' },
   { table: 'sub_activities', column: 'program_id', definition: 'VARCHAR(128) NULL' },
   { table: 'sub_activities', column: 'outcome_id', definition: 'VARCHAR(128) NULL' },
   { table: 'sub_activities', column: 'output_id', definition: 'VARCHAR(128) NULL' },
@@ -690,10 +706,15 @@ const EXPECTED_TABLE_COLUMN_ADDITIONS: Array<{
   { table: 'sub_activities', column: 'status', definition: 'VARCHAR(64) NULL' },
   { table: 'sub_activities', column: 'created_at', definition: 'VARCHAR(64) NULL' },
   { table: 'sub_activities', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
+  { table: 'sub_activities', column: 'raw_json', definition: 'LONGTEXT NULL' },
   { table: 'tors', column: 'sub_activity_id', definition: 'VARCHAR(128) NULL' },
   { table: 'tors', column: 'activity_status', definition: 'VARCHAR(64) NULL' },
   { table: 'tors', column: 'budget_approved', definition: 'DECIMAL(18, 2) NULL' },
+  { table: 'tors', column: 'start_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'tors', column: 'end_date', definition: 'VARCHAR(32) NULL' },
+  { table: 'tors', column: 'raw_json', definition: 'LONGTEXT NULL' },
   { table: 'program_budgets', column: 'budget_approval_status', definition: 'VARCHAR(64) NULL' },
+  { table: 'program_budgets', column: 'raw_json', definition: 'LONGTEXT NULL' },
   { table: 'meeting_minutes', column: 'document_number', definition: 'VARCHAR(128) NULL' },
   { table: 'meeting_minutes', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
   { table: 'participants', column: 'updated_at', definition: 'VARCHAR(64) NULL' },
@@ -989,6 +1010,130 @@ export async function fetchSystemAdminFromMysql(pool: MysqlPoolLike): Promise<an
   return hydrateMysqlUserRow(rows[0]);
 }
 
+export function normalizeMysqlDateOnlyValue(val: unknown): string | null {
+  if (val === null || val === undefined) return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    const yyyy = val.getFullYear();
+    if (yyyy <= 0) return null;
+    const mm = String(val.getMonth() + 1).padStart(2, '0');
+    const dd = String(val.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  const str = String(val).trim();
+  if (
+    !str ||
+    str === '-' ||
+    str.toLowerCase() === 'null' ||
+    str.toLowerCase() === 'undefined' ||
+    str.toLowerCase() === 'invalid date' ||
+    str.startsWith('0000-00-00')
+  ) {
+    return null;
+  }
+  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const yyyy = Number(isoMatch[1]);
+    const mm = Number(isoMatch[2]);
+    const dd = Number(isoMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    }
+    return null;
+  }
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const dd = Number(dmyMatch[1]);
+    const mm = Number(dmyMatch[2]);
+    const yyyy = Number(dmyMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    }
+  }
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime()) && parsed.getFullYear() > 0) {
+    const yyyy = parsed.getFullYear();
+    const mm = String(parsed.getMonth() + 1).padStart(2, '0');
+    const dd = String(parsed.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+function cleanHydratedTimestampValue(val: unknown): string | undefined {
+  if (!val) return undefined;
+  if (val instanceof Date) {
+    return Number.isNaN(val.getTime()) ? undefined : val.toISOString();
+  }
+  const str = String(val).trim();
+  if (!str || str.startsWith('0000-00-00')) return undefined;
+  return str;
+}
+
+export function hydrateMysqlProgramRow(r: any, parsedRaw?: Record<string, any>): any {
+  const raw = parsedRaw || safeJsonParse<Record<string, any>>(r?.raw_json, {});
+  const resolvedStartDate =
+    normalizeMysqlDateOnlyValue(r?.start_date) ||
+    normalizeMysqlDateOnlyValue(r?.startDate) ||
+    normalizeMysqlDateOnlyValue(r?.tanggal_mulai) ||
+    normalizeMysqlDateOnlyValue(raw.startDate) ||
+    normalizeMysqlDateOnlyValue(raw.start_date) ||
+    '';
+  const resolvedEndDate =
+    normalizeMysqlDateOnlyValue(r?.end_date) ||
+    normalizeMysqlDateOnlyValue(r?.endDate) ||
+    normalizeMysqlDateOnlyValue(r?.tanggal_selesai) ||
+    normalizeMysqlDateOnlyValue(raw.endDate) ||
+    normalizeMysqlDateOnlyValue(raw.end_date) ||
+    '';
+
+  return {
+    ...raw,
+    id: String(r?.id || raw.id || ''),
+    code: r?.code || raw.code || '',
+    name: r?.name || raw.name || '',
+    location: r?.location ?? raw.location ?? '',
+    folderUrl: r?.folder_url ?? r?.folderUrl ?? raw.folderUrl ?? '',
+    picId: r?.pic_id || r?.picId || raw.picId || '',
+    picName: r?.pic_name || r?.picName || raw.picName || '',
+    description: r?.description ?? raw.description ?? '',
+    donor: r?.donor ?? raw.donor ?? '',
+    startDate: resolvedStartDate,
+    endDate: resolvedEndDate,
+    totalBudget:
+      r?.total_budget !== undefined && r?.total_budget !== null
+        ? Number(r.total_budget)
+        : Number(raw.totalBudget ?? raw.budget ?? 0),
+    budget:
+      raw.budget !== undefined
+        ? Number(raw.budget)
+        : r?.total_budget !== undefined && r?.total_budget !== null
+        ? Number(r.total_budget)
+        : Number(raw.totalBudget ?? 0),
+    currency: r?.currency || raw.currency || 'IDR',
+    status: r?.status || raw.status || 'Aktif',
+    createdAt:
+      cleanHydratedTimestampValue(r?.created_at) ||
+      cleanHydratedTimestampValue(raw.createdAt) ||
+      new Date().toISOString(),
+    updatedAt:
+      cleanHydratedTimestampValue(r?.updated_at) || cleanHydratedTimestampValue(raw.updatedAt),
+  };
+}
+
+export async function fetchProgramByIdFromMysql(
+  pool: MysqlPoolLike,
+  programId: string
+): Promise<any | null> {
+  const [rows]: any = await pool.query('SELECT * FROM `programs` WHERE `id` = ? LIMIT 1', [
+    String(programId).slice(0, 128),
+  ]);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+  return hydrateMysqlProgramRow(rows[0]);
+}
+
 async function safeSelectTableRows(
   pool: MysqlPoolLike,
   tableName: string,
@@ -1101,58 +1246,13 @@ export async function loadDatabaseFromMysql(
       .filter((item: any) => Boolean(item && item.id));
   };
 
-  const cleanHydratedDateOnly = (val: unknown): string => {
-    if (!val) return '';
-    if (val instanceof Date) {
-      return Number.isNaN(val.getTime()) ? '' : val.toISOString().slice(0, 10);
-    }
-    const str = String(val).trim();
-    if (!str || str === '-' || str.startsWith('0000-00-00')) return '';
-    const isoMatch = str.match(/^(\d{4}-\d{2}-\d{2})/);
-    return isoMatch ? isoMatch[1] : str;
-  };
+  const cleanHydratedDateOnly = (val: unknown): string => normalizeMysqlDateOnlyValue(val) || '';
 
-  const cleanHydratedTimestamp = (val: unknown): string | undefined => {
-    if (!val) return undefined;
-    if (val instanceof Date) {
-      return Number.isNaN(val.getTime()) ? undefined : val.toISOString();
-    }
-    const str = String(val).trim();
-    if (!str || str.startsWith('0000-00-00')) return undefined;
-    return str;
-  };
+  const cleanHydratedTimestamp = cleanHydratedTimestampValue;
 
-  const programs = parseAndHydrateRows<any>(programRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ''),
-    code: r?.code || raw.code || '',
-    name: r?.name || raw.name || '',
-    location: r?.location ?? raw.location ?? '',
-    folderUrl: r?.folder_url ?? raw.folderUrl ?? '',
-    picId: r?.pic_id || raw.picId || '',
-    picName: r?.pic_name || raw.picName || '',
-    description: r?.description ?? raw.description ?? '',
-    donor: r?.donor ?? raw.donor ?? '',
-    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
-    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
-    totalBudget:
-      r?.total_budget !== undefined && r?.total_budget !== null
-        ? Number(r.total_budget)
-        : Number(raw.totalBudget ?? raw.budget ?? 0),
-    budget:
-      raw.budget !== undefined
-        ? Number(raw.budget)
-        : r?.total_budget !== undefined && r?.total_budget !== null
-        ? Number(r.total_budget)
-        : Number(raw.totalBudget ?? 0),
-    currency: r?.currency || raw.currency || 'IDR',
-    status: r?.status || raw.status || 'Aktif',
-    createdAt:
-      cleanHydratedTimestamp(r?.created_at) ||
-      cleanHydratedTimestamp(raw.createdAt) ||
-      new Date().toISOString(),
-    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt),
-  })).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const programs = parseAndHydrateRows<any>(programRows, (r, raw) =>
+    hydrateMysqlProgramRow(r, raw)
+  ).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const stripInternalCodePrefix = (val: unknown): string => {
     const s = String(val ?? '');
@@ -1236,8 +1336,8 @@ export async function loadDatabaseFromMysql(
       r?.planned_participants_breakdown ?? raw.plannedParticipantsBreakdown ?? '',
     picId: r?.pic_id || raw.picId || '',
     picName: r?.pic_name || raw.picName || '',
-    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
-    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
+    startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
@@ -1258,8 +1358,8 @@ export async function loadDatabaseFromMysql(
     name: r?.name || raw.name || '',
     description: r?.description ?? raw.description ?? '',
     picName: r?.pic_name || raw.picName || '',
-    startDate: cleanHydratedDateOnly(r?.start_date || raw.startDate),
-    endDate: cleanHydratedDateOnly(r?.end_date || raw.endDate),
+    startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
     status: r?.status || raw.status || 'Belum Dimulai',
     budgetAllocated:
       r?.budget_allocated !== undefined && r?.budget_allocated !== null
@@ -1352,8 +1452,8 @@ export async function loadDatabaseFromMysql(
           : raw.budgetActualSpent !== undefined && raw.budgetActualSpent !== null
           ? Number(raw.budgetActualSpent)
           : null,
-      startDate: r?.start_date || raw.startDate || '',
-      endDate: r?.end_date || raw.endDate || '',
+      startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+      endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
       location: r?.location || raw.location || '',
       createdAt: r?.created_at || raw.createdAt || new Date().toISOString(),
       updatedAt: r?.updated_at || raw.updatedAt || new Date().toISOString(),
@@ -1845,20 +1945,7 @@ function toMysqlDateTimeString(val: any): string | null {
 }
 
 function toMysqlDateOnlyString(val: any): string | null {
-  if (val === null || val === undefined || val === '') return null;
-  if (val instanceof Date) {
-    if (Number.isNaN(val.getTime())) return null;
-    return val.toISOString().slice(0, 10);
-  }
-  const s = String(val).trim();
-  if (!s) return null;
-  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (match) return match[1];
-  const parsed = new Date(s);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString().slice(0, 10);
-  }
-  return null;
+  return normalizeMysqlDateOnlyValue(val);
 }
 
 function normalizeHydratedAttendanceTimestamp(
@@ -1893,8 +1980,7 @@ function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
     colNameLower !== 'store_key' &&
     (colNameLower.endsWith('_id') || colNameLower.endsWith('_by'));
   const isUniqueIndexed = String(colMeta.key || '').toUpperCase() === 'UNI';
-  const canLeaveNull =
-    colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes('auto_increment');
+  const canSendExplicitNull = Boolean(colMeta.nullable);
 
   const fallbackForStrictNotNull = (): any => {
     if (
@@ -1924,24 +2010,24 @@ function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
 
   // Jangan pernah mengirim string kosong '' pada kolom Foreign Key (*_id) atau kolom UNIQUE yang nullable,
   // karena '' melanggar FOREIGN KEY (ER_NO_REFERENCED_ROW_2) atau UNIQUE (ER_DUP_ENTRY) di MySQL.
-  if (val === '' && (isForeignIdLike || isUniqueIndexed) && canLeaveNull) {
+  if (val === '' && (isForeignIdLike || isUniqueIndexed) && canSendExplicitNull) {
     return null;
   }
 
   if (val === undefined || val === null) {
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
 
   if (typeLower.startsWith('datetime') || typeLower.startsWith('timestamp')) {
     const dt = toMysqlDateTimeString(val);
     if (dt !== null) return dt;
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
 
   if (typeLower === 'date') {
     const d = toMysqlDateOnlyString(val);
     if (d !== null) return d;
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
 
   if (
@@ -1954,7 +2040,7 @@ function formatValueForMysqlColumn(val: any, colMeta: MysqlColumnMeta): any {
   ) {
     const num = safeFiniteNumber(val, null);
     if (num !== null) return num;
-    return canLeaveNull ? null : 0;
+    return canSendExplicitNull ? null : 0;
   }
 
   if (typeLower.includes('json')) {
@@ -2299,24 +2385,38 @@ function buildProgramCandidateRow(
   nowIso: string,
   rels?: RelationValidationSets
 ): Record<string, any> {
+  const normStart = normalizeMysqlDateOnlyValue(p.startDate ?? p.start_date);
+  const normEnd = normalizeMysqlDateOnlyValue(p.endDate ?? p.end_date);
+  const normalizedPayload = {
+    ...p,
+    startDate: normStart || '',
+    endDate: normEnd || '',
+  };
   return {
     id: String(p.id).slice(0, 128),
     code: truncStr(p.code, 64),
     name: truncStr(p.name, 255) || '',
     location: truncStr(p.location, 255),
     folder_url: p.folderUrl || null,
+    folderUrl: p.folderUrl || null,
     pic_id: validFkOrNull(p.picId, rels?.userIds, 128),
+    picId: validFkOrNull(p.picId, rels?.userIds, 128),
     pic_name: truncStr(p.picName, 255),
+    picName: truncStr(p.picName, 255),
     description: p.description || null,
     donor: truncStr(p.donor, 255),
-    start_date: truncStr(p.startDate, 32),
-    end_date: truncStr(p.endDate, 32),
+    start_date: normStart,
+    end_date: normEnd,
+    startDate: normStart,
+    endDate: normEnd,
+    tanggal_mulai: normStart,
+    tanggal_selesai: normEnd,
     total_budget: safeFiniteNumber(p.totalBudget ?? p.budget, 0),
     currency: truncStr(p.currency || 'IDR', 16),
     status: truncStr(p.status || 'Aktif', 64),
     created_at: p.createdAt || nowIso,
     updated_at: p.updatedAt || nowIso,
-    raw_json: JSON.stringify(p),
+    raw_json: JSON.stringify(normalizedPayload),
   };
 }
 

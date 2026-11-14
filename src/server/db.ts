@@ -27,6 +27,7 @@ import {
   checkMysqlWritePrivileges,
   deleteMysqlUserRow,
   ensureMysqlSchema,
+  fetchProgramByIdFromMysql,
   fetchSystemAdminFromMysql,
   fetchUsersFromMysql,
   getMysqlPool,
@@ -1160,6 +1161,33 @@ class Database {
       console.warn(`[DB] Warning refreshing state from MySQL: ${sanitizeDbError(err)}`);
     }
     return false;
+  }
+
+  /**
+   * Memverifikasi dan menyinkronkan satu baris Program langsung dari tabel `programs` MySQL setelah operasi tulis.
+   */
+  public async verifyProgramInMysql(programId: string): Promise<Program | null> {
+    if (!isMysqlConfigured() || this.mysqlStatus !== 'ready') {
+      return (this.data.programs || []).find((p) => p.id === programId) || null;
+    }
+    const pool = await getMysqlPool();
+    if (!pool) {
+      return (this.data.programs || []).find((p) => p.id === programId) || null;
+    }
+    const hydrated = await fetchProgramByIdFromMysql(pool, programId);
+    if (hydrated && hydrated.id) {
+      const idx = (this.data.programs || []).findIndex((p) => p.id === programId);
+      if (idx !== -1) {
+        this.data.programs[idx] = hydrated;
+      } else {
+        this.data.programs = [hydrated, ...(this.data.programs || [])];
+      }
+      if (!this.hasUncommittedChanges() && !this.isCommittingWrite) {
+        this.lastCommittedJson = JSON.stringify(this.data);
+      }
+      return hydrated;
+    }
+    return null;
   }
 
   /**

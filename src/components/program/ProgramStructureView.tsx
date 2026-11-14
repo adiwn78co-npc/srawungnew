@@ -123,7 +123,7 @@ interface ProgramStructureViewProps {
 }
 
 export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
-  programs = [],
+  programs: propPrograms = [],
   outcomes,
   outputs,
   activities,
@@ -139,6 +139,34 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   onExternalChangeFiscalYear,
   onNavigateToFinanceTab,
 }) => {
+  const [localProgramOverrides, setLocalProgramOverrides] = useState<Record<string, Program>>({});
+  const programs = useMemo<Program[]>(() => {
+    const overrideIds = Object.keys(localProgramOverrides);
+    if (overrideIds.length === 0) return propPrograms;
+    const seen = new Set<string>();
+    const merged = propPrograms.map((p) => {
+      seen.add(p.id);
+      const ov = localProgramOverrides[p.id];
+      if (!ov) return p;
+      // Jika propPrograms dari server sudah sama atau lebih baru dan memiliki tanggal, gunakan propPrograms
+      if (
+        p.updatedAt &&
+        ov.updatedAt &&
+        p.updatedAt >= ov.updatedAt &&
+        p.startDate === ov.startDate &&
+        p.endDate === ov.endDate
+      ) {
+        return p;
+      }
+      return { ...p, ...ov };
+    });
+    for (const ov of Object.values(localProgramOverrides)) {
+      if (ov && ov.id && !seen.has(ov.id)) {
+        merged.unshift(ov);
+      }
+    }
+    return merged;
+  }, [propPrograms, localProgramOverrides]);
   const {
     currentUser,
     isDirector: rawIsDirector,
@@ -331,7 +359,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
         const datasetSig = `${syncRes.updatedDataset.id}__${
           syncRes.updatedDataset.updatedAt || ''
         }__${syncRes.updatedDataset.annualApprovedBudget}__${nextPeriods
-          .map((p) => `${p.id}:${p.code}:${p.allocatedAmount}:${p.isActiveForTor ? 1 : 0}`)
+          .map(
+            (p) =>
+              `${p.id}:${p.code}:${p.label}:${p.startDate}:${p.endDate}:${p.allocatedAmount}:${
+                p.isActiveForTor ? 1 : 0
+              }`
+          )
           .join('|')}`;
 
         if (lastLoadedDatasetSigRef.current !== datasetSig) {
@@ -379,7 +412,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       lastLoadedDatasetSigRef.current = `${persisted.id}__${
         persisted.updatedAt || ''
       }__${persisted.annualApprovedBudget}__${persistedPeriods
-        .map((p) => `${p.id}:${p.code}:${p.allocatedAmount}:${p.isActiveForTor ? 1 : 0}`)
+        .map(
+          (p) =>
+            `${p.id}:${p.code}:${p.label}:${p.startDate}:${p.endDate}:${p.allocatedAmount}:${
+              p.isActiveForTor ? 1 : 0
+            }`
+        )
         .join('|')}`;
       setDataset(persisted);
       setDraftCustom(persistedPeriods);
@@ -498,6 +536,8 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   // Program Creation / Edit Modal
   const [showProgramModal, setShowProgramModal] = useState(false);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
+  const [isSavingProgram, setIsSavingProgram] = useState(false);
+  const [programModalError, setProgramModalError] = useState<string | null>(null);
   const [programForm, setProgramForm] = useState({
     name: '',
     location: '',
@@ -910,16 +950,18 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     if (!isDirector) return;
     setErrorMessage(null);
     const normalizedPeriods = normalizeSingleActivePeriodList(draftCustom);
+    for (const cp of normalizedPeriods) {
+      if (cp.startDate && cp.endDate && cp.endDate < cp.startDate) {
+        setErrorMessage(
+          `Tanggal selesai pada periode ${cp.code} tidak boleh lebih awal dari tanggal mulai.`
+        );
+        return;
+      }
+    }
     const computedAnnualForYear = normalizedPeriods.reduce(
       (sum, p) => sum + (Number(p.allocatedAmount) || 0),
       0
     );
-    if (computedAnnualForYear <= 0) {
-      setErrorMessage(
-        'Masukkan nominal anggaran pada periode anggaran (Custom Period) terlebih dahulu.'
-      );
-      return;
-    }
 
     setDraftCustom(normalizedPeriods);
     const nowIso = new Date().toISOString();
@@ -929,19 +971,26 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     const periodSummaryText = normalizedPeriods
       .map(
         (p) =>
-          `${p.code} (${p.label}: ${formatRupiah(Number(p.allocatedAmount) || 0)}${
-            p.isActiveForTor ? ' · Aktif TOR' : ''
-          })`
+          `${p.code} (${p.label}, ${p.startDate || '-'} s/d ${p.endDate || '-'}: ${formatRupiah(
+            Number(p.allocatedAmount) || 0
+          )}${p.isActiveForTor ? ' · Aktif TOR' : ''})`
       )
       .join(', ');
 
+    const hasBudgetNominal = computedAnnualForYear > 0;
     const updated: ProgramBudgetDataset = {
       ...dataset,
-      isBudgetConfigured: true,
-      budgetApprovalStatus: 'Disetujui Direktur',
-      budgetApprovedBy: currentUser?.name || 'Executive Director',
-      budgetApprovedAt: nowIso,
-      budgetRevisionNotes: undefined,
+      isBudgetConfigured: hasBudgetNominal || Boolean(dataset.isBudgetConfigured),
+      budgetApprovalStatus: hasBudgetNominal
+        ? 'Disetujui Direktur'
+        : dataset.budgetApprovalStatus || 'Draft',
+      ...(hasBudgetNominal
+        ? {
+            budgetApprovedBy: currentUser?.name || 'Executive Director',
+            budgetApprovedAt: nowIso,
+            budgetRevisionNotes: undefined,
+          }
+        : {}),
       periodUpdateStatus: 'Menunggu Konfirmasi Finance',
       periodUpdatedByDirectorName: currentUser?.name || 'Dr. Hendra Wijaya',
       periodUpdatedByDirectorAt: nowIso,
@@ -957,7 +1006,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
           actorRole: currentUser?.roleTitle || 'Executive Director',
           actionType: 'PERIOD_CODE_UPDATED_BY_DIRECTOR',
           periodStructureType: 'custom',
-          summary: `Direktur meng-update Kode & Custom Period Program ${dataset.programName}: [${periodSummaryText}]. Periode Aktif TOR: ${activePeriod?.code} — ${activePeriod?.label}. Status: Menunggu Konfirmasi Finance.`,
+          summary: `Direktur meng-update Kode & Tanggal Custom Period Program ${dataset.programName}: [${periodSummaryText}]. Periode Aktif TOR: ${activePeriod?.code} — ${activePeriod?.label}.`,
           previousAnnualBudget: prevAnnual,
           newAnnualBudget: computedAnnualForYear,
         },
@@ -967,7 +1016,9 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
     if (!(await persistDatasetToServerAndLocal(updated))) return;
     setSuccessMessage(
-      `Kode & Periode (${normalizedPeriods.map((p) => p.code).join(', ')}) berhasil di-update oleh Direktur dan langsung terhubung ke TOR (${activePeriod?.code}). Menunggu konfirmasi Finance.`
+      `Kode & Tanggal Periode (${normalizedPeriods
+        .map((p) => `${p.code}: ${p.startDate || '-'} s/d ${p.endDate || '-'}`)
+        .join(', ')}) berhasil disimpan ke database MySQL.`
     );
   };
 
@@ -1660,9 +1711,36 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
     );
   };
 
+  const normalizeDateForHtmlInput = (raw?: string | null): string => {
+    if (!raw) return '';
+    const trimmed = String(raw).trim();
+    if (!trimmed || trimmed === '-' || trimmed.startsWith('0000-00-00')) return '';
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      const yyyy = Number(isoMatch[1]);
+      const mm = Number(isoMatch[2]);
+      const dd = Number(isoMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+      }
+      return '';
+    }
+    const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dmyMatch) {
+      const dd = Number(dmyMatch[1]);
+      const mm = Number(dmyMatch[2]);
+      const yyyy = Number(dmyMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+      }
+    }
+    return '';
+  };
+
   // Program Handlers
   const handleOpenAddProgram = () => {
     setEditingProgram(null);
+    setProgramModalError(null);
     setProgramForm({
       name: '',
       location: '',
@@ -1678,12 +1756,10 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleOpenEditProgram = (prog: Program, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    const todayIso = new Date().toISOString().slice(0, 10);
-    const cleanStart = (prog.startDate || '').slice(0, 10) || todayIso;
-    const cleanEnd =
-      (prog.endDate || '').slice(0, 10) ||
-      new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const cleanStart = normalizeDateForHtmlInput(prog.startDate);
+    const cleanEnd = normalizeDateForHtmlInput(prog.endDate);
     setEditingProgram(prog);
+    setProgramModalError(null);
     setProgramForm({
       name: prog.name,
       location: prog.location,
@@ -1700,10 +1776,13 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
   const handleSaveInlineFolderUrl = async (prog: Program) => {
     try {
       const cleanUrl = inlineFolderUrlDraft.trim();
-      await api.updateProgram(prog.id, {
+      const saved = await api.updateProgram(prog.id, {
         ...prog,
         folderUrl: cleanUrl,
       });
+      if (saved && saved.id) {
+        setLocalProgramOverrides((prev) => ({ ...prev, [saved.id]: saved }));
+      }
       await Promise.resolve(onRefresh());
       setEditingInlineFolderProgId(null);
       setErrorMessage(null);
@@ -1716,24 +1795,28 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleSaveProgramSubmit = async (asDraft = false) => {
     setErrorMessage(null);
+    setProgramModalError(null);
+    const cleanStart = normalizeDateForHtmlInput(programForm.startDate);
+    const cleanEnd = normalizeDateForHtmlInput(programForm.endDate);
+
     if (!programForm.name.trim()) {
-      setErrorMessage('Nama Program / Judul Program wajib diisi.');
+      setProgramModalError('Nama Program / Judul Program wajib diisi.');
       return;
     }
     if (!programForm.location.trim()) {
-      setErrorMessage('Lokasi Program wajib diisi.');
+      setProgramModalError('Lokasi Program wajib diisi.');
       return;
     }
-    if (!programForm.startDate) {
-      setErrorMessage('Tanggal Mulai pelaksanaan program wajib diisi.');
+    if (!cleanStart) {
+      setProgramModalError('Tanggal Mulai pelaksanaan program wajib diisi.');
       return;
     }
-    if (!programForm.endDate) {
-      setErrorMessage('Tanggal Selesai pelaksanaan program wajib diisi.');
+    if (!cleanEnd) {
+      setProgramModalError('Tanggal Selesai pelaksanaan program wajib diisi.');
       return;
     }
-    if (new Date(programForm.endDate) < new Date(programForm.startDate)) {
-      setErrorMessage('Tanggal selesai tidak boleh lebih awal daripada tanggal mulai.');
+    if (cleanEnd < cleanStart) {
+      setProgramModalError('Tanggal selesai tidak boleh lebih awal daripada tanggal mulai.');
       return;
     }
 
@@ -1741,29 +1824,54 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       ...programForm,
       name: programForm.name.trim(),
       location: programForm.location.trim(),
+      startDate: cleanStart,
+      endDate: cleanEnd,
       description: programForm.description.trim(),
       folderUrl: (programForm.folderUrl || '').trim(),
       status: asDraft ? ('Draft' as ProgramStatus) : programForm.status,
     };
 
+    setIsSavingProgram(true);
     try {
       if (editingProgram) {
-        await api.updateProgram(editingProgram.id, payload);
+        const updatedProg = await api.updateProgram(editingProgram.id, payload);
+        if (updatedProg && updatedProg.id) {
+          setLocalProgramOverrides((prev) => ({ ...prev, [updatedProg.id]: updatedProg }));
+        }
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
-        setSuccessMessage('Program berhasil diperbarui dan tersimpan ke database.');
+        setProgramModalError(null);
+        setSuccessMessage(
+          `Program "${updatedProg.name}" (${formatPeriodRange(
+            updatedProg.startDate,
+            updatedProg.endDate
+          )}) berhasil diperbarui dan tersimpan permanen di database MySQL.`
+        );
       } else {
         const created = await api.createProgram(payload);
+        if (created && created.id) {
+          setLocalProgramOverrides((prev) => ({ ...prev, [created.id]: created }));
+        }
         await Promise.resolve(onRefresh());
         setErrorMessage(null);
-        setSuccessMessage('Program baru berhasil dibuat dan tersimpan ke database.');
+        setProgramModalError(null);
+        setSuccessMessage(
+          `Program baru "${created.name}" (${formatPeriodRange(
+            created.startDate,
+            created.endDate
+          )}) berhasil dibuat dan tersimpan permanen di database MySQL.`
+        );
         setSelectedProgramId(created.id);
         handleSelectBudgetProgram(created.id);
       }
       setShowProgramModal(false);
     } catch (err: any) {
+      const msg = err?.message || 'Gagal menyimpan program ke database MySQL.';
       setSuccessMessage(null);
-      setErrorMessage(err.message || 'Gagal menyimpan program.');
+      setProgramModalError(msg);
+      setErrorMessage(msg);
+    } finally {
+      setIsSavingProgram(false);
     }
   };
 
@@ -1847,6 +1955,12 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
       const { type, id, label } = pendingDeleteConfirm;
       if (type === 'program') {
         await api.deleteProgram(id);
+        setLocalProgramOverrides((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
         if (selectedProgramId === id) {
           setSelectedProgramId(null);
         }
@@ -2392,7 +2506,35 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           <div className="text-[12px] text-[#787774] flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span>{prog.location || 'Lokasi belum ditentukan'}</span>
                             <span aria-hidden="true">·</span>
-                            <span>{formatPeriodRange(prog.startDate, prog.endDate)}</span>
+                            {(() => {
+                              const formattedRange = formatPeriodRange(prog.startDate, prog.endDate);
+                              if (formattedRange === '-' && canManage) {
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleOpenEditProgram(prog, e)}
+                                    className="inline-flex items-center gap-1 text-[#1D4ED8] hover:text-[#1E40AF] font-medium hover:underline cursor-pointer"
+                                    title="Klik untuk mengisi tanggal mulai dan selesai program"
+                                  >
+                                    <Calendar className="w-3 h-3" />
+                                    <span>Atur Tanggal</span>
+                                  </button>
+                                );
+                              }
+                              if (canManage) {
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleOpenEditProgram(prog, e)}
+                                    className="inline-flex items-center gap-1 text-[#2F3437] font-medium hover:text-[#1D4ED8] hover:underline cursor-pointer"
+                                    title="Klik untuk mengubah tanggal program"
+                                  >
+                                    <span>{formattedRange}</span>
+                                  </button>
+                                );
+                              }
+                              return <span>{formattedRange}</span>;
+                            })()}
                             {prog.picName && (
                               <>
                                 <span aria-hidden="true">·</span>
@@ -2431,6 +2573,18 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                           <Users className="w-3.5 h-3.5 text-[#5F5E5B]" />
                           <span>Peserta Program</span>
                         </button>
+
+                        {canManage && (
+                          <button
+                            type="button"
+                            onClick={(e) => handleOpenEditProgram(prog, e)}
+                            className="h-7 px-2.5 bg-white hover:bg-[#F2F1EE] text-[#2F3437] text-[11.5px] font-medium rounded border border-[#E3E2E0] transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                            title="Edit informasi & tanggal program"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-[#5F5E5B]" />
+                            <span>Edit</span>
+                          </button>
+                        )}
 
                         <button
                           type="button"
@@ -2656,12 +2810,28 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                       <strong className="font-medium text-[#252525]">{currentProg.location}</strong>
                     </span>
                     <span className="text-[#D9D9D6]">·</span>
-                    <span className="inline-flex items-center gap-1">
-                      <Calendar className="w-3 h-3 text-[#9A9996]" />
-                      <strong className="font-medium text-[#252525]">
-                        {formatPeriodRange(currentProg.startDate, currentProg.endDate)}
-                      </strong>
-                    </span>
+                    {canManage ? (
+                      <button
+                        type="button"
+                        onClick={(e) => handleOpenEditProgram(currentProg, e)}
+                        className="inline-flex items-center gap-1 hover:text-[#1D4ED8] cursor-pointer"
+                        title="Klik untuk mengubah tanggal mulai & selesai program"
+                      >
+                        <Calendar className="w-3 h-3 text-[#9A9996]" />
+                        <strong className="font-medium text-[#252525] hover:text-[#1D4ED8] hover:underline">
+                          {formatPeriodRange(currentProg.startDate, currentProg.endDate) === '-'
+                            ? 'Atur Tanggal Program'
+                            : formatPeriodRange(currentProg.startDate, currentProg.endDate)}
+                        </strong>
+                      </button>
+                    ) : (
+                      <span className="inline-flex items-center gap-1">
+                        <Calendar className="w-3 h-3 text-[#9A9996]" />
+                        <strong className="font-medium text-[#252525]">
+                          {formatPeriodRange(currentProg.startDate, currentProg.endDate)}
+                        </strong>
+                      </span>
+                    )}
                     {currentProg.picName && (
                       <>
                         <span className="text-[#D9D9D6]">·</span>
@@ -7130,6 +7300,13 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             </div>
 
             <div className="p-5 space-y-4 max-h-[78vh] overflow-y-auto text-xs md:text-sm">
+              {programModalError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{programModalError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
                   Nama Program / Judul Program <span className="text-rose-500">*</span>
@@ -7208,7 +7385,7 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                 <div className="relative">
                   <FolderOpen className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
-                    type="url"
+                    type="text"
                     placeholder="https://drive.google.com/drive/folders/..."
                     value={programForm.folderUrl || ''}
                     onChange={(e) => setProgramForm({ ...programForm, folderUrl: e.target.value })}
@@ -7265,8 +7442,9 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
             <div className="p-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
+                disabled={isSavingProgram}
                 onClick={() => setShowProgramModal(false)}
-                className="px-3.5 py-1.5 border border-slate-300 rounded text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                className="px-3.5 py-1.5 border border-slate-300 rounded text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
               >
                 Batal
               </button>
@@ -7275,17 +7453,23 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
                 {!editingProgram && (
                   <button
                     type="button"
+                    disabled={isSavingProgram}
                     onClick={() => handleSaveProgramSubmit(true)}
-                    className="px-3.5 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 rounded text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
+                    className="px-3.5 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 rounded text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    Simpan Draft
+                    {isSavingProgram ? 'Menyimpan...' : 'Simpan Draft'}
                   </button>
                 )}
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+                  disabled={isSavingProgram}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
                 >
-                  {editingProgram ? 'Simpan Perubahan' : 'Simpan Program'}
+                  {isSavingProgram
+                    ? 'Menyimpan...'
+                    : editingProgram
+                    ? 'Simpan Perubahan'
+                    : 'Simpan Program'}
                 </button>
               </div>
             </div>

@@ -2487,6 +2487,45 @@ async function startServer() {
     });
   });
 
+  function normalizeProgramDateInput(raw: unknown): string {
+    if (raw === null || raw === undefined) return '';
+    const s = String(raw).trim();
+    if (
+      !s ||
+      s === '-' ||
+      s.toLowerCase() === 'null' ||
+      s.toLowerCase() === 'undefined' ||
+      s.toLowerCase() === 'invalid date' ||
+      s.startsWith('0000-00-00')
+    ) {
+      return '';
+    }
+    const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      const yyyy = Number(isoMatch[1]);
+      const mm = Number(isoMatch[2]);
+      const dd = Number(isoMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+      }
+      return '';
+    }
+    const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dmyMatch) {
+      const dd = Number(dmyMatch[1]);
+      const mm = Number(dmyMatch[2]);
+      const yyyy = Number(dmyMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+      }
+    }
+    const parsed = new Date(s);
+    if (!Number.isNaN(parsed.getTime()) && parsed.getFullYear() > 0) {
+      return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+    }
+    return '';
+  }
+
   // Programs CRUD
   app.post('/api/programs', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
@@ -2510,25 +2549,30 @@ async function startServer() {
       currency,
       location,
       startDate,
+      start_date,
       endDate,
+      end_date,
       description,
       folderUrl,
       picId,
       status,
     } = req.body;
+    const cleanStart = normalizeProgramDateInput(startDate ?? start_date);
+    const cleanEnd = normalizeProgramDateInput(endDate ?? end_date);
+
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Nama Program / Judul Program wajib diisi' });
     }
     if (!location || !location.trim()) {
       return res.status(400).json({ error: 'Lokasi Program wajib diisi' });
     }
-    if (!startDate) {
-      return res.status(400).json({ error: 'Tanggal Mulai program wajib diisi' });
+    if (!cleanStart) {
+      return res.status(400).json({ error: 'Tanggal Mulai program wajib diisi dengan format tanggal yang valid' });
     }
-    if (!endDate) {
-      return res.status(400).json({ error: 'Tanggal Selesai program wajib diisi' });
+    if (!cleanEnd) {
+      return res.status(400).json({ error: 'Tanggal Selesai program wajib diisi dengan format tanggal yang valid' });
     }
-    if (new Date(endDate) < new Date(startDate)) {
+    if (cleanEnd < cleanStart) {
       return res.status(400).json({ error: 'Tanggal selesai tidak boleh lebih awal dari tanggal mulai' });
     }
 
@@ -2548,8 +2592,8 @@ async function startServer() {
       name: name.trim(),
       donor: typeof donor === 'string' && donor.trim() ? donor.trim() : undefined,
       location: location.trim(),
-      startDate: String(startDate).slice(0, 10),
-      endDate: String(endDate).slice(0, 10),
+      startDate: cleanStart,
+      endDate: cleanEnd,
       totalBudget: resolvedBudget,
       currency: typeof currency === 'string' && currency.trim() ? currency.trim() : 'IDR',
       description: description ? description.trim() : '',
@@ -2572,13 +2616,19 @@ async function startServer() {
         action: 'Pembuatan Program',
         entityType: 'PROGRAM',
         entityId: newProgram.id,
-        details: `Membuat Program baru: ${newProgram.name} di ${newProgram.location}`,
+        details: `Membuat Program baru: ${newProgram.name} (${cleanStart} s/d ${cleanEnd}) di ${newProgram.location}`,
         timestamp: nowIso,
       });
     });
 
     await db.commitPendingWrites('POST /api/programs');
-    res.status(201).json(newProgram);
+    const verified = await db.verifyProgramInMysql(newProgram.id);
+    if (!verified || !verified.startDate || !verified.endDate) {
+      return res.status(500).json({
+        error: '[DATABASE WRITE ERROR] Gagal memverifikasi penyimpanan tanggal Program di database MySQL.',
+      });
+    }
+    res.status(201).json(verified);
   });
 
   app.put('/api/programs/:id', async (req: Request, res: Response) => {
@@ -2604,15 +2654,35 @@ async function startServer() {
       currency,
       location,
       startDate,
+      start_date,
       endDate,
+      end_date,
       description,
       folderUrl,
       picId,
       status,
     } = req.body;
 
-    if (startDate && endDate && new Date(endDate) < new Date(startDate)) {
-      return res.status(400).json({ error: 'Tanggal selesai tidak boleh lebih awal dari tanggal mulai' });
+    const rawStartInput = startDate !== undefined ? startDate : start_date;
+    const rawEndInput = endDate !== undefined ? endDate : end_date;
+    const normalizedStartInput =
+      rawStartInput !== undefined ? normalizeProgramDateInput(rawStartInput) : undefined;
+    const normalizedEndInput =
+      rawEndInput !== undefined ? normalizeProgramDateInput(rawEndInput) : undefined;
+
+    if (
+      rawStartInput !== undefined &&
+      String(rawStartInput).trim() !== '' &&
+      !normalizedStartInput
+    ) {
+      return res.status(400).json({ error: 'Format Tanggal Mulai tidak valid' });
+    }
+    if (
+      rawEndInput !== undefined &&
+      String(rawEndInput).trim() !== '' &&
+      !normalizedEndInput
+    ) {
+      return res.status(400).json({ error: 'Format Tanggal Selesai tidak valid' });
     }
 
     const data = db.getData();
@@ -2620,6 +2690,8 @@ async function startServer() {
     const nowIso = new Date().toISOString();
 
     let updated: Program | null = null;
+    let dateOrderInvalid = false;
+
     db.update((d) => {
       if (!d.programs) d.programs = [];
       const idx = d.programs.findIndex((p) => p.id === id);
@@ -2632,13 +2704,19 @@ async function startServer() {
             ? Number(budget) || 0
             : existingProg.totalBudget;
         const cleanStart =
-          startDate !== undefined
-            ? String(startDate || '').slice(0, 10)
-            : existingProg.startDate;
+          normalizedStartInput !== undefined
+            ? normalizedStartInput
+            : normalizeProgramDateInput(existingProg.startDate);
         const cleanEnd =
-          endDate !== undefined
-            ? String(endDate || '').slice(0, 10)
-            : existingProg.endDate;
+          normalizedEndInput !== undefined
+            ? normalizedEndInput
+            : normalizeProgramDateInput(existingProg.endDate);
+
+        if (cleanStart && cleanEnd && cleanEnd < cleanStart) {
+          dateOrderInvalid = true;
+          return;
+        }
+
         d.programs[idx] = {
           ...existingProg,
           code:
@@ -2703,15 +2781,30 @@ async function startServer() {
           action: 'Pembaruan Program',
           entityType: 'PROGRAM',
           entityId: id,
-          details: `Memperbarui informasi Program: ${updated.name}`,
+          details: `Memperbarui informasi Program: ${(updated as any).name} (${cleanStart || '-'} s/d ${cleanEnd || '-'})`,
           timestamp: nowIso,
         });
       }
     });
 
+    if (dateOrderInvalid) {
+      db.rollbackUncommittedChanges();
+      return res.status(400).json({ error: 'Tanggal selesai tidak boleh lebih awal dari tanggal mulai' });
+    }
     if (!updated) return res.status(404).json({ error: 'Program tidak ditemukan' });
+
     await db.commitPendingWrites(`PUT /api/programs/${id}`);
-    res.json(updated);
+    const verified = await db.verifyProgramInMysql(id);
+    if (
+      !verified ||
+      (normalizedStartInput && verified.startDate !== normalizedStartInput) ||
+      (normalizedEndInput && verified.endDate !== normalizedEndInput)
+    ) {
+      return res.status(500).json({
+        error: '[DATABASE WRITE ERROR] Tanggal Program gagal diverifikasi pada tabel programs MySQL.',
+      });
+    }
+    res.json(verified);
   });
 
   app.delete('/api/programs/:id', async (req: Request, res: Response) => {
@@ -8675,12 +8768,43 @@ async function startServer() {
 
         if (Array.isArray(draft.programs)) {
           const pIdx = draft.programs.findIndex((p) => p.id === savedDataset.programId);
-          if (pIdx !== -1 && (savedDataset.isBudgetConfigured || effectiveTotalProgBudget > 0)) {
-            draft.programs[pIdx] = {
-              ...draft.programs[pIdx],
-              totalBudget: effectiveTotalProgBudget,
-              updatedAt: nowIso,
-            } as any;
+          if (pIdx !== -1) {
+            const existingProg = draft.programs[pIdx];
+            const periodStarts = (Array.isArray(savedDataset.customPeriods)
+              ? savedDataset.customPeriods
+              : []
+            )
+              .map((cp: any) => normalizeProgramDateInput(cp?.startDate))
+              .filter(Boolean)
+              .sort();
+            const periodEnds = (Array.isArray(savedDataset.customPeriods)
+              ? savedDataset.customPeriods
+              : []
+            )
+              .map((cp: any) => normalizeProgramDateInput(cp?.endDate))
+              .filter(Boolean)
+              .sort();
+            const nextProgStart =
+              normalizeProgramDateInput(existingProg.startDate) || periodStarts[0] || '';
+            const nextProgEnd =
+              normalizeProgramDateInput(existingProg.endDate) ||
+              periodEnds[periodEnds.length - 1] ||
+              '';
+            const shouldUpdateBudget =
+              savedDataset.isBudgetConfigured || effectiveTotalProgBudget > 0;
+            const shouldBackfillDates =
+              (nextProgStart && nextProgStart !== existingProg.startDate) ||
+              (nextProgEnd && nextProgEnd !== existingProg.endDate);
+
+            if (shouldUpdateBudget || shouldBackfillDates) {
+              draft.programs[pIdx] = {
+                ...existingProg,
+                ...(shouldUpdateBudget ? { totalBudget: effectiveTotalProgBudget } : {}),
+                ...(nextProgStart ? { startDate: nextProgStart } : {}),
+                ...(nextProgEnd ? { endDate: nextProgEnd } : {}),
+                updatedAt: nowIso,
+              } as any;
+            }
           }
         }
       }

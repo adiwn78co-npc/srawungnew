@@ -3,14 +3,16 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import fs3 from "fs";
 import path3 from "path";
-import crypto from "crypto";
+import crypto2 from "crypto";
 import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/server/db.ts
+import crypto from "crypto";
 import fs2 from "fs";
 import path2 from "path";
 
 // src/server/mysqlPool.ts
+import { execFileSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -34,6 +36,243 @@ for (const envCandidate of [
 var cachedPool = null;
 var cachedPoolHostOverride = null;
 var loggedCloudRunLoopbackNotice = false;
+var localMariaDbReadyPromise = null;
+var LOCAL_MARIADB_BIN = "/usr/sbin/mariadbd";
+var LOCAL_MYSQL_CLI = "/usr/bin/mysql";
+var LOCAL_MYSQLADMIN_CLI = "/usr/bin/mysqladmin";
+var LOCAL_MARIADB_SOCKET = "/run/mysqld/mysqld.sock";
+var LOCAL_MARIADB_DB = "meal_connect";
+var LOCAL_MARIADB_USER = "meal_app";
+var LOCAL_MARIADB_INSTALL_DB = "/usr/bin/mariadb-install-db";
+var LOCAL_MYSQL_INSTALL_DB = "/usr/bin/mysql_install_db";
+var LOCAL_APT_GET = "/usr/bin/apt-get";
+function getPersistentLocalMariaDbDataDir() {
+  return path.resolve(process.cwd(), "data", "mysql_datadir");
+}
+function canAutoProvisionPreviewMariaDb() {
+  try {
+    return isCloudRunEnvironment() && typeof process.getuid === "function" && process.getuid() === 0 && fs.existsSync(LOCAL_APT_GET);
+  } catch {
+    return false;
+  }
+}
+function hasLocalMariaDbDaemonAvailable() {
+  if (process.env.DISABLE_LOCAL_MARIADB === "true") {
+    return false;
+  }
+  try {
+    if (fs.existsSync(LOCAL_MARIADB_BIN) && fs.existsSync(LOCAL_MYSQL_CLI)) {
+      return true;
+    }
+    return canAutoProvisionPreviewMariaDb();
+  } catch {
+    return false;
+  }
+}
+async function ensureLocalMariaDbReady() {
+  if (!hasLocalMariaDbDaemonAvailable()) {
+    return;
+  }
+  if (localMariaDbReadyPromise) {
+    return localMariaDbReadyPromise;
+  }
+  const cleanCliEnv = {
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    HOME: "/root",
+    DEBIAN_FRONTEND: "noninteractive"
+  };
+  localMariaDbReadyPromise = (async () => {
+    if ((!fs.existsSync(LOCAL_MARIADB_BIN) || !fs.existsSync(LOCAL_MYSQL_CLI)) && canAutoProvisionPreviewMariaDb()) {
+      for (let waitIdx = 0; waitIdx < 20; waitIdx++) {
+        if (fs.existsSync(LOCAL_MARIADB_BIN) && fs.existsSync(LOCAL_MYSQL_CLI)) {
+          break;
+        }
+        try {
+          execFileSync(LOCAL_APT_GET, ["update", "-qq"], {
+            env: cleanCliEnv,
+            stdio: "ignore",
+            timeout: 45e3
+          });
+          execFileSync(
+            LOCAL_APT_GET,
+            ["install", "-y", "-qq", "mariadb-server", "mariadb-client"],
+            {
+              env: cleanCliEnv,
+              stdio: "ignore",
+              timeout: 9e4
+            }
+          );
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+    }
+    if (!fs.existsSync(LOCAL_MARIADB_BIN) || !fs.existsSync(LOCAL_MYSQL_CLI)) {
+      localMariaDbReadyPromise = null;
+      throw new Error("MariaDB server binary is unavailable in this environment.");
+    }
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        [
+          "--protocol=socket",
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          "-u",
+          LOCAL_MARIADB_USER,
+          LOCAL_MARIADB_DB,
+          "-e",
+          "SELECT 1;"
+        ],
+        { env: cleanCliEnv, stdio: "ignore", timeout: 3e3 }
+      );
+      return;
+    } catch {
+    }
+    const persistentDataDir = getPersistentLocalMariaDbDataDir();
+    try {
+      fs.mkdirSync(persistentDataDir, { recursive: true });
+      execFileSync("/bin/mkdir", ["-p", "/run/mysqld"], {
+        env: cleanCliEnv,
+        stdio: "ignore",
+        timeout: 3e3
+      });
+      execFileSync("/bin/chown", ["-R", "mysql:mysql", "/run/mysqld", persistentDataDir], {
+        env: cleanCliEnv,
+        stdio: "ignore",
+        timeout: 5e3
+      });
+    } catch {
+    }
+    const markerFile = path.join(persistentDataDir, ".meal_connect_datadir_ready");
+    let needRestartForPersistentDir = false;
+    if (!fs.existsSync(path.join(persistentDataDir, "mysql"))) {
+      const installDbBin = fs.existsSync(LOCAL_MARIADB_INSTALL_DB) ? LOCAL_MARIADB_INSTALL_DB : LOCAL_MYSQL_INSTALL_DB;
+      execFileSync(
+        installDbBin,
+        [
+          "--user=mysql",
+          `--datadir=${persistentDataDir}`,
+          "--auth-root-authentication-method=normal"
+        ],
+        { env: cleanCliEnv, stdio: "ignore", timeout: 3e4 }
+      );
+      fs.writeFileSync(markerFile, (/* @__PURE__ */ new Date()).toISOString(), "utf-8");
+      needRestartForPersistentDir = true;
+    }
+    try {
+      const activeDataDirOut = execFileSync(
+        LOCAL_MYSQL_CLI,
+        [
+          "--protocol=socket",
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          "-u",
+          "root",
+          "-N",
+          "-s",
+          "-e",
+          "SELECT @@datadir;"
+        ],
+        { env: cleanCliEnv, encoding: "utf-8", timeout: 2500 }
+      ).trim();
+      const normalizedActive = activeDataDirOut.replace(/\/+$/, "");
+      const normalizedTarget = persistentDataDir.replace(/\/+$/, "");
+      if (normalizedActive && normalizedActive !== normalizedTarget) {
+        needRestartForPersistentDir = true;
+      }
+    } catch {
+    }
+    if (needRestartForPersistentDir) {
+      try {
+        execFileSync(
+          LOCAL_MYSQLADMIN_CLI,
+          ["--protocol=socket", `--socket=${LOCAL_MARIADB_SOCKET}`, "-u", "root", "shutdown"],
+          { env: cleanCliEnv, stdio: "ignore", timeout: 5e3 }
+        );
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      } catch {
+      }
+    }
+    let sqlReady = false;
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        ["--protocol=socket", `--socket=${LOCAL_MARIADB_SOCKET}`, "-u", "root", "-e", "SELECT 1;"],
+        { env: cleanCliEnv, stdio: "ignore", timeout: 2500 }
+      );
+      sqlReady = true;
+    } catch {
+      sqlReady = false;
+    }
+    if (!sqlReady) {
+      execFileSync("/bin/chown", ["-R", "mysql:mysql", "/run/mysqld", persistentDataDir], {
+        env: cleanCliEnv,
+        stdio: "ignore",
+        timeout: 5e3
+      });
+      const child = spawn(
+        LOCAL_MARIADB_BIN,
+        [
+          "--user=mysql",
+          `--datadir=${persistentDataDir}`,
+          `--socket=${LOCAL_MARIADB_SOCKET}`,
+          "--pid-file=/run/mysqld/mysqld.pid",
+          "--bind-address=127.0.0.1",
+          "--port=3306"
+        ],
+        {
+          detached: true,
+          env: cleanCliEnv,
+          stdio: "ignore"
+        }
+      );
+      child.unref();
+      for (let i = 0; i < 45; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        try {
+          execFileSync(
+            LOCAL_MYSQL_CLI,
+            [
+              "--protocol=socket",
+              `--socket=${LOCAL_MARIADB_SOCKET}`,
+              "-u",
+              "root",
+              "-e",
+              "SELECT 1;"
+            ],
+            { env: cleanCliEnv, stdio: "ignore", timeout: 2500 }
+          );
+          sqlReady = true;
+          break;
+        } catch {
+        }
+      }
+    }
+    if (!sqlReady) {
+      localMariaDbReadyPromise = null;
+      throw new Error("Local MariaDB service failed to accept SQL connections within timeout.");
+    }
+    const bootstrapSql = [
+      `CREATE DATABASE IF NOT EXISTS \`${LOCAL_MARIADB_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+      `CREATE USER IF NOT EXISTS '${LOCAL_MARIADB_USER}'@'localhost';`,
+      `CREATE USER IF NOT EXISTS '${LOCAL_MARIADB_USER}'@'127.0.0.1';`,
+      `GRANT ALL PRIVILEGES ON \`${LOCAL_MARIADB_DB}\`.* TO '${LOCAL_MARIADB_USER}'@'localhost';`,
+      `GRANT ALL PRIVILEGES ON \`${LOCAL_MARIADB_DB}\`.* TO '${LOCAL_MARIADB_USER}'@'127.0.0.1';`,
+      "FLUSH PRIVILEGES;"
+    ].join(" ");
+    try {
+      execFileSync(
+        LOCAL_MYSQL_CLI,
+        ["--protocol=socket", `--socket=${LOCAL_MARIADB_SOCKET}`, "-u", "root", "-e", bootstrapSql],
+        { env: cleanCliEnv, stdio: "ignore", timeout: 6e3 }
+      );
+    } catch (err) {
+      localMariaDbReadyPromise = null;
+      throw err;
+    }
+  })();
+  return localMariaDbReadyPromise;
+}
 function isCloudRunEnvironment() {
   return Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
 }
@@ -71,8 +310,9 @@ function resolveMysqlConfig() {
     } catch {
     }
   }
+  const remoteHostOverride = isCloudRunEnvironment() ? String(process.env.MYSQL_REMOTE_HOST || "").trim() : "";
   const mysqlHost = String(
-    process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ""
+    remoteHostOverride || process.env.MYSQL_HOST || process.env.DB_HOST || urlHost || ""
   ).trim();
   const mysqlUser = String(
     process.env.MYSQL_USER || process.env.DB_USER || process.env.DB_USERNAME || urlUser || ""
@@ -93,13 +333,26 @@ function resolveMysqlConfig() {
   const socketPath = String(
     process.env.MYSQL_SOCKET_PATH || process.env.DB_SOCKET_PATH || ""
   ).trim() || void 0;
+  const externalLoopbackInCloudRun = isCloudRunEnvironment() && Boolean(host) && isLoopbackMysqlHost(host);
+  if ((!host || !user || !database || externalLoopbackInCloudRun) && hasLocalMariaDbDaemonAvailable()) {
+    return {
+      host: "127.0.0.1",
+      port: 3306,
+      user: LOCAL_MARIADB_USER,
+      password: "",
+      database: LOCAL_MARIADB_DB,
+      socketPath: fs.existsSync(LOCAL_MARIADB_SOCKET) ? LOCAL_MARIADB_SOCKET : void 0,
+      isLocalMariaDbBootstrap: true
+    };
+  }
   return {
     host,
     port,
     user,
     password,
     database,
-    socketPath
+    socketPath,
+    isLocalMariaDbBootstrap: false
   };
 }
 function validateMysqlEnvConfiguration() {
@@ -126,6 +379,9 @@ function isMysqlConfigured() {
   if (!cfg.host || !cfg.user || !cfg.database) {
     return false;
   }
+  if (cfg.isLocalMariaDbBootstrap) {
+    return true;
+  }
   if (isCloudRunEnvironment() && isLoopbackMysqlHost(cfg.host) && process.env.MYSQL_STRICT_REQUIRED !== "true") {
     if (!loggedCloudRunLoopbackNotice) {
       loggedCloudRunLoopbackNotice = true;
@@ -137,9 +393,19 @@ function isMysqlConfigured() {
   }
   return true;
 }
+function isMysqlLoopbackInCloudRun() {
+  const cfg = resolveMysqlConfig();
+  if (cfg.isLocalMariaDbBootstrap) {
+    return false;
+  }
+  return Boolean(
+    isCloudRunEnvironment() && cfg.host && isLoopbackMysqlHost(cfg.host) && process.env.MYSQL_STRICT_REQUIRED !== "true"
+  );
+}
 async function resetMysqlPool() {
   const existing = cachedPool;
   cachedPool = null;
+  schemaVerifiedOnceForPool = false;
   tableColumnsCache.clear();
   if (existing) {
     try {
@@ -151,6 +417,10 @@ async function resetMysqlPool() {
 async function getMysqlPool(hostOverride) {
   if (!isMysqlConfigured()) {
     return null;
+  }
+  const initialCfg = resolveMysqlConfig();
+  if (initialCfg.isLocalMariaDbBootstrap) {
+    await ensureLocalMariaDbReady();
   }
   if (cachedPool && (!hostOverride || cachedPoolHostOverride === hostOverride)) {
     return cachedPool;
@@ -176,7 +446,8 @@ async function getMysqlPool(hostOverride) {
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    charset: "utf8mb4"
+    charset: "utf8mb4",
+    dateStrings: true
   };
   if (cfg.socketPath) {
     poolConfig.socketPath = cfg.socketPath;
@@ -207,7 +478,91 @@ async function verifyAndGetMysqlPool() {
     throw err;
   }
 }
+var EXPECTED_TABLE_COLUMN_ADDITIONS = [
+  { table: "users", column: "username", definition: "VARCHAR(128) NULL" },
+  { table: "users", column: "password_hash", definition: "VARCHAR(255) NULL" },
+  { table: "users", column: "account_status", definition: "VARCHAR(64) NULL" },
+  { table: "users", column: "permissions_json", definition: "LONGTEXT NULL" },
+  { table: "users", column: "last_login_at", definition: "VARCHAR(64) NULL" },
+  { table: "users", column: "must_change_password", definition: "TINYINT(1) NOT NULL DEFAULT 0" },
+  { table: "users", column: "password_updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "users", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "programs", column: "code", definition: "VARCHAR(64) NULL" },
+  { table: "programs", column: "location", definition: "VARCHAR(255) NULL" },
+  { table: "programs", column: "folder_url", definition: "TEXT NULL" },
+  { table: "programs", column: "description", definition: "TEXT NULL" },
+  { table: "programs", column: "donor", definition: "VARCHAR(255) NULL" },
+  { table: "programs", column: "pic_id", definition: "VARCHAR(128) NULL" },
+  { table: "programs", column: "pic_name", definition: "VARCHAR(255) NULL" },
+  { table: "programs", column: "start_date", definition: "VARCHAR(32) NULL" },
+  { table: "programs", column: "end_date", definition: "VARCHAR(32) NULL" },
+  { table: "programs", column: "total_budget", definition: "DECIMAL(18, 2) NOT NULL DEFAULT 0" },
+  { table: "programs", column: "currency", definition: "VARCHAR(16) DEFAULT 'IDR'" },
+  { table: "programs", column: "status", definition: "VARCHAR(64) NULL" },
+  { table: "programs", column: "created_at", definition: "VARCHAR(64) NULL" },
+  { table: "programs", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "programs", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "outcomes", column: "outcome_number", definition: "VARCHAR(64) NULL" },
+  { table: "outcomes", column: "title", definition: "TEXT NULL" },
+  { table: "outcomes", column: "pic_id", definition: "VARCHAR(128) NULL" },
+  { table: "outcomes", column: "pic_name", definition: "VARCHAR(255) NULL" },
+  { table: "outcomes", column: "status", definition: "VARCHAR(64) NULL" },
+  { table: "outcomes", column: "indicators_json", definition: "LONGTEXT NULL" },
+  { table: "outcomes", column: "created_at", definition: "VARCHAR(64) NULL" },
+  { table: "outcomes", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "outcomes", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "outputs", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "outputs", column: "output_number", definition: "VARCHAR(64) NULL" },
+  { table: "outputs", column: "title", definition: "TEXT NULL" },
+  { table: "outputs", column: "pic_id", definition: "VARCHAR(128) NULL" },
+  { table: "outputs", column: "pic_name", definition: "VARCHAR(255) NULL" },
+  { table: "outputs", column: "status", definition: "VARCHAR(64) NULL" },
+  { table: "outputs", column: "indicators_json", definition: "LONGTEXT NULL" },
+  { table: "outputs", column: "created_at", definition: "VARCHAR(64) NULL" },
+  { table: "outputs", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "outputs", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "activities", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "activities", column: "outcome_id", definition: "VARCHAR(128) NULL" },
+  { table: "activities", column: "activity_number", definition: "VARCHAR(64) NULL" },
+  { table: "activities", column: "title", definition: "TEXT NULL" },
+  { table: "activities", column: "pic_id", definition: "VARCHAR(128) NULL" },
+  { table: "activities", column: "pic_name", definition: "VARCHAR(255) NULL" },
+  { table: "activities", column: "start_date", definition: "VARCHAR(32) NULL" },
+  { table: "activities", column: "end_date", definition: "VARCHAR(32) NULL" },
+  { table: "activities", column: "anticipated_inputs", definition: "TEXT NULL" },
+  { table: "activities", column: "planned_participants_breakdown", definition: "TEXT NULL" },
+  { table: "activities", column: "status", definition: "VARCHAR(64) NULL" },
+  { table: "activities", column: "created_at", definition: "VARCHAR(64) NULL" },
+  { table: "activities", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "activities", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "sub_activities", column: "program_id", definition: "VARCHAR(128) NULL" },
+  { table: "sub_activities", column: "outcome_id", definition: "VARCHAR(128) NULL" },
+  { table: "sub_activities", column: "output_id", definition: "VARCHAR(128) NULL" },
+  { table: "sub_activities", column: "title", definition: "TEXT NULL" },
+  { table: "sub_activities", column: "pic_name", definition: "VARCHAR(255) NULL" },
+  { table: "sub_activities", column: "start_date", definition: "VARCHAR(32) NULL" },
+  { table: "sub_activities", column: "end_date", definition: "VARCHAR(32) NULL" },
+  { table: "sub_activities", column: "status", definition: "VARCHAR(64) NULL" },
+  { table: "sub_activities", column: "created_at", definition: "VARCHAR(64) NULL" },
+  { table: "sub_activities", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "sub_activities", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "tors", column: "sub_activity_id", definition: "VARCHAR(128) NULL" },
+  { table: "tors", column: "activity_status", definition: "VARCHAR(64) NULL" },
+  { table: "tors", column: "budget_approved", definition: "DECIMAL(18, 2) NULL" },
+  { table: "tors", column: "start_date", definition: "VARCHAR(32) NULL" },
+  { table: "tors", column: "end_date", definition: "VARCHAR(32) NULL" },
+  { table: "tors", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "program_budgets", column: "budget_approval_status", definition: "VARCHAR(64) NULL" },
+  { table: "program_budgets", column: "raw_json", definition: "LONGTEXT NULL" },
+  { table: "meeting_minutes", column: "document_number", definition: "VARCHAR(128) NULL" },
+  { table: "meeting_minutes", column: "updated_at", definition: "VARCHAR(64) NULL" },
+  { table: "participants", column: "updated_at", definition: "VARCHAR(64) NULL" }
+];
+var schemaVerifiedOnceForPool = false;
 async function ensureMysqlSchema(pool) {
+  if (schemaVerifiedOnceForPool && cachedPool === pool) {
+    return;
+  }
   const candidatePaths = [
     path.resolve(process.cwd(), "database", "schema.sql"),
     path.resolve(__poolDir, "database", "schema.sql"),
@@ -226,6 +581,30 @@ async function ensureMysqlSchema(pool) {
     }
     await pool.query(stmt);
   }
+  const existingColsByTable = /* @__PURE__ */ new Map();
+  for (const item of EXPECTED_TABLE_COLUMN_ADDITIONS) {
+    try {
+      let colSet = existingColsByTable.get(item.table);
+      if (!colSet) {
+        const [cols] = await pool.query(`SHOW COLUMNS FROM \`${item.table}\``);
+        colSet = new Set(
+          (Array.isArray(cols) ? cols : []).map(
+            (c) => String(c.Field || c.field || "").toLowerCase()
+          )
+        );
+        existingColsByTable.set(item.table, colSet);
+      }
+      if (!colSet.has(item.column.toLowerCase())) {
+        await pool.query(
+          `ALTER TABLE \`${item.table}\` ADD COLUMN \`${item.column}\` ${item.definition}`
+        );
+        colSet.add(item.column.toLowerCase());
+        tableColumnsCache.delete(item.table);
+      }
+    } catch {
+    }
+  }
+  schemaVerifiedOnceForPool = true;
 }
 function truncStr(val, maxLen) {
   if (val === null || val === void 0 || val === "") return null;
@@ -242,6 +621,7 @@ function safeJsonParse(raw, fallback) {
   }
 }
 var DEFAULT_PERMS_BY_ROLE = {
+  system_admin: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: true, canViewAllTors: true },
   admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
   director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
   hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
@@ -252,7 +632,10 @@ var DEFAULT_PERMS_BY_ROLE = {
 };
 function normalizeMysqlUserRole(rawRole) {
   const clean = String(rawRole || "").trim().toLowerCase();
-  if (clean === "admin" || clean === "administrator" || clean === "system administrator" || clean === "superadmin") {
+  if (clean === "system_admin" || clean === "system administrator" || clean === "sysadmin" || clean === "superadmin" || clean === "super_admin") {
+    return "system_admin";
+  }
+  if (clean === "admin" || clean === "administrator") {
     return "admin";
   }
   if (clean === "director" || clean === "direktur" || clean === "executive director") {
@@ -290,7 +673,13 @@ function hydrateMysqlUserRow(r) {
   const resolvedRole = normalizeMysqlUserRole(r?.role || raw.role || "staff");
   const basePerms = DEFAULT_PERMS_BY_ROLE[resolvedRole] || DEFAULT_PERMS_BY_ROLE.staff;
   const rawPerms = raw.permissions && typeof raw.permissions === "object" ? raw.permissions : colPerms && typeof colPerms === "object" ? colPerms : {};
-  const mergedPerms = {
+  const mergedPerms = resolvedRole === "system_admin" ? {
+    canManagePrograms: true,
+    canCreateTor: true,
+    canApproveTor: true,
+    canManageUsers: true,
+    canViewAllTors: true
+  } : {
     canManagePrograms: colPerms?.canManagePrograms ?? rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
     canCreateTor: colPerms?.canCreateTor ?? rawPerms.canCreateTor ?? basePerms.canCreateTor,
     canApproveTor: resolvedRole === "admin" ? false : colPerms?.canApproveTor ?? rawPerms.canApproveTor ?? basePerms.canApproveTor,
@@ -347,6 +736,100 @@ async function fetchUsersFromMysql(pool) {
     throw err;
   }
 }
+async function fetchSystemAdminFromMysql(pool) {
+  const [rows] = await pool.query(
+    "SELECT * FROM `users` WHERE `role` = 'system_admin' OR `id` = 'user-sysadmin' ORDER BY `created_at` ASC LIMIT 1"
+  );
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+  return hydrateMysqlUserRow(rows[0]);
+}
+function normalizeMysqlDateOnlyValue(val) {
+  if (val === null || val === void 0) return null;
+  if (val instanceof Date) {
+    if (Number.isNaN(val.getTime())) return null;
+    const yyyy = val.getFullYear();
+    if (yyyy <= 0) return null;
+    const mm = String(val.getMonth() + 1).padStart(2, "0");
+    const dd = String(val.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  const str = String(val).trim();
+  if (!str || str === "-" || str.toLowerCase() === "null" || str.toLowerCase() === "undefined" || str.toLowerCase() === "invalid date" || str.startsWith("0000-00-00")) {
+    return null;
+  }
+  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const yyyy = Number(isoMatch[1]);
+    const mm = Number(isoMatch[2]);
+    const dd = Number(isoMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const dd = Number(dmyMatch[1]);
+    const mm = Number(dmyMatch[2]);
+    const yyyy = Number(dmyMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime()) && parsed.getFullYear() > 0) {
+    const yyyy = parsed.getFullYear();
+    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+function cleanHydratedTimestampValue(val) {
+  if (!val) return void 0;
+  if (val instanceof Date) {
+    return Number.isNaN(val.getTime()) ? void 0 : val.toISOString();
+  }
+  const str = String(val).trim();
+  if (!str || str.startsWith("0000-00-00")) return void 0;
+  return str;
+}
+function hydrateMysqlProgramRow(r, parsedRaw) {
+  const raw = parsedRaw || safeJsonParse(r?.raw_json, {});
+  const resolvedStartDate = normalizeMysqlDateOnlyValue(r?.start_date) || normalizeMysqlDateOnlyValue(r?.startDate) || normalizeMysqlDateOnlyValue(r?.tanggal_mulai) || normalizeMysqlDateOnlyValue(raw.startDate) || normalizeMysqlDateOnlyValue(raw.start_date) || "";
+  const resolvedEndDate = normalizeMysqlDateOnlyValue(r?.end_date) || normalizeMysqlDateOnlyValue(r?.endDate) || normalizeMysqlDateOnlyValue(r?.tanggal_selesai) || normalizeMysqlDateOnlyValue(raw.endDate) || normalizeMysqlDateOnlyValue(raw.end_date) || "";
+  return {
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    code: r?.code || raw.code || "",
+    name: r?.name || raw.name || "",
+    location: r?.location ?? raw.location ?? "",
+    folderUrl: r?.folder_url ?? r?.folderUrl ?? raw.folderUrl ?? "",
+    picId: r?.pic_id || r?.picId || raw.picId || "",
+    picName: r?.pic_name || r?.picName || raw.picName || "",
+    description: r?.description ?? raw.description ?? "",
+    donor: r?.donor ?? raw.donor ?? "",
+    startDate: resolvedStartDate,
+    endDate: resolvedEndDate,
+    totalBudget: r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? raw.budget ?? 0),
+    budget: raw.budget !== void 0 ? Number(raw.budget) : r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? 0),
+    currency: r?.currency || raw.currency || "IDR",
+    status: r?.status || raw.status || "Aktif",
+    createdAt: cleanHydratedTimestampValue(r?.created_at) || cleanHydratedTimestampValue(raw.createdAt) || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: cleanHydratedTimestampValue(r?.updated_at) || cleanHydratedTimestampValue(raw.updatedAt)
+  };
+}
+async function fetchProgramByIdFromMysql(pool, programId) {
+  const [rows] = await pool.query("SELECT * FROM `programs` WHERE `id` = ? LIMIT 1", [
+    String(programId).slice(0, 128)
+  ]);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+  return hydrateMysqlProgramRow(rows[0]);
+}
 async function safeSelectTableRows(pool, tableName, customSql) {
   const sql = customSql || `SELECT * FROM \`${tableName}\``;
   try {
@@ -382,7 +865,14 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   const torRows = await safeSelectTableRows(pool, "tors");
   const approvalRows = await safeSelectTableRows(pool, "approval_records");
   const caRows = await safeSelectTableRows(pool, "cash_advances");
+  const caSummaryRows = await safeSelectTableRows(pool, "cash_advance_summaries");
   const minutesRows = await safeSelectTableRows(pool, "meeting_minutes");
+  const activityDocRows = await safeSelectTableRows(pool, "activity_documentations");
+  const outputRaciRows = await safeSelectTableRows(pool, "output_raci_records");
+  const activityMonRows = await safeSelectTableRows(pool, "activity_monitoring_records");
+  const monReportRows = await safeSelectTableRows(pool, "monitoring_reports");
+  const apvHubRows = await safeSelectTableRows(pool, "approval_hub_items");
+  const progBudgetRows = await safeSelectTableRows(pool, "program_budgets");
   const participantRows = await safeSelectTableRows(pool, "participants");
   const attendanceRows = await safeSelectTableRows(pool, "attendance_records");
   const auditRows = await safeSelectTableRows(pool, "audit_logs");
@@ -391,7 +881,7 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     "system_kv_store",
     "SELECT store_key, store_value FROM `system_kv_store`"
   );
-  const totalExistingRecords = users.length + programRows.length + outcomeRows.length + outputRows.length + activityRows.length + subActivityRows.length + torRows.length + approvalRows.length + caRows.length + minutesRows.length + participantRows.length + attendanceRows.length + kvRows.length;
+  const totalExistingRecords = users.length + programRows.length + outcomeRows.length + outputRows.length + activityRows.length + subActivityRows.length + torRows.length + approvalRows.length + caRows.length + caSummaryRows.length + minutesRows.length + activityDocRows.length + outputRaciRows.length + activityMonRows.length + monReportRows.length + apvHubRows.length + progBudgetRows.length + participantRows.length + attendanceRows.length + kvRows.length;
   if (totalExistingRecords === 0) {
     return null;
   }
@@ -410,56 +900,59 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       return hydrator(r, raw);
     }).filter((item) => Boolean(item && item.id));
   };
-  const programs = parseAndHydrateRows(programRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    code: r?.code || raw.code || "",
-    name: r?.name || raw.name || "",
-    description: r?.description ?? raw.description ?? "",
-    donor: r?.donor ?? raw.donor ?? "",
-    startDate: r?.start_date || raw.startDate || "",
-    endDate: r?.end_date || raw.endDate || "",
-    totalBudget: r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? raw.budget ?? 0),
-    budget: raw.budget !== void 0 ? Number(raw.budget) : r?.total_budget !== void 0 && r?.total_budget !== null ? Number(r.total_budget) : Number(raw.totalBudget ?? 0),
-    currency: r?.currency || raw.currency || "IDR",
-    status: r?.status || raw.status || "Active",
-    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-  })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const cleanHydratedDateOnly = (val) => normalizeMysqlDateOnlyValue(val) || "";
+  const cleanHydratedTimestamp = cleanHydratedTimestampValue;
+  const programs = parseAndHydrateRows(
+    programRows,
+    (r, raw) => hydrateMysqlProgramRow(r, raw)
+  ).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const stripInternalCodePrefix = (val) => {
     const s = String(val ?? "");
     return s.includes("::") ? s.split("::").slice(1).join("::") : s;
   };
-  const outcomes = parseAndHydrateRows(outcomeRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    programId: r?.program_id || raw.programId || "",
-    outcomeNumber: raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || void 0,
-    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || "",
-    name: r?.name || raw.name || raw.title || "",
-    title: raw.title || r?.name || raw.name || "",
-    description: r?.description ?? raw.description ?? "",
-    indicators: Array.isArray(raw.indicators) ? raw.indicators : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
-    status: r?.status || raw.status || "Belum Dimulai",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || void 0,
-    updatedAt: r?.updated_at || raw.updatedAt || void 0
-  }));
-  const outputs = parseAndHydrateRows(outputRows, (r, raw) => ({
-    ...raw,
-    id: String(r?.id || raw.id || ""),
-    programId: r?.program_id || raw.programId || "",
-    outcomeId: r?.outcome_id || raw.outcomeId || "",
-    outputNumber: raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || void 0,
-    code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || "",
-    name: r?.name || raw.name || raw.title || "",
-    title: raw.title || r?.name || raw.name || "",
-    description: r?.description ?? raw.description ?? "",
-    indicators: Array.isArray(raw.indicators) ? raw.indicators : safeJsonParse(r?.indicators_json ?? r?.indicators, []),
-    status: r?.status || raw.status || "Belum Dimulai",
-    budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || void 0,
-    updatedAt: r?.updated_at || raw.updatedAt || void 0
-  }));
+  const outcomes = parseAndHydrateRows(outcomeRows, (r, raw) => {
+    const colInd = safeJsonParse(r?.indicators_json ?? r?.indicators, null);
+    const resolvedIndicators = Array.isArray(raw.indicators) ? raw.indicators : Array.isArray(colInd) ? colInd : [];
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      programId: r?.program_id || raw.programId || "",
+      outcomeNumber: raw.outcomeNumber || r?.outcome_number || stripInternalCodePrefix(r?.code) || void 0,
+      code: stripInternalCodePrefix(r?.code) || raw.code || raw.outcomeNumber || "",
+      name: r?.name || raw.name || raw.title || "",
+      title: raw.title || r?.name || raw.name || "",
+      description: r?.description ?? raw.description ?? "",
+      picId: r?.pic_id || raw.picId || "",
+      picName: r?.pic_name || raw.picName || "",
+      indicators: resolvedIndicators,
+      status: r?.status || raw.status || "Belum Dimulai",
+      budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
+    };
+  });
+  const outputs = parseAndHydrateRows(outputRows, (r, raw) => {
+    const colInd = safeJsonParse(r?.indicators_json ?? r?.indicators, null);
+    const resolvedIndicators = Array.isArray(raw.indicators) ? raw.indicators : Array.isArray(colInd) ? colInd : [];
+    return {
+      ...raw,
+      id: String(r?.id || raw.id || ""),
+      programId: r?.program_id || raw.programId || "",
+      outcomeId: r?.outcome_id || raw.outcomeId || "",
+      outputNumber: raw.outputNumber || r?.output_number || stripInternalCodePrefix(r?.code) || void 0,
+      code: stripInternalCodePrefix(r?.code) || raw.code || raw.outputNumber || "",
+      name: r?.name || raw.name || raw.title || "",
+      title: raw.title || r?.name || raw.name || "",
+      description: r?.description ?? raw.description ?? "",
+      picId: r?.pic_id || raw.picId || "",
+      picName: r?.pic_name || raw.picName || "",
+      indicators: resolvedIndicators,
+      status: r?.status || raw.status || "Belum Dimulai",
+      budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
+      createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+      updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
+    };
+  });
   const activities = parseAndHydrateRows(activityRows, (r, raw) => ({
     ...raw,
     id: String(r?.id || raw.id || ""),
@@ -471,12 +964,16 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     name: r?.name || raw.name || raw.title || "",
     title: raw.title || r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
-    startDate: r?.start_date || raw.startDate || "",
-    endDate: r?.end_date || raw.endDate || "",
+    anticipatedInputs: r?.anticipated_inputs ?? raw.anticipatedInputs ?? "",
+    plannedParticipantsBreakdown: r?.planned_participants_breakdown ?? raw.plannedParticipantsBreakdown ?? "",
+    picId: r?.pic_id || raw.picId || "",
+    picName: r?.pic_name || raw.picName || "",
+    startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
     status: r?.status || raw.status || "Belum Dimulai",
     budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || void 0,
-    updatedAt: r?.updated_at || raw.updatedAt || void 0
+    createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
   }));
   const subActivities = parseAndHydrateRows(subActivityRows, (r, raw) => ({
     ...raw,
@@ -489,10 +986,12 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     name: r?.name || raw.name || "",
     description: r?.description ?? raw.description ?? "",
     picName: r?.pic_name || raw.picName || "",
+    startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+    endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
     status: r?.status || raw.status || "Belum Dimulai",
     budgetAllocated: r?.budget_allocated !== void 0 && r?.budget_allocated !== null ? Number(r.budget_allocated) : Number(raw.budgetAllocated ?? raw.budget ?? 0),
-    createdAt: r?.created_at || raw.createdAt || void 0,
-    updatedAt: r?.updated_at || raw.updatedAt || void 0
+    createdAt: cleanHydratedTimestamp(r?.created_at) || cleanHydratedTimestamp(raw.createdAt),
+    updatedAt: cleanHydratedTimestamp(r?.updated_at) || cleanHydratedTimestamp(raw.updatedAt)
   }));
   const tors = parseAndHydrateRows(torRows, (r, raw) => {
     const resolvedSubmissionStatus = raw.submissionStatus || r?.status || raw.status || "Draft";
@@ -509,6 +1008,8 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       outcomeId: r?.outcome_id || raw.outcomeId || "",
       outputId: r?.output_id || raw.outputId || "",
       activityId: r?.activity_id || raw.activityId || "",
+      subActivityId: r?.sub_activity_id ?? raw.subActivityId ?? void 0,
+      subActivityName: raw.subActivityName ?? void 0,
       activityName: raw.activityName || r?.title || raw.title || "",
       picId: raw.picId || resolvedCreatedById,
       picName: raw.picName || resolvedCreatedByName,
@@ -516,13 +1017,33 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
       createdByName: resolvedCreatedByName,
       status: r?.status || resolvedSubmissionStatus,
       submissionStatus: resolvedSubmissionStatus,
-      activityStatus: resolvedActivityStatus,
+      activityStatus: r?.activity_status || resolvedActivityStatus,
+      background: typeof raw.background === "string" ? raw.background : "",
+      rationale: typeof raw.rationale === "string" ? raw.rationale : "",
+      generalObjective: typeof raw.generalObjective === "string" ? raw.generalObjective : "",
+      objectives: typeof raw.objectives === "string" ? raw.objectives : "",
       implementingTeam: Array.isArray(raw.implementingTeam) ? raw.implementingTeam : [],
+      specificObjectives: Array.isArray(raw.specificObjectives) ? raw.specificObjectives : [],
+      timelineItems: Array.isArray(raw.timelineItems) ? raw.timelineItems : [],
+      monitoringItems: Array.isArray(raw.monitoringItems) ? raw.monitoringItems : [],
+      scopeOfActivities: Array.isArray(raw.scopeOfActivities) ? raw.scopeOfActivities : [],
+      implementationMechanisms: Array.isArray(raw.implementationMechanisms) ? raw.implementationMechanisms : [],
+      participantRows: Array.isArray(raw.participantRows) ? raw.participantRows : [],
+      participantCustomColumns: Array.isArray(raw.participantCustomColumns) ? raw.participantCustomColumns : [],
+      rolesResponsibilities: Array.isArray(raw.rolesResponsibilities) ? raw.rolesResponsibilities : [],
+      rundown: Array.isArray(raw.rundown) ? raw.rundown : [],
+      locations: Array.isArray(raw.locations) ? raw.locations : [],
+      goals: Array.isArray(raw.goals) ? raw.goals : [],
+      indicators: Array.isArray(raw.indicators) ? raw.indicators : [],
+      mealItems: Array.isArray(raw.mealItems) ? raw.mealItems : [],
+      challengesMitigations: Array.isArray(raw.challengesMitigations) ? raw.challengesMitigations : [],
+      budgetAuditLogs: Array.isArray(raw.budgetAuditLogs) ? raw.budgetAuditLogs : [],
       currentWorkflowStage: r?.current_stage !== void 0 && r?.current_stage !== null ? Number(r.current_stage) : Number(raw.currentWorkflowStage ?? 1),
-      budgetRequested: r?.budget_requested !== void 0 && r?.budget_requested !== null ? Number(r.budget_requested) : Number(raw.budgetRequested ?? 0),
-      budgetActualSpent: r?.budget_actual_spent !== void 0 && r?.budget_actual_spent !== null ? Number(r.budget_actual_spent) : Number(raw.budgetActualSpent ?? 0),
-      startDate: r?.start_date || raw.startDate || "",
-      endDate: r?.end_date || raw.endDate || "",
+      budgetRequested: r?.budget_requested !== void 0 && r?.budget_requested !== null ? Number(r.budget_requested) : raw.budgetRequested !== void 0 && raw.budgetRequested !== null ? Number(raw.budgetRequested) : null,
+      budgetApproved: r?.budget_approved !== void 0 && r?.budget_approved !== null ? Number(r.budget_approved) : raw.budgetApproved !== void 0 && raw.budgetApproved !== null ? Number(raw.budgetApproved) : null,
+      budgetActualSpent: r?.budget_actual_spent !== void 0 && r?.budget_actual_spent !== null ? Number(r.budget_actual_spent) : raw.budgetActualSpent !== void 0 && raw.budgetActualSpent !== null ? Number(raw.budgetActualSpent) : null,
+      startDate: cleanHydratedDateOnly(r?.start_date) || cleanHydratedDateOnly(raw.startDate),
+      endDate: cleanHydratedDateOnly(r?.end_date) || cleanHydratedDateOnly(raw.endDate),
       location: r?.location || raw.location || "",
       createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
@@ -578,6 +1099,10 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     meetingLocation: raw.meetingLocation || r?.location || raw.location || "",
     createdById: raw.createdById || r?.created_by_user_id || "",
     status: r?.status || raw.status || "Draft",
+    participants: Array.isArray(raw.participants) ? raw.participants : [],
+    discussions: Array.isArray(raw.discussions) ? raw.discussions : [],
+    decisions: Array.isArray(raw.decisions) ? raw.decisions : [],
+    actionPoints: Array.isArray(raw.actionPoints) ? raw.actionPoints : [],
     createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString()
   })).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const participantDatabase = parseAndHydrateRows(participantRows, (r, raw) => {
@@ -680,6 +1205,156 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
   } else {
     attendanceSystem.records = kvAttendanceRecords;
   }
+  const cashAdvanceSummaries = caSummaryRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of caSummaryRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const torKey = String(r?.tor_id || raw.torId || r?.id || "");
+      if (!torKey) continue;
+      map[torKey] = {
+        ...raw,
+        torId: torKey,
+        approvalStatus: r?.approval_status || raw.approvalStatus,
+        updatedAt: r?.updated_at || raw.updatedAt
+      };
+    }
+    return map;
+  })() : kvMap["cashAdvanceSummaries"] || {};
+  const activityDocumentationList = activityDocRows.length > 0 ? parseAndHydrateRows(activityDocRows, (r, raw) => ({
+    ...raw,
+    id: String(r?.id || raw.id || ""),
+    documentNumber: r?.document_number || raw.documentNumber || "",
+    torId: r?.tor_id || raw.torId || "",
+    programId: r?.program_id || raw.programId || "",
+    activityTitle: r?.activity_title || raw.activityTitle || "",
+    bestPhotosStoryTopic: r?.story_topic ?? raw.bestPhotosStoryTopic ?? "",
+    bestPhotos: Array.isArray(raw.bestPhotos) ? raw.bestPhotos : [],
+    humanInterestStories: Array.isArray(raw.humanInterestStories) ? raw.humanInterestStories : [],
+    generalPhotoLinks: Array.isArray(raw.generalPhotoLinks) ? raw.generalPhotoLinks : [],
+    updatedById: r?.updated_by_user_id || raw.updatedById || "",
+    createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+  })) : Array.isArray(kvMap["activityDocumentationList"]) ? kvMap["activityDocumentationList"] : [];
+  const activityDocumentations = {
+    ...kvMap["activityDocumentations"] || {}
+  };
+  for (const doc of activityDocumentationList) {
+    if (doc && doc.torId) {
+      activityDocumentations[doc.torId] = doc;
+    }
+  }
+  const outputRaciRecords = outputRaciRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of outputRaciRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const outKey = String(r?.output_id || raw.outputId || r?.id || "");
+      if (!outKey) continue;
+      map[outKey] = {
+        ...raw,
+        outputId: outKey,
+        outcomeId: r?.outcome_id || raw.outcomeId || "",
+        programId: r?.program_id || raw.programId || "",
+        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
+        accountableUserId: r?.accountable_user_id || raw.accountableUserId || "",
+        accountableFinanceUserId: r?.accountable_finance_user_id || raw.accountableFinanceUserId || "",
+        status: r?.status || raw.status || "Menunggu Persetujuan Direktur",
+        approvedById: r?.approved_by_user_id || raw.approvedById || void 0,
+        approvedAt: r?.approved_at || raw.approvedAt || void 0,
+        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    return map;
+  })() : kvMap["outputRaciRecords"] || {};
+  const activityMonitoringRecords = activityMonRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of activityMonRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const actKey = String(r?.activity_id || raw.activityId || r?.id || "");
+      if (!actKey) continue;
+      map[actKey] = {
+        ...raw,
+        activityId: actKey,
+        outputId: r?.output_id || raw.outputId || "",
+        outcomeId: r?.outcome_id || raw.outcomeId || "",
+        programId: r?.program_id || raw.programId || "",
+        tools: Array.isArray(raw.tools) ? raw.tools : [],
+        status: r?.status || raw.status || "Belum Ada Monitoring",
+        updatedById: r?.updated_by_user_id || raw.updatedById || "",
+        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    return map;
+  })() : kvMap["activityMonitoringRecords"] || {};
+  const monitoringReports = monReportRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of monReportRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const repId = String(r?.id || raw.id || "");
+      if (!repId) continue;
+      map[repId] = {
+        ...raw,
+        id: repId,
+        torId: r?.tor_id || raw.torId || "",
+        programId: r?.program_id || raw.programId || "",
+        outcomeId: r?.outcome_id || raw.outcomeId || "",
+        outputId: r?.output_id || raw.outputId || "",
+        activityId: r?.activity_id || raw.activityId || "",
+        cashAdvanceId: r?.cash_advance_id || raw.cashAdvanceId || "",
+        toolId: r?.tool_id || raw.toolId || "",
+        toolName: r?.tool_name || raw.toolName || "",
+        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
+        status: r?.status || raw.status || "Planned",
+        monitoringDate: r?.monitoring_date || raw.monitoringDate || "",
+        createdAt: r?.created_at || raw.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    return map;
+  })() : kvMap["monitoringReports"] || {};
+  const approvalHubItems = apvHubRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of apvHubRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const itemId = String(r?.id || raw.id || "");
+      if (!itemId) continue;
+      map[itemId] = {
+        ...raw,
+        id: itemId,
+        categoryCode: r?.category_code || raw.categoryCode || "tor",
+        sourceTorId: r?.source_tor_id || raw.sourceTorId || void 0,
+        sourceEntityId: r?.source_entity_id || raw.sourceEntityId || "",
+        programId: r?.program_id || raw.programId || void 0,
+        referenceNumber: r?.reference_number || raw.referenceNumber || "",
+        title: r?.title || raw.title || "",
+        status: r?.status || raw.status || "Draft",
+        responsibleUserId: r?.responsible_user_id || raw.responsibleUserId || "",
+        updatedAt: r?.updated_at || raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    return map;
+  })() : kvMap["approvalHubItems"] || {};
+  const programBudgets = progBudgetRows.length > 0 ? (() => {
+    const map = {};
+    for (const r of progBudgetRows) {
+      const raw = safeJsonParse(r?.raw_json, {});
+      const key = String(r?.id || raw.id || "");
+      if (!key) continue;
+      const isMasterListKey = key === "__MASTER_BUDGET_ITEMS__";
+      map[key] = {
+        ...raw,
+        id: key,
+        ...r?.program_id ? { programId: r.program_id } : {},
+        ...r?.program_name ? { programName: r.program_name } : {},
+        ...r?.fiscal_year !== null && r?.fiscal_year !== void 0 ? { fiscalYear: Number(r.fiscal_year) } : {},
+        ...!isMasterListKey && r?.total_program_budget !== null && r?.total_program_budget !== void 0 ? { totalProgramBudget: Number(r.total_program_budget) } : {},
+        ...!isMasterListKey && r?.annual_approved_budget !== null && r?.annual_approved_budget !== void 0 ? { annualApprovedBudget: Number(r.annual_approved_budget) } : {},
+        ...r?.budget_approval_status ? { budgetApprovalStatus: r.budget_approval_status } : {},
+        ...r?.updated_by ? { updatedBy: r.updated_by } : {},
+        updatedAt: cleanHydratedTimestamp(r?.updated_at) || raw.updatedAt
+      };
+    }
+    return map;
+  })() : kvMap["programBudgets"] || {};
   return {
     users,
     currentUserId: kvMap["currentUserId"] || users[0]?.id || "user-director",
@@ -692,18 +1367,18 @@ async function loadDatabaseFromMysql(pool, _fallbackSeed) {
     approvalRecords,
     auditLogs,
     cashAdvances,
-    cashAdvanceSummaries: kvMap["cashAdvanceSummaries"] || {},
+    cashAdvanceSummaries,
     cashAdvanceAuditLogs: kvMap["cashAdvanceAuditLogs"] || {},
     meetingMinutes,
-    activityDocumentations: kvMap["activityDocumentations"] || {},
-    activityDocumentationList: kvMap["activityDocumentationList"] || [],
-    outputRaciRecords: kvMap["outputRaciRecords"] || {},
-    activityMonitoringRecords: kvMap["activityMonitoringRecords"] || {},
-    monitoringReports: kvMap["monitoringReports"] || {},
-    approvalHubItems: kvMap["approvalHubItems"] || {},
+    activityDocumentations,
+    activityDocumentationList,
+    outputRaciRecords,
+    activityMonitoringRecords,
+    monitoringReports,
+    approvalHubItems,
     approvalWorkflowConfigs: kvMap["approvalWorkflowConfigs"] || {},
     approvalNotifications: kvMap["approvalNotifications"] || [],
-    programBudgets: kvMap["programBudgets"] || {},
+    programBudgets,
     participantDatabase,
     attendanceSystem,
     organizationSettings: kvMap["organizationSettings"] || void 0,
@@ -735,20 +1410,7 @@ function toMysqlDateTimeString(val) {
   return null;
 }
 function toMysqlDateOnlyString(val) {
-  if (val === null || val === void 0 || val === "") return null;
-  if (val instanceof Date) {
-    if (Number.isNaN(val.getTime())) return null;
-    return val.toISOString().slice(0, 10);
-  }
-  const s = String(val).trim();
-  if (!s) return null;
-  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (match) return match[1];
-  const parsed = new Date(s);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString().slice(0, 10);
-  }
-  return null;
+  return normalizeMysqlDateOnlyValue(val);
 }
 function normalizeHydratedAttendanceTimestamp(colVal, rawVal, isExplicitlyActiveInRawJson = false) {
   const cleanIsoOrTime = (v) => {
@@ -773,7 +1435,7 @@ function formatValueForMysqlColumn(val, colMeta) {
   const colNameLower = (colMeta.name || "").toLowerCase();
   const isForeignIdLike = colNameLower !== "id" && colNameLower !== "store_key" && (colNameLower.endsWith("_id") || colNameLower.endsWith("_by"));
   const isUniqueIndexed = String(colMeta.key || "").toUpperCase() === "UNI";
-  const canLeaveNull = colMeta.nullable || colMeta.hasDefault || colMeta.extra.includes("auto_increment");
+  const canSendExplicitNull = Boolean(colMeta.nullable);
   const fallbackForStrictNotNull = () => {
     if (typeLower.includes("int") || typeLower.includes("decimal") || typeLower.includes("numeric") || typeLower.includes("float") || typeLower.includes("double") || typeLower.includes("bit")) {
       return 0;
@@ -792,26 +1454,26 @@ function formatValueForMysqlColumn(val, colMeta) {
     }
     return "";
   };
-  if (val === "" && (isForeignIdLike || isUniqueIndexed) && canLeaveNull) {
+  if (val === "" && (isForeignIdLike || isUniqueIndexed) && canSendExplicitNull) {
     return null;
   }
   if (val === void 0 || val === null) {
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
   if (typeLower.startsWith("datetime") || typeLower.startsWith("timestamp")) {
     const dt = toMysqlDateTimeString(val);
     if (dt !== null) return dt;
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
   if (typeLower === "date") {
     const d = toMysqlDateOnlyString(val);
     if (d !== null) return d;
-    return canLeaveNull ? null : fallbackForStrictNotNull();
+    return canSendExplicitNull ? null : fallbackForStrictNotNull();
   }
   if (typeLower.includes("int") || typeLower.includes("decimal") || typeLower.includes("numeric") || typeLower.includes("float") || typeLower.includes("double") || typeLower.includes("bit")) {
     const num = safeFiniteNumber(val, null);
     if (num !== null) return num;
-    return canLeaveNull ? null : 0;
+    return canSendExplicitNull ? null : 0;
   }
   if (typeLower.includes("json")) {
     if (typeof val === "string") {
@@ -1006,10 +1668,38 @@ async function executeAdaptiveUpsert(connOrPool, tableName, candidateRow, option
   const [result] = await connOrPool.query(sql, params);
   return Number(result?.affectedRows || 0);
 }
+function buildRelationSetsFromData(d) {
+  return {
+    userIds: new Set((d.users || []).filter((x) => x?.id).map((x) => String(x.id))),
+    programIds: new Set((d.programs || []).filter((x) => x?.id).map((x) => String(x.id))),
+    outcomeIds: new Set((d.outcomes || []).filter((x) => x?.id).map((x) => String(x.id))),
+    outputIds: new Set((d.outputs || []).filter((x) => x?.id).map((x) => String(x.id))),
+    activityIds: new Set((d.activities || []).filter((x) => x?.id).map((x) => String(x.id))),
+    subActivityIds: new Set(
+      (d.subActivities || []).filter((x) => x?.id).map((x) => String(x.id))
+    ),
+    torIds: new Set((d.tors || []).filter((x) => x?.id).map((x) => String(x.id))),
+    cashAdvanceIds: new Set((d.cashAdvances || []).filter((x) => x?.id).map((x) => String(x.id)))
+  };
+}
+function validFkOrNull(rawVal, validSet, maxLen = 128) {
+  const s = truncStr(rawVal, maxLen);
+  if (!s) return null;
+  if (validSet && !validSet.has(s)) {
+    return null;
+  }
+  return s;
+}
 function buildUserCandidateRow(u, nowIso) {
   const effectiveHash = typeof u.passwordHash === "string" && u.passwordHash.trim() || typeof u.password_hash === "string" && u.password_hash.trim() || null;
   const effectiveUsername = u.username || deriveUsernameFallback(u.email || "", u.name || "", String(u.id || ""));
   const permsJson = JSON.stringify(u.permissions || {});
+  const {
+    passwordHash: _omitPasswordHash,
+    password_hash: _omitSnakePasswordHash,
+    password: _omitPassword,
+    ...safeRawUser
+  } = u && typeof u === "object" ? u : {};
   return {
     id: String(u.id).slice(0, 128),
     username: truncStr(effectiveUsername, 128),
@@ -1029,28 +1719,45 @@ function buildUserCandidateRow(u, nowIso) {
     last_login_at: u.lastLoginAt || null,
     created_at: u.createdAt || nowIso,
     updated_at: nowIso,
-    raw_json: JSON.stringify(u)
+    raw_json: JSON.stringify(safeRawUser)
   };
 }
-function buildProgramCandidateRow(p, nowIso) {
+function buildProgramCandidateRow(p, nowIso, rels) {
+  const normStart = normalizeMysqlDateOnlyValue(p.startDate ?? p.start_date);
+  const normEnd = normalizeMysqlDateOnlyValue(p.endDate ?? p.end_date);
+  const normalizedPayload = {
+    ...p,
+    startDate: normStart || "",
+    endDate: normEnd || ""
+  };
   return {
     id: String(p.id).slice(0, 128),
     code: truncStr(p.code, 64),
     name: truncStr(p.name, 255) || "",
     location: truncStr(p.location, 255),
+    folder_url: p.folderUrl || null,
+    folderUrl: p.folderUrl || null,
+    pic_id: validFkOrNull(p.picId, rels?.userIds, 128),
+    picId: validFkOrNull(p.picId, rels?.userIds, 128),
+    pic_name: truncStr(p.picName, 255),
+    picName: truncStr(p.picName, 255),
     description: p.description || null,
     donor: truncStr(p.donor, 255),
-    start_date: truncStr(p.startDate, 32),
-    end_date: truncStr(p.endDate, 32),
+    start_date: normStart,
+    end_date: normEnd,
+    startDate: normStart,
+    endDate: normEnd,
+    tanggal_mulai: normStart,
+    tanggal_selesai: normEnd,
     total_budget: safeFiniteNumber(p.totalBudget ?? p.budget, 0),
     currency: truncStr(p.currency || "IDR", 16),
     status: truncStr(p.status || "Aktif", 64),
     created_at: p.createdAt || nowIso,
     updated_at: p.updatedAt || nowIso,
-    raw_json: JSON.stringify(p)
+    raw_json: JSON.stringify(normalizedPayload)
   };
 }
-function buildOutcomeCandidateRow(oc, nowIso) {
+function buildOutcomeCandidateRow(oc, nowIso, rels) {
   const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
   const effectiveName = truncStr(oc.name || oc.title, 500) || "";
   const indicatorsJson = JSON.stringify(Array.isArray(oc.indicators) ? oc.indicators : []);
@@ -1063,7 +1770,7 @@ function buildOutcomeCandidateRow(oc, nowIso) {
     name: effectiveName,
     title: truncStr(oc.title || oc.name, 500) || effectiveName,
     description: oc.description || null,
-    pic_id: truncStr(oc.picId, 128),
+    pic_id: validFkOrNull(oc.picId, rels?.userIds, 128),
     pic_name: truncStr(oc.picName, 255),
     status: truncStr(oc.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(oc.budgetAllocated ?? oc.budget, 0),
@@ -1074,21 +1781,21 @@ function buildOutcomeCandidateRow(oc, nowIso) {
     raw_json: JSON.stringify(oc)
   };
 }
-function buildOutputCandidateRow(op, nowIso) {
+function buildOutputCandidateRow(op, nowIso, rels) {
   const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
   const effectiveName = truncStr(op.name || op.title, 500) || "";
   const indicatorsJson = JSON.stringify(Array.isArray(op.indicators) ? op.indicators : []);
   const resolvedCode = truncStr(op.code || op.outputNumber || op.id, 64);
   return {
     id: String(op.id).slice(0, 128),
-    program_id: truncStr(op.programId, 128),
+    program_id: validFkOrNull(op.programId, rels?.programIds, 128),
     outcome_id: truncStr(op.outcomeId, 128),
     code: resolvedCode,
     output_number: truncStr(op.outputNumber || op.code || op.id, 64),
     name: effectiveName,
     title: truncStr(op.title || op.name, 500) || effectiveName,
     description: op.description || null,
-    pic_id: truncStr(op.picId, 128),
+    pic_id: validFkOrNull(op.picId, rels?.userIds, 128),
     pic_name: truncStr(op.picName, 255),
     status: truncStr(op.status || "Belum Dimulai", 64),
     budget_allocated: safeFiniteNumber(op.budgetAllocated ?? op.budget, 0),
@@ -1099,21 +1806,23 @@ function buildOutputCandidateRow(op, nowIso) {
     raw_json: JSON.stringify(op)
   };
 }
-function buildActivityCandidateRow(ac, nowIso) {
+function buildActivityCandidateRow(ac, nowIso, rels) {
   const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
   const effectiveName = truncStr(ac.name || ac.title, 500) || "";
   const resolvedCode = truncStr(ac.code || ac.activityNumber || ac.id, 64);
   return {
     id: String(ac.id).slice(0, 128),
-    program_id: truncStr(ac.programId, 128),
-    outcome_id: truncStr(ac.outcomeId, 128),
+    program_id: validFkOrNull(ac.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(ac.outcomeId, rels?.outcomeIds, 128),
     output_id: truncStr(ac.outputId, 128),
     code: resolvedCode,
     activity_number: truncStr(ac.activityNumber || ac.code || ac.id, 64),
     name: effectiveName,
     title: truncStr(ac.title || ac.name, 500) || effectiveName,
     description: ac.description || null,
-    pic_id: truncStr(ac.picId, 128),
+    anticipated_inputs: ac.anticipatedInputs || null,
+    planned_participants_breakdown: ac.plannedParticipantsBreakdown || null,
+    pic_id: validFkOrNull(ac.picId, rels?.userIds, 128),
     pic_name: truncStr(ac.picName, 255),
     start_date: truncStr(ac.startDate, 32),
     end_date: truncStr(ac.endDate, 32),
@@ -1124,15 +1833,15 @@ function buildActivityCandidateRow(ac, nowIso) {
     raw_json: JSON.stringify(ac)
   };
 }
-function buildSubActivityCandidateRow(sa, nowIso) {
+function buildSubActivityCandidateRow(sa, nowIso, rels) {
   const ts = nowIso || (/* @__PURE__ */ new Date()).toISOString();
   const effectiveName = truncStr(sa.name, 500) || "";
   const resolvedCode = truncStr(sa.code || sa.id, 64);
   return {
     id: String(sa.id).slice(0, 128),
-    program_id: truncStr(sa.programId, 128),
-    outcome_id: truncStr(sa.outcomeId, 128),
-    output_id: truncStr(sa.outputId, 128),
+    program_id: validFkOrNull(sa.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(sa.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(sa.outputId, rels?.outputIds, 128),
     activity_id: truncStr(sa.activityId, 128),
     code: resolvedCode,
     name: effectiveName,
@@ -1148,20 +1857,27 @@ function buildSubActivityCandidateRow(sa, nowIso) {
     raw_json: JSON.stringify(sa)
   };
 }
-function buildTorCandidateRow(t, nowIso) {
+function buildTorCandidateRow(t, nowIso, rels) {
   return {
     id: String(t.id).slice(0, 128),
     tor_number: truncStr(t.torNumber || t.documentNumber, 128),
     title: truncStr(t.title, 500) || "",
-    program_id: truncStr(t.programId, 128),
-    outcome_id: truncStr(t.outcomeId, 128),
-    output_id: truncStr(t.outputId, 128),
-    activity_id: truncStr(t.activityId, 128),
-    created_by_user_id: truncStr(t.createdByUserId || t.createdById || t.picId, 128),
+    program_id: validFkOrNull(t.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(t.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(t.outputId, rels?.outputIds, 128),
+    activity_id: validFkOrNull(t.activityId, rels?.activityIds, 128),
+    sub_activity_id: validFkOrNull(t.subActivityId, rels?.subActivityIds, 128),
+    created_by_user_id: validFkOrNull(
+      t.createdByUserId || t.createdById || t.picId,
+      rels?.userIds,
+      128
+    ),
     created_by_name: truncStr(t.createdByName || t.picName, 255),
     status: truncStr(t.submissionStatus || t.status || "Draft", 128),
+    activity_status: truncStr(t.activityStatus || "Belum Dimulai", 64),
     current_stage: safeFiniteNumber(t.currentWorkflowStage ?? t.currentStage, 1),
     budget_requested: safeFiniteNumber(t.budgetRequested, null),
+    budget_approved: safeFiniteNumber(t.budgetApproved, null),
     budget_actual_spent: safeFiniteNumber(t.budgetActualSpent, null),
     start_date: truncStr(t.startDate, 32),
     end_date: truncStr(t.endDate, 32),
@@ -1171,29 +1887,36 @@ function buildTorCandidateRow(t, nowIso) {
     raw_json: JSON.stringify(t)
   };
 }
-function buildApprovalRecordCandidateRow(ar, nowIso) {
+function buildApprovalRecordCandidateRow(ar, nowIso, rels) {
   return {
     id: String(ar.id).slice(0, 128),
     tor_id: truncStr(ar.torId, 128) || "",
-    // Mendukung stage bertipe INT maupun VARCHAR tanpa pernah menghasilkan NaN
     stage: ar.stage ?? null,
-    approver_user_id: truncStr(ar.approverUserId || ar.approverId || ar.reviewerId, 128),
-    approver_name: truncStr(ar.approverName || ar.reviewerName, 255),
-    role: truncStr(ar.role || ar.reviewerRole, 128),
+    approver_user_id: validFkOrNull(
+      ar.approverUserId || ar.approverId || ar.actorId || ar.reviewerId,
+      rels?.userIds,
+      128
+    ),
+    approver_name: truncStr(ar.approverName || ar.actorName || ar.reviewerName, 255),
+    role: truncStr(ar.role || ar.actorRole || ar.reviewerRole, 128),
     action: truncStr(ar.action || ar.decision, 128),
     notes: ar.notes ?? ar.comment ?? null,
     timestamp: ar.timestamp || nowIso,
     raw_json: JSON.stringify(ar)
   };
 }
-function buildCashAdvanceCandidateRow(ca, nowIso) {
+function buildCashAdvanceCandidateRow(ca, nowIso, rels) {
   return {
     id: String(ca.id).slice(0, 128),
     ca_number: truncStr(ca.advanceNumber || ca.caNumber || ca.documentNumber, 128),
-    tor_id: truncStr(ca.torId, 128),
-    program_id: truncStr(ca.programId, 128),
-    activity_id: truncStr(ca.activityId, 128),
-    requester_user_id: truncStr(ca.requesterUserId || ca.requesterId || ca.submittedByUserId, 128),
+    tor_id: validFkOrNull(ca.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(ca.programId, rels?.programIds, 128),
+    activity_id: validFkOrNull(ca.activityId, rels?.activityIds, 128),
+    requester_user_id: validFkOrNull(
+      ca.requesterUserId || ca.requesterId || ca.submittedByUserId,
+      rels?.userIds,
+      128
+    ),
     requester_name: truncStr(ca.requesterName || ca.submittedByName, 255),
     total_amount: safeFiniteNumber(ca.totalAmount ?? ca.requestedAmount, 0),
     realized_amount: safeFiniteNumber(ca.realizedAmount ?? ca.actualSpentAmount, null),
@@ -1204,18 +1927,134 @@ function buildCashAdvanceCandidateRow(ca, nowIso) {
     raw_json: JSON.stringify(ca)
   };
 }
-function buildMeetingMinuteCandidateRow(mm, nowIso) {
+function buildCashAdvanceSummaryCandidateRow(sum, nowIso, rels) {
+  const torIdVal = String(sum.torId || sum.id || "").slice(0, 128);
+  const rows = Array.isArray(sum.summaryRows) ? sum.summaryRows : [];
+  const totalAdv = rows.reduce((s, r) => s + (Number(r?.approvedAdvance) || 0), 0);
+  const totalReal = rows.reduce((s, r) => s + (Number(r?.actualExpense) || 0), 0);
+  return {
+    id: torIdVal,
+    tor_id: validFkOrNull(torIdVal, rels?.torIds, 128) || torIdVal,
+    approval_status: truncStr(sum.summaryApprovalStatus || sum.approvalStatus, 128),
+    total_approved_advance: safeFiniteNumber(
+      sum.totalApprovedAdvance ?? sum.totalAdvance ?? totalAdv,
+      0
+    ),
+    total_realized_amount: safeFiniteNumber(
+      sum.totalRealizedAmount ?? sum.totalSpent ?? totalReal,
+      0
+    ),
+    updated_at: sum.updatedAt || nowIso,
+    raw_json: JSON.stringify(sum)
+  };
+}
+function buildMeetingMinuteCandidateRow(mm, nowIso, rels) {
   return {
     id: String(mm.id).slice(0, 128),
-    tor_id: truncStr(mm.torId, 128),
-    activity_id: truncStr(mm.activityId, 128),
+    document_number: truncStr(mm.documentNumber, 128),
+    tor_id: validFkOrNull(mm.torId, rels?.torIds, 128),
+    activity_id: validFkOrNull(mm.activityId, rels?.activityIds, 128),
     title: truncStr(mm.title || mm.agenda, 500),
     meeting_date: truncStr(mm.meetingDate || mm.date, 32),
-    location: truncStr(mm.location, 255),
-    created_by_user_id: truncStr(mm.createdByUserId || mm.createdById, 128),
+    location: truncStr(mm.meetingLocation || mm.location, 255),
+    created_by_user_id: validFkOrNull(mm.createdByUserId || mm.createdById, rels?.userIds, 128),
     status: truncStr(mm.status, 64),
     created_at: mm.createdAt || nowIso,
+    updated_at: mm.updatedAt || nowIso,
     raw_json: JSON.stringify(mm)
+  };
+}
+function buildActivityDocumentationCandidateRow(doc, nowIso, rels) {
+  return {
+    id: String(doc.id).slice(0, 128),
+    document_number: truncStr(doc.documentNumber, 128),
+    tor_id: validFkOrNull(doc.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(doc.programId, rels?.programIds, 128),
+    activity_title: truncStr(doc.activityTitle, 500),
+    story_topic: doc.bestPhotosStoryTopic || null,
+    updated_by_user_id: validFkOrNull(doc.updatedById, rels?.userIds, 128),
+    created_at: doc.createdAt || nowIso,
+    updated_at: doc.updatedAt || nowIso,
+    raw_json: JSON.stringify(doc)
+  };
+}
+function buildOutputRaciCandidateRow(raci, nowIso, rels) {
+  const outId = String(raci.outputId || raci.id || "").slice(0, 128);
+  return {
+    id: outId,
+    output_id: outId,
+    outcome_id: validFkOrNull(raci.outcomeId, rels?.outcomeIds, 128),
+    program_id: validFkOrNull(raci.programId, rels?.programIds, 128),
+    responsible_user_id: validFkOrNull(raci.responsibleUserId, rels?.userIds, 128),
+    accountable_user_id: validFkOrNull(raci.accountableUserId, rels?.userIds, 128),
+    accountable_finance_user_id: validFkOrNull(raci.accountableFinanceUserId, rels?.userIds, 128),
+    status: truncStr(raci.status, 128),
+    approved_by_user_id: validFkOrNull(raci.approvedById, rels?.userIds, 128),
+    approved_at: raci.approvedAt || null,
+    updated_at: raci.updatedAt || nowIso,
+    raw_json: JSON.stringify(raci)
+  };
+}
+function buildActivityMonitoringCandidateRow(mon, nowIso, rels) {
+  const actId = String(mon.activityId || mon.id || "").slice(0, 128);
+  return {
+    id: actId,
+    activity_id: actId,
+    output_id: validFkOrNull(mon.outputId, rels?.outputIds, 128),
+    outcome_id: validFkOrNull(mon.outcomeId, rels?.outcomeIds, 128),
+    program_id: validFkOrNull(mon.programId, rels?.programIds, 128),
+    status: truncStr(mon.status, 128),
+    updated_by_user_id: validFkOrNull(mon.updatedById, rels?.userIds, 128),
+    updated_at: mon.updatedAt || nowIso,
+    raw_json: JSON.stringify(mon)
+  };
+}
+function buildMonitoringReportCandidateRow(rep, nowIso, rels) {
+  return {
+    id: String(rep.id).slice(0, 255),
+    tor_id: validFkOrNull(rep.torId, rels?.torIds, 128),
+    program_id: validFkOrNull(rep.programId, rels?.programIds, 128),
+    outcome_id: validFkOrNull(rep.outcomeId, rels?.outcomeIds, 128),
+    output_id: validFkOrNull(rep.outputId, rels?.outputIds, 128),
+    activity_id: validFkOrNull(rep.activityId, rels?.activityIds, 128),
+    cash_advance_id: validFkOrNull(rep.cashAdvanceId, rels?.cashAdvanceIds, 128),
+    tool_id: truncStr(rep.toolId, 64),
+    tool_name: truncStr(rep.toolName, 255),
+    responsible_user_id: validFkOrNull(rep.responsibleUserId, rels?.userIds, 128),
+    status: truncStr(rep.status, 64),
+    monitoring_date: truncStr(rep.monitoringDate, 32),
+    created_at: rep.createdAt || nowIso,
+    updated_at: rep.updatedAt || nowIso,
+    raw_json: JSON.stringify(rep)
+  };
+}
+function buildApprovalHubItemCandidateRow(item, nowIso, rels) {
+  return {
+    id: String(item.id).slice(0, 255),
+    category_code: truncStr(item.categoryCode || "tor", 64) || "tor",
+    source_tor_id: validFkOrNull(item.sourceTorId, rels?.torIds, 128),
+    source_entity_id: truncStr(item.sourceEntityId, 128),
+    program_id: validFkOrNull(item.programId, rels?.programIds, 128),
+    reference_number: truncStr(item.referenceNumber, 128),
+    title: truncStr(item.title, 500),
+    status: truncStr(item.status, 64),
+    responsible_user_id: validFkOrNull(item.responsibleUserId, rels?.userIds, 128),
+    updated_at: item.updatedAt || nowIso,
+    raw_json: JSON.stringify(item)
+  };
+}
+function buildProgramBudgetCandidateRow(bgt, nowIso, rels) {
+  return {
+    id: String(bgt.id).slice(0, 191),
+    program_id: validFkOrNull(bgt.programId, rels?.programIds, 128),
+    program_name: truncStr(bgt.programName, 255),
+    fiscal_year: safeFiniteNumber(bgt.fiscalYear, null),
+    total_program_budget: safeFiniteNumber(bgt.totalProgramBudget, 0),
+    annual_approved_budget: safeFiniteNumber(bgt.annualApprovedBudget, 0),
+    budget_approval_status: truncStr(bgt.budgetApprovalStatus, 64),
+    updated_by: truncStr(bgt.updatedBy, 255),
+    updated_at: bgt.updatedAt || nowIso,
+    raw_json: JSON.stringify(bgt)
   };
 }
 function buildParticipantCandidateRow(pt, nowIso) {
@@ -1228,6 +2067,7 @@ function buildParticipantCandidateRow(pt, nowIso) {
     phone: truncStr(pt.phoneNumber || pt.contactPhone, 64),
     village_or_city: truncStr(pt.cityOrRegency || pt.villageOrSubdistrict, 255),
     created_at: pt.createdAt || nowIso,
+    updated_at: pt.updatedAt || nowIso,
     raw_json: JSON.stringify(pt)
   };
 }
@@ -1253,11 +2093,13 @@ function buildAttendanceRecordCandidateRow(att, nowIso) {
     })
   };
 }
-function buildAuditLogCandidateRow(al, nowIso) {
+function buildAuditLogCandidateRow(al, nowIso, rels) {
+  const candidateTorId = al.torId || (al.entityType === "TOR" ? al.entityId : null);
+  const candidateUserId = al.userId || al.actorId;
   return {
     id: String(al.id).slice(0, 128),
-    tor_id: truncStr(al.torId || (al.entityType === "TOR" ? al.entityId : null), 128),
-    user_id: truncStr(al.userId || al.actorId, 128),
+    tor_id: validFkOrNull(candidateTorId, rels?.torIds, 128),
+    user_id: validFkOrNull(candidateUserId, rels?.userIds, 128),
     user_name: truncStr(al.userName || al.actorName, 255),
     user_role: truncStr(al.userRole || al.actorRole, 64),
     action: truncStr(al.action, 255) || "",
@@ -1329,7 +2171,7 @@ var ENTITY_TABLE_SPECS = [
   {
     tableName: "users",
     getRows: (d) => d.users || [],
-    buildCandidate: buildUserCandidateRow,
+    buildCandidate: (u, nowIso) => buildUserCandidateRow(u, nowIso),
     allowTargetedDelete: false,
     // Penghapusan user hanya boleh melalui deleteMysqlUserRow eksplisit
     upsertOptions: {
@@ -1348,25 +2190,25 @@ var ENTITY_TABLE_SPECS = [
   {
     tableName: "outcomes",
     getRows: (d) => d.outcomes || [],
-    buildCandidate: (oc, nowIso) => buildOutcomeCandidateRow(oc, nowIso),
+    buildCandidate: (oc, nowIso, rels) => buildOutcomeCandidateRow(oc, nowIso, rels),
     allowTargetedDelete: true
   },
   {
     tableName: "outputs",
     getRows: (d) => d.outputs || [],
-    buildCandidate: (op, nowIso) => buildOutputCandidateRow(op, nowIso),
+    buildCandidate: (op, nowIso, rels) => buildOutputCandidateRow(op, nowIso, rels),
     allowTargetedDelete: true
   },
   {
     tableName: "activities",
     getRows: (d) => d.activities || [],
-    buildCandidate: (ac, nowIso) => buildActivityCandidateRow(ac, nowIso),
+    buildCandidate: (ac, nowIso, rels) => buildActivityCandidateRow(ac, nowIso, rels),
     allowTargetedDelete: true
   },
   {
     tableName: "sub_activities",
     getRows: (d) => d.subActivities || [],
-    buildCandidate: (sa, nowIso) => buildSubActivityCandidateRow(sa, nowIso),
+    buildCandidate: (sa, nowIso, rels) => buildSubActivityCandidateRow(sa, nowIso, rels),
     allowTargetedDelete: true
   },
   {
@@ -1388,10 +2230,84 @@ var ENTITY_TABLE_SPECS = [
     allowTargetedDelete: true
   },
   {
+    tableName: "cash_advance_summaries",
+    getRows: (d) => Object.entries(d.cashAdvanceSummaries || {}).map(
+      ([torId, rec]) => rec && typeof rec === "object" ? { ...rec, id: rec.id || torId, torId: rec.torId || torId } : null
+    ).filter(Boolean),
+    buildCandidate: buildCashAdvanceSummaryCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: []
+    }
+  },
+  {
     tableName: "meeting_minutes",
     getRows: (d) => d.meetingMinutes || [],
     buildCandidate: buildMeetingMinuteCandidateRow,
     allowTargetedDelete: true
+  },
+  {
+    tableName: "activity_documentations",
+    getRows: (d) => d.activityDocumentationList || [],
+    buildCandidate: buildActivityDocumentationCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "output_raci_records",
+    getRows: (d) => Object.entries(d.outputRaciRecords || {}).map(
+      ([outId, rec]) => rec && typeof rec === "object" ? { ...rec, id: outId, outputId: rec.outputId || outId } : null
+    ).filter(Boolean),
+    buildCandidate: buildOutputRaciCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: []
+    }
+  },
+  {
+    tableName: "activity_monitoring_records",
+    getRows: (d) => Object.entries(d.activityMonitoringRecords || {}).map(
+      ([actId, rec]) => rec && typeof rec === "object" ? { ...rec, id: actId, activityId: rec.activityId || actId } : null
+    ).filter(Boolean),
+    buildCandidate: buildActivityMonitoringCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: []
+    }
+  },
+  {
+    tableName: "monitoring_reports",
+    getRows: (d) => Object.entries(d.monitoringReports || {}).map(
+      ([repId, rec]) => rec && typeof rec === "object" ? { ...rec, id: rec.id || repId } : null
+    ).filter(Boolean),
+    buildCandidate: buildMonitoringReportCandidateRow,
+    allowTargetedDelete: true
+  },
+  {
+    tableName: "approval_hub_items",
+    getRows: (d) => Object.entries(d.approvalHubItems || {}).map(
+      ([itemId, rec]) => rec && typeof rec === "object" ? { ...rec, id: rec.id || itemId } : null
+    ).filter(Boolean),
+    buildCandidate: buildApprovalHubItemCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: []
+    }
+  },
+  {
+    tableName: "program_budgets",
+    getRows: (d) => Object.entries(d.programBudgets || {}).map(
+      ([key, rec]) => rec && typeof rec === "object" ? { ...rec, id: key } : null
+    ).filter(Boolean),
+    buildCandidate: buildProgramBudgetCandidateRow,
+    allowTargetedDelete: true,
+    upsertOptions: {
+      primaryKeyColumn: "id",
+      immutableOnUpdateColumns: []
+    }
   },
   {
     tableName: "participants",
@@ -1477,6 +2393,7 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
   let deletedRows = 0;
   let activeTable = "";
   let activeOperation = "";
+  const relSets = buildRelationSetsFromData(nextData);
   try {
     await conn.beginTransaction();
     for (const op of [...plannedOps].reverse()) {
@@ -1484,9 +2401,50 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
       activeTable = op.spec.tableName;
       activeOperation = "DELETE";
       for (const delId of op.toDeleteIds) {
+        const safeDelId = delId.slice(0, 128);
+        if (op.spec.tableName === "tors") {
+          try {
+            await conn.query("UPDATE `audit_logs` SET `tor_id` = NULL WHERE `tor_id` = ?", [
+              safeDelId
+            ]);
+          } catch {
+          }
+        } else if (op.spec.tableName === "activities") {
+          try {
+            await conn.query(
+              "DELETE FROM `activity_monitoring_records` WHERE `activity_id` = ?",
+              [safeDelId]
+            );
+          } catch {
+          }
+        } else if (op.spec.tableName === "outputs") {
+          try {
+            await conn.query("DELETE FROM `output_raci_records` WHERE `output_id` = ?", [
+              safeDelId
+            ]);
+          } catch {
+          }
+        } else if (op.spec.tableName === "programs") {
+          try {
+            await conn.query("DELETE FROM `program_budgets` WHERE `program_id` = ?", [
+              safeDelId
+            ]);
+            await conn.query("DELETE FROM `output_raci_records` WHERE `program_id` = ?", [
+              safeDelId
+            ]);
+            await conn.query(
+              "DELETE FROM `activity_monitoring_records` WHERE `program_id` = ?",
+              [safeDelId]
+            );
+            await conn.query("DELETE FROM `approval_hub_items` WHERE `program_id` = ?", [
+              safeDelId
+            ]);
+          } catch {
+          }
+        }
         const [delRes] = await conn.query(
           `DELETE FROM \`${op.spec.tableName}\` WHERE \`id\` = ?`,
-          [delId.slice(0, 128)]
+          [delId.slice(0, 255)]
         );
         deletedRows += 1;
         totalAffectedRows += Number(delRes?.affectedRows || 0);
@@ -1500,7 +2458,7 @@ async function saveDiffToMysql(pool, prevData, nextData, contextLabel = "write")
         const affected = await executeAdaptiveUpsert(
           conn,
           op.spec.tableName,
-          op.spec.buildCandidate(item, nowIso),
+          op.spec.buildCandidate(item, nowIso, relSets),
           op.spec.upsertOptions
         );
         upsertedRows += 1;
@@ -1641,10 +2599,17 @@ async function importProgramHierarchyToMysql(pool, params) {
     if (auditLog && auditLog.id) {
       currentStage = "AUDIT LOG INSERT";
       currentTable = "audit_logs";
+      const [existingUsers] = await conn.query("SELECT `id` FROM `users`").catch(() => [[]]);
+      const importRelSets = {
+        userIds: new Set(
+          (Array.isArray(existingUsers) ? existingUsers : []).map((u) => String(u.id))
+        ),
+        torIds: /* @__PURE__ */ new Set()
+      };
       const affected = await executeAdaptiveUpsert(
         conn,
         "audit_logs",
-        buildAuditLogCandidateRow(auditLog, nowIso)
+        buildAuditLogCandidateRow(auditLog, nowIso, importRelSets)
       );
       totalAffectedRows += affected;
     }
@@ -1676,6 +2641,7 @@ async function importProgramHierarchyToMysql(pool, params) {
 }
 async function saveDatabaseToMysql(pool, data) {
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const relSets = buildRelationSetsFromData(data);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -1685,7 +2651,7 @@ async function saveDatabaseToMysql(pool, data) {
         await executeAdaptiveUpsert(
           conn,
           spec.tableName,
-          spec.buildCandidate(item, nowIso),
+          spec.buildCandidate(item, nowIso, relSets),
           spec.upsertOptions
         );
       }
@@ -1783,7 +2749,7 @@ var INITIAL_USERS = [
     permissions: {
       canManagePrograms: true,
       canCreateTor: true,
-      canApproveTor: false,
+      canApproveTor: true,
       canManageUsers: false,
       canViewAllTors: true
     },
@@ -1798,7 +2764,7 @@ var INITIAL_USERS = [
     department: "Monitoring, Evaluation, Accountability & Learning",
     isActive: true,
     permissions: {
-      canManagePrograms: false,
+      canManagePrograms: true,
       canCreateTor: true,
       canApproveTor: false,
       canManageUsers: false,
@@ -1841,11 +2807,41 @@ var INITIAL_USERS = [
     createdAt: "2026-02-05T08:00:00Z"
   }
 ];
+var DEFAULT_INITIAL_USER_SCRYPT_HASH = "scrypt$ba9df605a7e35320f89561247f82a861$ad8b4942bc71ce1fa283548b3a339832946411e6ed2096f7f52d5e7fb95120b31b7196388f6c833faeca3b68e704758a0d6266eb797d4e19a9fd6b6a0cf45860";
+var DEFAULT_SYSADMIN_BOOTSTRAP_SCRYPT_HASH = "scrypt$3a3328cdf4519f0a5c7e323a59a5ff48$bcee9184fb18bf6ab468182ed8169745a64842e69eac0bb9d4bb4fd559defe3b07f6c3a4a437c66fc6f5d8d94761f6ba9470b7c2e5cca8402338620d832093d3";
+function buildPasswordHashFromSecret(secret) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derivedHex = crypto.scryptSync(secret, salt, 64).toString("hex");
+  return `scrypt$${salt}$${derivedHex}`;
+}
+function buildInitialPasswordHash() {
+  const configuredPass = (process.env.DEFAULT_TESTING_PASSWORD || "").trim();
+  if (configuredPass) {
+    return buildPasswordHashFromSecret(configuredPass);
+  }
+  return DEFAULT_INITIAL_USER_SCRYPT_HASH;
+}
+function buildSystemAdminDefaultPasswordHash() {
+  const configuredSysAdminPass = (process.env.SYSADMIN_DEFAULT_PASSWORD || process.env.DEFAULT_TESTING_PASSWORD || "").trim();
+  if (configuredSysAdminPass) {
+    return buildPasswordHashFromSecret(configuredSysAdminPass);
+  }
+  return DEFAULT_SYSADMIN_BOOTSTRAP_SCRYPT_HASH;
+}
 function cloneInitialUsers() {
-  return INITIAL_USERS.map((u) => ({
-    ...u,
-    permissions: { ...u.permissions }
-  }));
+  const initialHash = buildInitialPasswordHash();
+  return INITIAL_USERS.map((u) => {
+    const derivedUsername = u.username || (u.email || "").split("@")[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") || u.id;
+    return {
+      ...u,
+      username: derivedUsername,
+      accountStatus: u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"),
+      passwordHash: u.passwordHash || initialHash,
+      passwordUpdatedAt: u.passwordUpdatedAt || u.createdAt,
+      mustChangePassword: true,
+      permissions: { ...u.permissions }
+    };
+  });
 }
 function createDefaultSeed() {
   return {
@@ -1919,6 +2915,7 @@ function normalizeSchema(parsed, options) {
     parsed.programs = [];
   }
   const defaultPermsByRole = {
+    system_admin: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: true, canViewAllTors: true },
     admin: { canManagePrograms: false, canCreateTor: false, canApproveTor: false, canManageUsers: true, canViewAllTors: true },
     director: { canManagePrograms: true, canCreateTor: true, canApproveTor: true, canManageUsers: false, canViewAllTors: true },
     hr: { canManagePrograms: false, canCreateTor: true, canApproveTor: false, canManageUsers: false, canViewAllTors: true },
@@ -1931,14 +2928,28 @@ function normalizeSchema(parsed, options) {
     parsed.users = isFromMysql ? [] : cloneInitialUsers();
   } else {
     parsed.users = parsed.users.map((u) => {
+      if (u.role === "system_admin") {
+        return {
+          ...u,
+          permissions: {
+            canManagePrograms: true,
+            canCreateTor: true,
+            canApproveTor: true,
+            canManageUsers: true,
+            canViewAllTors: true
+          }
+        };
+      }
       const basePerms = defaultPermsByRole[u.role] || defaultPermsByRole.staff;
       const rawPerms = u.permissions && typeof u.permissions === "object" ? u.permissions : {};
+      const repairedManagePrograms = u.id === "user-meal" && u.role === "meal" ? true : rawPerms.canManagePrograms ?? basePerms.canManagePrograms;
+      const repairedApproveTor = u.role === "admin" ? false : u.id === "user-pm" && u.role === "program_manager" ? true : rawPerms.canApproveTor ?? basePerms.canApproveTor;
       return {
         ...u,
         permissions: {
-          canManagePrograms: rawPerms.canManagePrograms ?? basePerms.canManagePrograms,
+          canManagePrograms: repairedManagePrograms,
           canCreateTor: rawPerms.canCreateTor ?? basePerms.canCreateTor,
-          canApproveTor: u.role === "admin" ? false : rawPerms.canApproveTor ?? basePerms.canApproveTor,
+          canApproveTor: repairedApproveTor,
           canManageUsers: u.role === "admin" ? true : rawPerms.canManageUsers ?? basePerms.canManageUsers,
           canViewAllTors: rawPerms.canViewAllTors ?? basePerms.canViewAllTors
         }
@@ -2068,7 +3079,12 @@ function normalizeSchema(parsed, options) {
       const resolvedActivityStatus = t.activityStatus || (resolvedSubmissionStatus === "Disetujui" ? "Sedang Berjalan" : "Belum Dimulai");
       return {
         ...t,
+        title: typeof t.title === "string" ? t.title : "",
         torNumber: typeof t.torNumber === "string" ? t.torNumber : "",
+        background: typeof t.background === "string" ? t.background : "",
+        rationale: typeof t.rationale === "string" ? t.rationale : "",
+        generalObjective: typeof t.generalObjective === "string" ? t.generalObjective : "",
+        objectives: typeof t.objectives === "string" ? t.objectives : "",
         programId: resolvedProgramId,
         programName: t.programName || linkedProg?.name || linkedOutc?.programName || "",
         outcomeId: resolvedOutcomeId,
@@ -2083,6 +3099,22 @@ function normalizeSchema(parsed, options) {
         createdByName: t.createdByName || t.picName || "",
         submissionStatus: resolvedSubmissionStatus,
         activityStatus: resolvedActivityStatus,
+        implementingTeam: Array.isArray(t.implementingTeam) ? t.implementingTeam : [],
+        specificObjectives: Array.isArray(t.specificObjectives) ? t.specificObjectives : [],
+        timelineItems: Array.isArray(t.timelineItems) ? t.timelineItems : [],
+        monitoringItems: Array.isArray(t.monitoringItems) ? t.monitoringItems : [],
+        scopeOfActivities: Array.isArray(t.scopeOfActivities) ? t.scopeOfActivities : [],
+        implementationMechanisms: Array.isArray(t.implementationMechanisms) ? t.implementationMechanisms : [],
+        participantRows: Array.isArray(t.participantRows) ? t.participantRows : [],
+        participantCustomColumns: Array.isArray(t.participantCustomColumns) ? t.participantCustomColumns : [],
+        rolesResponsibilities: Array.isArray(t.rolesResponsibilities) ? t.rolesResponsibilities : [],
+        rundown: Array.isArray(t.rundown) ? t.rundown : [],
+        locations: Array.isArray(t.locations) ? t.locations : [],
+        goals: Array.isArray(t.goals) ? t.goals : [],
+        indicators: Array.isArray(t.indicators) ? t.indicators : [],
+        mealItems: Array.isArray(t.mealItems) ? t.mealItems : [],
+        challengesMitigations: Array.isArray(t.challengesMitigations) ? t.challengesMitigations : [],
+        budgetAuditLogs: Array.isArray(t.budgetAuditLogs) ? t.budgetAuditLogs : [],
         budgetRequested: approvedCas.length > 0 ? computedRequested : t.budgetRequested ?? 0,
         budgetApproved: t.budgetApproved ?? t.budgetRequested ?? 0,
         budgetActualSpent: verifiedCas.length > 0 ? computedActualSpent : t.budgetActualSpent ?? 0
@@ -2108,6 +3140,15 @@ function normalizeSchema(parsed, options) {
         items: Array.isArray(ca?.items) ? ca.items : []
       };
     });
+  }
+  if (Array.isArray(parsed.meetingMinutes)) {
+    parsed.meetingMinutes = parsed.meetingMinutes.map((m) => ({
+      ...m,
+      participants: Array.isArray(m?.participants) ? m.participants : [],
+      discussions: Array.isArray(m?.discussions) ? m.discussions : [],
+      decisions: Array.isArray(m?.decisions) ? m.decisions : [],
+      actionPoints: Array.isArray(m?.actionPoints) ? m.actionPoints : []
+    }));
   }
   if (!Array.isArray(parsed.meetingMinutes)) {
     parsed.meetingMinutes = [];
@@ -2197,7 +3238,8 @@ function buildMysqlWriteFailureError(err, contextLabel) {
 var Database = class {
   constructor() {
     this.lastCommittedJson = "";
-    this.dirtySinceCommit = false;
+    this.mutationVersion = 0;
+    this.committedVersion = 0;
     this.isCommittingWrite = false;
     this.mysqlWriteChain = Promise.resolve();
     this.initPromise = null;
@@ -2245,11 +3287,14 @@ var Database = class {
   }
   getDiagnostics() {
     const envCheck = validateMysqlEnvConfiguration();
+    const loopbackInCloudRun = isMysqlLoopbackInCloudRun();
     return {
       provider: this.isStrictMysqlRequired() ? "mysql" : "preview-local",
       status: this.mysqlStatus,
       operational: this.isOperational(),
       mysqlConfigured: envCheck.configured,
+      loopbackInCloudRun,
+      connectionHint: loopbackInCloudRun ? "Cloud Run preview detected with loopback MYSQL_HOST (127.0.0.1); set MYSQL_REMOTE_HOST to connect Cloud Run directly to remote MySQL, or deploy on Hostinger where 127.0.0.1 connects to local MySQL." : void 0,
       missingEnvVars: envCheck.missingVars,
       privileges: this.privilegeSummary ? {
         checked: this.privilegeSummary.checked,
@@ -2313,33 +3358,33 @@ var Database = class {
    * Menyelaraskan baseline snapshot bersih setelah normalisasi memori non-mutasi (seperti saat startup / reload).
    */
   syncCleanBaseline() {
-    if (!this.dirtySinceCommit && !this.isCommittingWrite) {
+    if (this.mutationVersion === this.committedVersion && !this.isCommittingWrite) {
       this.lastCommittedJson = JSON.stringify(this.data);
     }
   }
   hasUncommittedChanges() {
-    return this.dirtySinceCommit;
+    return this.mutationVersion > this.committedVersion;
   }
   rollbackUncommittedChanges() {
-    if (this.dirtySinceCommit && this.lastCommittedJson) {
+    if (this.mutationVersion > this.committedVersion && this.lastCommittedJson) {
       try {
         this.data = JSON.parse(this.lastCommittedJson);
       } catch {
       }
-      this.dirtySinceCommit = false;
+      this.mutationVersion = this.committedVersion;
     }
   }
   /**
    * Menyimpan seluruh perubahan yang dilakukan melalui `db.update()` ke MySQL secara sinkron & atomik.
-   * Jika query INSERT/UPDATE/DELETE ke MySQL gagal, state memori (`this.data`) dikembalikan ke state terakhir
-   * yang sudah ter-commit di MySQL, dan error dilempar agar API TIDAK PERNAH mengembalikan sukses palsu (fake 200 OK).
+   * Menggunakan penghitung versi monotonik (`mutationVersion` vs `committedVersion`) agar dua request
+   * paralel tidak pernah saling menghapus flag dirty atau mengembalikan 200 OK sebelum versinya ter-commit di MySQL.
    */
   async commitPendingWrites(contextLabel = "write") {
     if (!this.isStrictMysqlRequired()) {
-      if (this.dirtySinceCommit) {
+      if (this.mutationVersion > this.committedVersion) {
         this.persistLocalJsonOnly(this.data);
         this.lastCommittedJson = JSON.stringify(this.data);
-        this.dirtySinceCommit = false;
+        this.committedVersion = this.mutationVersion;
       }
       return;
     }
@@ -2350,11 +3395,12 @@ var Database = class {
         userMessage: "Database MySQL sedang tidak siap menerima penyimpanan data. Silakan muat ulang halaman dan coba kembali."
       });
     }
-    if (!this.dirtySinceCommit) {
+    const requiredVersion = this.mutationVersion;
+    if (requiredVersion <= this.committedVersion) {
       return;
     }
     await this.enqueueWriteTask(async () => {
-      if (!this.dirtySinceCommit) {
+      if (this.committedVersion >= requiredVersion && this.mutationVersion <= this.committedVersion) {
         return;
       }
       this.isCommittingWrite = true;
@@ -2363,14 +3409,17 @@ var Database = class {
         if (!pool) {
           throw new Error("MySQL connection pool is unavailable during commit.");
         }
-        const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
-        const nextSnapshotJson = JSON.stringify(this.data);
-        const nextData = JSON.parse(nextSnapshotJson);
-        await saveDiffToMysql(pool, prevData, nextData, contextLabel);
-        this.lastCommittedJson = nextSnapshotJson;
-        this.dirtySinceCommit = false;
-        this.lastFullMysqlSyncAt = Date.now();
-        this.lastUsersRefreshAt = Date.now();
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVersion = this.mutationVersion;
+          const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
+          const nextSnapshotJson = JSON.stringify(this.data);
+          const nextData = JSON.parse(nextSnapshotJson);
+          await saveDiffToMysql(pool, prevData, nextData, contextLabel);
+          this.lastCommittedJson = nextSnapshotJson;
+          this.committedVersion = targetVersion;
+          this.lastFullMysqlSyncAt = Date.now();
+          this.lastUsersRefreshAt = Date.now();
+        }
       } catch (err) {
         this.lastMysqlErrorSummary = sanitizeDbError(err);
         if (this.lastCommittedJson) {
@@ -2379,7 +3428,7 @@ var Database = class {
           } catch {
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       } finally {
         this.isCommittingWrite = false;
@@ -2433,12 +3482,12 @@ var Database = class {
         }
         this.persistLocalJsonOnly(this.data);
         this.lastCommittedJson = JSON.stringify(this.data);
-        this.dirtySinceCommit = false;
+        this.committedVersion = this.mutationVersion;
         console.log(`[IMPORT] COMMIT SUCCESS (programId=${batchParams.programId}, mode=preview-local)`);
         return this.data;
       } catch (err) {
         this.data = JSON.parse(backupJson);
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       }
     }
@@ -2456,12 +3505,20 @@ var Database = class {
         if (!pool) {
           throw new Error("MySQL connection pool is unavailable during hierarchy import.");
         }
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVer = this.mutationVersion;
+          const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
+          const snapJson = JSON.stringify(this.data);
+          await saveDiffToMysql(pool, prevData, JSON.parse(snapJson), `${contextLabel}:pre-flush`);
+          this.lastCommittedJson = snapJson;
+          this.committedVersion = targetVer;
+        }
         await importProgramHierarchyToMysql(pool, batchParams);
         const freshFromMysql = await loadDatabaseFromMysql(pool);
         if (freshFromMysql) {
           this.data = normalizeSchema(freshFromMysql, { isFromMysql: true });
           this.lastCommittedJson = JSON.stringify(this.data);
-          this.dirtySinceCommit = false;
+          this.committedVersion = this.mutationVersion;
           this.lastFullMysqlSyncAt = Date.now();
           this.lastUsersRefreshAt = Date.now();
         }
@@ -2474,7 +3531,7 @@ var Database = class {
           } catch {
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, contextLabel);
       } finally {
         this.isCommittingWrite = false;
@@ -2487,18 +3544,19 @@ var Database = class {
    * menampilkan data aktual yang benar-benar tersimpan di MySQL.
    */
   async refreshFromMysqlIfStale(maxAgeMs = 1500) {
-    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.dirtySinceCommit || this.isCommittingWrite) {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.hasUncommittedChanges() || this.isCommittingWrite) {
       return false;
     }
     const now = Date.now();
     if (now - this.lastFullMysqlSyncAt < maxAgeMs) {
       return false;
     }
+    const versionBeforeFetch = this.mutationVersion;
     try {
       const pool = await getMysqlPool();
       if (!pool) return false;
       const fresh = await loadDatabaseFromMysql(pool);
-      if (fresh && !this.dirtySinceCommit && !this.isCommittingWrite) {
+      if (fresh && !this.hasUncommittedChanges() && !this.isCommittingWrite && this.mutationVersion === versionBeforeFetch) {
         this.data = normalizeSchema(fresh, { isFromMysql: true });
         this.lastCommittedJson = JSON.stringify(this.data);
         this.lastFullMysqlSyncAt = Date.now();
@@ -2511,22 +3569,49 @@ var Database = class {
     return false;
   }
   /**
+   * Memverifikasi dan menyinkronkan satu baris Program langsung dari tabel `programs` MySQL setelah operasi tulis.
+   */
+  async verifyProgramInMysql(programId) {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready") {
+      return (this.data.programs || []).find((p) => p.id === programId) || null;
+    }
+    const pool = await getMysqlPool();
+    if (!pool) {
+      return (this.data.programs || []).find((p) => p.id === programId) || null;
+    }
+    const hydrated = await fetchProgramByIdFromMysql(pool, programId);
+    if (hydrated && hydrated.id) {
+      const idx = (this.data.programs || []).findIndex((p) => p.id === programId);
+      if (idx !== -1) {
+        this.data.programs[idx] = hydrated;
+      } else {
+        this.data.programs = [hydrated, ...this.data.programs || []];
+      }
+      if (!this.hasUncommittedChanges() && !this.isCommittingWrite) {
+        this.lastCommittedJson = JSON.stringify(this.data);
+      }
+      return hydrated;
+    }
+    return null;
+  }
+  /**
    * Membaca ulang daftar pengguna & password_hash terbaru langsung dari tabel `users` MySQL
    * agar login dan pengelolaan akun selalu menggunakan Single Source of Truth di MySQL.
    */
   async refreshUsersFromMysql(force = false) {
-    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.dirtySinceCommit || this.isCommittingWrite) {
+    if (!isMysqlConfigured() || this.mysqlStatus !== "ready" || this.hasUncommittedChanges() || this.isCommittingWrite) {
       return this.data.users || [];
     }
     const now = Date.now();
     if (!force && now - this.lastUsersRefreshAt < 2e3 && this.data.users.length > 0) {
       return this.data.users;
     }
+    const versionBeforeFetch = this.mutationVersion;
     try {
       const pool = await getMysqlPool();
       if (!pool) return this.data.users || [];
       const freshUsers = await fetchUsersFromMysql(pool);
-      if (Array.isArray(freshUsers) && freshUsers.length > 0 && !this.dirtySinceCommit && !this.isCommittingWrite) {
+      if (Array.isArray(freshUsers) && freshUsers.length > 0 && !this.hasUncommittedChanges() && !this.isCommittingWrite && this.mutationVersion === versionBeforeFetch) {
         this.data.users = freshUsers;
         this.lastUsersRefreshAt = now;
         this.lastCommittedJson = JSON.stringify(this.data);
@@ -2547,7 +3632,7 @@ var Database = class {
       return;
     }
     try {
-      if (this.dirtySinceCommit) {
+      if (this.hasUncommittedChanges()) {
         await this.commitPendingWrites(label);
       } else if (isMysqlConfigured() && this.mysqlStatus === "ready" && user?.id) {
         await this.enqueueWriteTask(async () => {
@@ -2555,7 +3640,9 @@ var Database = class {
           if (!pool) throw new Error("MySQL connection pool is unavailable.");
           await upsertMysqlUserRow(pool, user);
           this.lastUsersRefreshAt = Date.now();
-          this.lastCommittedJson = JSON.stringify(this.data);
+          if (!this.hasUncommittedChanges()) {
+            this.lastCommittedJson = JSON.stringify(this.data);
+          }
         });
       }
     } catch (err) {
@@ -2589,16 +3676,16 @@ var Database = class {
           throw new Error("MySQL connection pool is unavailable.");
         }
         await deleteMysqlUserRow(pool, userId);
-        if (this.dirtySinceCommit) {
+        while (this.mutationVersion > this.committedVersion) {
+          const targetVersion = this.mutationVersion;
           const prevData = this.lastCommittedJson ? JSON.parse(this.lastCommittedJson) : createEmptyDatabaseState();
           const nextSnapshotJson = JSON.stringify(this.data);
           const nextData = JSON.parse(nextSnapshotJson);
           await saveDiffToMysql(pool, prevData, nextData, label);
           this.lastCommittedJson = nextSnapshotJson;
-          this.dirtySinceCommit = false;
-        } else {
-          this.lastCommittedJson = JSON.stringify(this.data);
+          this.committedVersion = targetVersion;
         }
+        this.lastCommittedJson = JSON.stringify(this.data);
         this.lastUsersRefreshAt = Date.now();
         this.lastFullMysqlSyncAt = Date.now();
       } catch (err) {
@@ -2609,7 +3696,7 @@ var Database = class {
           } catch {
           }
         }
-        this.dirtySinceCommit = false;
+        this.mutationVersion = this.committedVersion;
         throw buildMysqlWriteFailureError(err, label);
       } finally {
         this.isCommittingWrite = false;
@@ -2625,11 +3712,11 @@ var Database = class {
     if (this.isStrictMysqlRequired()) {
       return;
     }
-    try {
-      const jsonText = JSON.stringify(snapshot, null, 2);
-      fs2.writeFileSync(DB_FILE, jsonText, "utf-8");
-    } catch {
-    }
+    this.ensureDirectory();
+    const jsonText = JSON.stringify(snapshot, null, 2);
+    const tempFile = `${DB_FILE}.tmp`;
+    fs2.writeFileSync(tempFile, jsonText, "utf-8");
+    fs2.renameSync(tempFile, DB_FILE);
   }
   persistExplicitBackup(snapshot) {
     try {
@@ -2698,9 +3785,18 @@ var Database = class {
             if (existingFromMysql.cleanResetPrj3581V2 === void 0) {
               missingFlags.cleanResetPrj3581V2 = true;
             }
+            if (!existingFromMysql.users || existingFromMysql.users.length === 0) {
+              const seededUsers = cloneInitialUsers();
+              for (const u of seededUsers) {
+                await upsertMysqlUserRow(pool, u);
+              }
+              existingFromMysql.users = seededUsers;
+              existingFromMysql.currentUserId = "user-director";
+            }
             this.data = normalizeSchema(existingFromMysql, { isFromMysql: true });
+            await this.ensureSystemAdministratorInMysql(pool);
             this.lastCommittedJson = JSON.stringify(this.data);
-            this.dirtySinceCommit = false;
+            this.committedVersion = this.mutationVersion;
             this.mysqlStatus = "ready";
             this.lastMysqlErrorSummary = "";
             this.failedMysqlCycles = 0;
@@ -2721,11 +3817,37 @@ var Database = class {
             return;
           }
           console.log("[DB] Database is empty. Initial seed is being created.");
-          const initialSeed = normalizeSchema(createDefaultSeed(), { isFromMysql: false });
+          let baseSeedSource = null;
+          try {
+            if (fs2.existsSync(DB_FILE)) {
+              const existingJsonText = fs2.readFileSync(DB_FILE, "utf-8");
+              const parsedLocal = JSON.parse(existingJsonText);
+              if (parsedLocal && typeof parsedLocal === "object") {
+                const initialHash = buildInitialPasswordHash();
+                if (Array.isArray(parsedLocal.users)) {
+                  parsedLocal.users = parsedLocal.users.map((u) => ({
+                    ...u,
+                    username: u.username || (u.email || "").split("@")[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") || u.id,
+                    accountStatus: u.accountStatus || (u.isActive === false ? "Nonaktif" : "Aktif"),
+                    passwordHash: u.passwordHash || initialHash,
+                    passwordUpdatedAt: u.passwordUpdatedAt || u.createdAt
+                  }));
+                }
+                baseSeedSource = parsedLocal;
+              }
+            }
+          } catch {
+            baseSeedSource = null;
+          }
+          const initialSeed = normalizeSchema(
+            baseSeedSource || createDefaultSeed(),
+            { isFromMysql: false }
+          );
           await saveDatabaseToMysql(pool, initialSeed);
           this.data = initialSeed;
+          await this.ensureSystemAdministratorInMysql(pool);
           this.lastCommittedJson = JSON.stringify(this.data);
-          this.dirtySinceCommit = false;
+          this.committedVersion = this.mutationVersion;
           this.mysqlStatus = "ready";
           this.lastMysqlErrorSummary = "";
           this.failedMysqlCycles = 0;
@@ -2747,11 +3869,98 @@ var Database = class {
       this.lastMysqlErrorSummary = sanitizeDbError(lastError);
       this.data = createEmptyDatabaseState();
       this.lastCommittedJson = JSON.stringify(this.data);
-      this.dirtySinceCommit = false;
+      this.committedVersion = this.mutationVersion;
       console.error(`[DB] MySQL connection or initialization failed: ${this.lastMysqlErrorSummary}`);
     } finally {
       this.isInitializing = false;
     }
+  }
+  /**
+   * Memastikan tepat satu akun System Administrator (`role = 'system_admin'`) tersedia di MySQL
+   * sebagai recovery & high-level system management access tanpa pernah menghapus, mengubah,
+   * atau menimpa akun Administrator (`role = 'admin'`) maupun akun System Administrator yang sudah ada.
+   */
+  async ensureSystemAdministratorInMysql(pool) {
+    const existingSysAdmin = await fetchSystemAdminFromMysql(pool);
+    if (existingSysAdmin && existingSysAdmin.id) {
+      if (!existingSysAdmin.passwordHash || !String(existingSysAdmin.passwordHash).trim()) {
+        const repairedSysAdmin = {
+          ...existingSysAdmin,
+          role: "system_admin",
+          passwordHash: buildSystemAdminDefaultPasswordHash(),
+          passwordUpdatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          permissions: {
+            canManagePrograms: true,
+            canCreateTor: true,
+            canApproveTor: true,
+            canManageUsers: true,
+            canViewAllTors: true
+          }
+        };
+        await upsertMysqlUserRow(pool, repairedSysAdmin);
+      }
+      const refreshedUsers = await fetchUsersFromMysql(pool);
+      if (Array.isArray(refreshedUsers) && refreshedUsers.length > 0) {
+        this.data = normalizeSchema(
+          { ...this.data, users: refreshedUsers },
+          { isFromMysql: true }
+        );
+      }
+      console.log(
+        `[AUTH-INIT] System Administrator account verified in MySQL (id=${existingSysAdmin.id}, role=system_admin).`
+      );
+      return;
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const currentUsers = await fetchUsersFromMysql(pool);
+    const takenUsernames = new Set(
+      currentUsers.map((u) => String(u.username || "").trim().toLowerCase()).filter(Boolean)
+    );
+    const takenEmails = new Set(
+      currentUsers.map((u) => String(u.email || "").trim().toLowerCase()).filter(Boolean)
+    );
+    const preferredUsername = String(process.env.SYSADMIN_DEFAULT_USERNAME || "sysadmin").trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") || "sysadmin";
+    const resolvedUsername = takenUsernames.has(preferredUsername) ? "system.admin" : preferredUsername;
+    const preferredEmail = String(process.env.SYSADMIN_DEFAULT_EMAIL || "sysadmin@wijna.org").trim().toLowerCase();
+    const resolvedEmail = takenEmails.has(preferredEmail) ? "sysadmin.recovery@wijna.org" : preferredEmail;
+    const resolvedName = String(process.env.SYSADMIN_DEFAULT_NAME || "System Administrator").trim() || "System Administrator";
+    const newSysAdmin = {
+      id: "user-sysadmin",
+      username: resolvedUsername,
+      name: resolvedName,
+      email: resolvedEmail,
+      role: "system_admin",
+      roleTitle: "System Administrator",
+      department: "Pemulihan & Tata Kelola Sistem Utama",
+      isActive: true,
+      accountStatus: "Aktif",
+      mustChangePassword: false,
+      passwordHash: buildSystemAdminDefaultPasswordHash(),
+      passwordUpdatedAt: nowIso,
+      permissions: {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true
+      },
+      createdAt: nowIso
+    };
+    await upsertMysqlUserRow(pool, newSysAdmin);
+    const verifiedSysAdmin = await fetchSystemAdminFromMysql(pool);
+    if (!verifiedSysAdmin || !verifiedSysAdmin.id) {
+      throw new Error(
+        "Failed to verify newly created System Administrator account in MySQL users table."
+      );
+    }
+    const allUsersFromMysql = await fetchUsersFromMysql(pool);
+    this.data = normalizeSchema(
+      { ...this.data, users: allUsersFromMysql },
+      { isFromMysql: true }
+    );
+    console.log(
+      `[AUTH-INIT] System Administrator account created and stored in MySQL (id=${verifiedSysAdmin.id}, role=system_admin).`
+    );
   }
   getData() {
     return this.data;
@@ -2761,7 +3970,7 @@ var Database = class {
       updater(this.data);
       this.persistLocalJsonOnly(this.data);
       this.lastCommittedJson = JSON.stringify(this.data);
-      this.dirtySinceCommit = false;
+      this.committedVersion = this.mutationVersion;
       return this.data;
     }
     if (this.mysqlStatus !== "ready") {
@@ -2774,7 +3983,7 @@ var Database = class {
       this.lastCommittedJson = JSON.stringify(this.data);
     }
     updater(this.data);
-    this.dirtySinceCommit = true;
+    this.mutationVersion += 1;
     return this.data;
   }
   resetToSeed() {
@@ -2785,7 +3994,7 @@ var Database = class {
     this.persistExplicitBackup(this.data);
     this.persistLocalJsonOnly(this.data);
     this.lastCommittedJson = JSON.stringify(this.data);
-    this.dirtySinceCommit = false;
+    this.committedVersion = this.mutationVersion;
     return this.data;
   }
 };
@@ -3278,7 +4487,7 @@ function syncApprovalHubData(draft) {
     ...tors.map((t) => `apv-tor-${t.id}`),
     ...cashAdvances.map((ca) => `apv-ca-${ca.id}`),
     ...cashAdvances.filter((ca) => ca.isReported).map((ca) => `apv-finrep-${ca.id}`),
-    ...meetingMinutes.map((mm) => `apv-mm-${mm.id}`),
+    ...meetingMinutes.map((mm) => `apv-notulen-${mm.id}`),
     ...docList.filter(Boolean).map((d) => `apv-doc-${d.id}`),
     ...monReports.filter((m) => m.toolId === "EXEC-SUMMARY").map((m) => `apv-exec-${m.id}`)
   ]);
@@ -3978,10 +5187,13 @@ function syncApprovalHubData(draft) {
     );
     const existing = draft.approvalHubItems[itemId];
     let mappedStatus = existing?.status || "Pending Verification";
-    if (!existing) {
-      if (exec.status === "Planned") mappedStatus = "Draft";
-      else if (exec.status === "In Progress") mappedStatus = "Pending Verification";
-      else if (exec.status === "Completed") mappedStatus = "Reported to Director";
+    if (!existing || existing.status === "Draft") {
+      if (exec.status === "Planned") {
+        mappedStatus = "Draft";
+      } else if (exec.status === "In Progress" || exec.status === "Completed") {
+        const isLegacySeed = !existing && exec.id.startsWith("tor-1__") && exec.status === "Completed";
+        mappedStatus = isLegacySeed ? "Reported to Director" : "Pending Verification";
+      }
     }
     const wfConfig = configs["executive_summary"];
     const refNumber = String(parentTor.torNumber || parentTor.id || "").replace(/^TOR\//, "EXEC/");
@@ -3996,10 +5208,11 @@ function syncApprovalHubData(draft) {
       directorNotes: existing?.steps?.[2]?.notes || (mappedStatus === "Reported to Director" ? "Executive Summary 7 Hari telah diterima oleh Direktur sebagai laporan akhir kegiatan." : void 0),
       refPrefix: `EXEC-${parentTor.id.toUpperCase()}`
     });
-    const defaultTimeline = existing?.timeline?.length ? existing.timeline : [
+    const wasPromotedFromDraft = existing?.status === "Draft" && mappedStatus === "Pending Verification";
+    const defaultTimeline = existing?.timeline?.length && !wasPromotedFromDraft ? existing.timeline : [
       {
         id: `tl-${itemId}-1`,
-        timestamp: exec.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+        timestamp: (wasPromotedFromDraft ? exec.updatedAt : exec.createdAt) || (/* @__PURE__ */ new Date()).toISOString(),
         actorId: raci.responsibleUserId,
         actorName: raci.responsibleUserName,
         actorRoleCode: "R",
@@ -4115,88 +5328,90 @@ function syncApprovalHubData(draft) {
     '"'
   );
   const allItems = Object.values(draft.approvalHubItems);
-  if (draft.approvalNotifications.length === 0) {
-    for (const item of allItems) {
-      const cleanTitle = cleanTitleForNotif(item.title);
-      if (item.status === "Pending Verification") {
-        const targetId = item.groupType === "program_documents" ? item.accountableProgramUserId : item.accountableFinanceUserId;
-        const targetRole = item.groupType === "program_documents" ? "A1" : "A2";
-        draft.approvalNotifications.unshift({
-          id: `notif-init-${item.id}`,
-          approvalItemId: item.id,
-          referenceNumber: item.referenceNumber,
-          documentTitle: cleanTitle,
-          categoryCode: item.categoryCode,
-          categoryLabel: item.categoryLabel,
-          eventType: "ENTER_VERIFICATION",
-          message: `"${cleanTitle}" menunggu verifikasi ${targetRole} (${targetRole === "A1" ? item.accountableProgramUserName : item.accountableFinanceUserName}).`,
-          targetUserIds: [targetId],
-          targetRoleCodes: [targetRole],
-          createdAt: item.updatedAt,
-          isReadByUserIds: []
-        });
-      } else if (item.status === "Pending Approval" || item.status === "Approved" && item.groupType === "program_documents") {
-        draft.approvalNotifications.unshift({
-          id: `notif-dir-${item.id}`,
-          approvalItemId: item.id,
-          referenceNumber: item.referenceNumber,
-          documentTitle: cleanTitle,
-          categoryCode: item.categoryCode,
-          categoryLabel: item.categoryLabel,
-          eventType: item.groupType === "program_documents" ? "APPROVED" : "ENTER_VERIFICATION",
-          message: item.groupType === "program_documents" ? `"${cleanTitle}" telah disetujui A1 (${item.accountableProgramUserName}) dan dilaporkan kepada Direktur.` : `"${cleanTitle}" telah diverifikasi A2 (${item.accountableFinanceUserName}) dan menunggu Persetujuan Akhir Direktur.`,
-          targetUserIds: [item.directorUserId, item.responsibleUserId],
-          targetRoleCodes: ["Direktur", "R"],
-          createdAt: item.updatedAt,
-          isReadByUserIds: []
-        });
-      } else if (item.status === "Reported to Director" || item.status === "Approved" && item.groupType === "financial_documents") {
-        draft.approvalNotifications.unshift({
-          id: `notif-done-${item.id}`,
-          approvalItemId: item.id,
-          referenceNumber: item.referenceNumber,
-          documentTitle: cleanTitle,
-          categoryCode: item.categoryCode,
-          categoryLabel: item.categoryLabel,
-          eventType: "FINAL_COMPLETED",
-          message: item.groupType === "program_documents" ? `"${cleanTitle}" telah disetujui A1 & diterima Direktur. Silakan lanjutkan pelaksanaan kegiatan.` : `"${cleanTitle}" telah disetujui akhir oleh Direktur. Dana & dokumen siap ditindaklanjuti.`,
-          targetUserIds: [item.responsibleUserId],
-          targetRoleCodes: ["R"],
-          createdAt: item.updatedAt,
-          isReadByUserIds: []
-        });
-      } else if (item.status === "Revision Required") {
-        const latestRevComment = item.timeline?.[0]?.comment || "Mohon perbaiki dokumen sesuai catatan pemeriksa.";
-        draft.approvalNotifications.unshift({
-          id: `notif-rev-${item.id}`,
-          approvalItemId: item.id,
-          referenceNumber: item.referenceNumber,
-          documentTitle: cleanTitle,
-          categoryCode: item.categoryCode,
-          categoryLabel: item.categoryLabel,
-          eventType: "REVISION_REQUIRED",
-          message: `"${cleanTitle}" dikembalikan untuk perbaikan: "${latestRevComment}".`,
-          targetUserIds: [item.responsibleUserId],
-          targetRoleCodes: ["R"],
-          createdAt: item.updatedAt,
-          isReadByUserIds: []
-        });
-      } else if (item.status === "Rejected") {
-        draft.approvalNotifications.unshift({
-          id: `notif-rej-${item.id}`,
-          approvalItemId: item.id,
-          referenceNumber: item.referenceNumber,
-          documentTitle: cleanTitle,
-          categoryCode: item.categoryCode,
-          categoryLabel: item.categoryLabel,
-          eventType: "REJECTED",
-          message: `"${cleanTitle}" ditolak. Periksa catatan pemeriksa untuk tindak lanjut.`,
-          targetUserIds: [item.responsibleUserId],
-          targetRoleCodes: ["R"],
-          createdAt: item.updatedAt,
-          isReadByUserIds: []
-        });
-      }
+  const existingItemNotifIds = new Set(
+    (draft.approvalNotifications || []).map((n) => n.approvalItemId)
+  );
+  for (const item of allItems) {
+    if (existingItemNotifIds.has(item.id)) continue;
+    const cleanTitle = cleanTitleForNotif(item.title);
+    if (item.status === "Pending Verification") {
+      const targetId = item.groupType === "program_documents" ? item.accountableProgramUserId : item.accountableFinanceUserId;
+      const targetRole = item.groupType === "program_documents" ? "A1" : "A2";
+      draft.approvalNotifications.unshift({
+        id: `notif-init-${item.id}`,
+        approvalItemId: item.id,
+        referenceNumber: item.referenceNumber,
+        documentTitle: cleanTitle,
+        categoryCode: item.categoryCode,
+        categoryLabel: item.categoryLabel,
+        eventType: "ENTER_VERIFICATION",
+        message: `"${cleanTitle}" menunggu verifikasi ${targetRole} (${targetRole === "A1" ? item.accountableProgramUserName : item.accountableFinanceUserName}).`,
+        targetUserIds: [targetId],
+        targetRoleCodes: [targetRole],
+        createdAt: item.updatedAt,
+        isReadByUserIds: []
+      });
+    } else if (item.status === "Pending Approval" || item.status === "Approved" && item.groupType === "program_documents") {
+      draft.approvalNotifications.unshift({
+        id: `notif-dir-${item.id}`,
+        approvalItemId: item.id,
+        referenceNumber: item.referenceNumber,
+        documentTitle: cleanTitle,
+        categoryCode: item.categoryCode,
+        categoryLabel: item.categoryLabel,
+        eventType: item.groupType === "program_documents" ? "APPROVED" : "ENTER_VERIFICATION",
+        message: item.groupType === "program_documents" ? `"${cleanTitle}" telah disetujui A1 (${item.accountableProgramUserName}) dan dilaporkan kepada Direktur.` : `"${cleanTitle}" telah diverifikasi A2 (${item.accountableFinanceUserName}) dan menunggu Persetujuan Akhir Direktur.`,
+        targetUserIds: [item.directorUserId, item.responsibleUserId],
+        targetRoleCodes: ["Direktur", "R"],
+        createdAt: item.updatedAt,
+        isReadByUserIds: []
+      });
+    } else if (item.status === "Reported to Director" || item.status === "Approved" && item.groupType === "financial_documents") {
+      draft.approvalNotifications.unshift({
+        id: `notif-done-${item.id}`,
+        approvalItemId: item.id,
+        referenceNumber: item.referenceNumber,
+        documentTitle: cleanTitle,
+        categoryCode: item.categoryCode,
+        categoryLabel: item.categoryLabel,
+        eventType: "FINAL_COMPLETED",
+        message: item.groupType === "program_documents" ? `"${cleanTitle}" telah disetujui A1 & diterima Direktur. Silakan lanjutkan pelaksanaan kegiatan.` : `"${cleanTitle}" telah disetujui akhir oleh Direktur. Dana & dokumen siap ditindaklanjuti.`,
+        targetUserIds: [item.responsibleUserId],
+        targetRoleCodes: ["R"],
+        createdAt: item.updatedAt,
+        isReadByUserIds: []
+      });
+    } else if (item.status === "Revision Required") {
+      const latestRevComment = item.timeline?.[0]?.comment || "Mohon perbaiki dokumen sesuai catatan pemeriksa.";
+      draft.approvalNotifications.unshift({
+        id: `notif-rev-${item.id}`,
+        approvalItemId: item.id,
+        referenceNumber: item.referenceNumber,
+        documentTitle: cleanTitle,
+        categoryCode: item.categoryCode,
+        categoryLabel: item.categoryLabel,
+        eventType: "REVISION_REQUIRED",
+        message: `"${cleanTitle}" dikembalikan untuk perbaikan: "${latestRevComment}".`,
+        targetUserIds: [item.responsibleUserId],
+        targetRoleCodes: ["R"],
+        createdAt: item.updatedAt,
+        isReadByUserIds: []
+      });
+    } else if (item.status === "Rejected") {
+      draft.approvalNotifications.unshift({
+        id: `notif-rej-${item.id}`,
+        approvalItemId: item.id,
+        referenceNumber: item.referenceNumber,
+        documentTitle: cleanTitle,
+        categoryCode: item.categoryCode,
+        categoryLabel: item.categoryLabel,
+        eventType: "REJECTED",
+        message: `"${cleanTitle}" ditolak. Periksa catatan pemeriksa untuk tindak lanjut.`,
+        targetUserIds: [item.responsibleUserId],
+        targetRoleCodes: ["R"],
+        createdAt: item.updatedAt,
+        isReadByUserIds: []
+      });
     }
   }
   const seenNotifKeys = /* @__PURE__ */ new Set();
@@ -4231,23 +5446,27 @@ function resolveUserApprovalAccess(draft, user, allItems) {
   const items = allItems || Object.values(draft.approvalHubItems || {});
   const raciList = Object.values(draft.outputRaciRecords || {});
   const isActiveUser = user.isActive !== false;
+  const isSystemAdmin = isActiveUser && user.role === "system_admin";
   const isAdmin = user.role === "admin";
-  const isDirector = isActiveUser && !isAdmin && (user.role === "director" || items.some((i) => i.directorUserId === user.id));
-  const isFinance = isActiveUser && !isAdmin && user.role === "finance";
+  const isDirector = isActiveUser && !isAdmin && (isSystemAdmin || user.role === "director" || items.some((i) => i.directorUserId === user.id));
+  const isFinance = isActiveUser && !isAdmin && (isSystemAdmin || user.role === "finance");
   const isAssignedA1 = raciList.some((r) => r.accountableUserId === user.id) || items.some((i) => i.accountableProgramUserId === user.id);
-  const isA1 = isActiveUser && !isAdmin && isAssignedA1 && user.permissions?.canApproveTor !== false;
+  const isA1 = isActiveUser && !isAdmin && (isSystemAdmin || isAssignedA1 && user.permissions?.canApproveTor !== false);
   const isAssignedA2 = raciList.some((r) => r.accountableFinanceUserId === user.id) || items.some((i) => i.accountableFinanceUserId === user.id);
-  const isA2 = isActiveUser && isAssignedA2 && !isAdmin && user.permissions?.canApproveTor !== false;
-  const isR = isActiveUser && !isAdmin && (raciList.some((r) => r.responsibleUserId === user.id) || items.some((i) => i.responsibleUserId === user.id) || user.role === "staff" || user.role === "meal" || user.role === "program_manager");
-  const canAccessApprovalMenu = isActiveUser && !isAdmin && (isA1 || isA2 || isDirector || isFinance || isR);
+  const isA2 = isActiveUser && !isAdmin && (isSystemAdmin || isAssignedA2 && user.permissions?.canApproveTor !== false);
+  const isR = isActiveUser && !isAdmin && (isSystemAdmin || raciList.some((r) => r.responsibleUserId === user.id) || items.some((i) => i.responsibleUserId === user.id) || user.role === "staff" || user.role === "meal" || user.role === "program_manager");
+  const canAccessApprovalMenu = isActiveUser && !isAdmin && (isSystemAdmin || isA1 || isA2 || isDirector || isFinance || isR);
   const activeApprovalRoles = [];
+  if (isSystemAdmin) activeApprovalRoles.push("System Administrator");
   if (isDirector) activeApprovalRoles.push("Direktur");
   if (isA1) activeApprovalRoles.push("A1 \u2013 Accountable Program");
   if (isA2) activeApprovalRoles.push("A2 \u2013 Accountable Finance");
   if (isFinance && !isA2) activeApprovalRoles.push("Finance");
   if (isR) activeApprovalRoles.push("R \u2013 Responsible");
   let scopeSummary = "Tidak memiliki akses ke Menu Approval.";
-  if (isDirector) {
+  if (isSystemAdmin) {
+    scopeSummary = "System Administrator (Recovery & Full Access): Akses penuh pemantauan, verifikasi, dan pengelolaan seluruh pengajuan program & keuangan.";
+  } else if (isDirector) {
     scopeSummary = "Direktur: Melihat seluruh pengajuan program & keuangan, persetujuan akhir keuangan, dan penerimaan laporan program.";
   } else if (isA1 && (isA2 || isFinance)) {
     scopeSummary = "A1 & Keuangan: Melihat dokumen program sesuai RACI A1 serta dokumen keuangan.";
@@ -4270,17 +5489,18 @@ function resolveUserApprovalAccess(draft, user, allItems) {
     isFinance,
     isR,
     isAdmin,
+    isSystemAdmin,
     canAccessApprovalMenu,
-    canApproveProgramDocs: !isAdmin && isA1,
-    canVerifyFinanceDocs: !isAdmin && isA2,
-    canFinalApproveDirector: !isAdmin && isDirector,
+    canApproveProgramDocs: !isAdmin && (isSystemAdmin || isA1),
+    canVerifyFinanceDocs: !isAdmin && (isSystemAdmin || isA2),
+    canFinalApproveDirector: !isAdmin && (isSystemAdmin || isDirector),
     activeApprovalRoles,
     scopeSummary
   };
 }
 function canUserViewApprovalItem(item, user, access) {
   if (!access.canAccessApprovalMenu) return false;
-  if (access.isDirector) {
+  if (access.isSystemAdmin || access.isDirector) {
     return true;
   }
   const normUserName = String(user.name || "").trim().toLowerCase();
@@ -4320,10 +5540,11 @@ function executeApprovalHubAction(params) {
     );
   }
   const access = resolveUserApprovalAccess(draft, actor, synced.items);
-  const isR = actor.id === item.responsibleUserId;
-  const isA1 = !access.isAdmin && item.groupType === "program_documents" && actor.id === item.accountableProgramUserId && actor.permissions?.canApproveTor !== false;
-  const isA2 = !access.isAdmin && item.groupType === "financial_documents" && actor.id === item.accountableFinanceUserId && actor.permissions?.canApproveTor !== false;
-  const isDirector = !access.isAdmin && (actor.id === item.directorUserId || actor.role === "director");
+  const isSystemAdminActor = actor.role === "system_admin";
+  const isR = actor.id === item.responsibleUserId || isSystemAdminActor && action === "submit";
+  const isA1 = !access.isAdmin && item.groupType === "program_documents" && (isSystemAdminActor || actor.id === item.accountableProgramUserId && actor.permissions?.canApproveTor !== false);
+  const isA2 = !access.isAdmin && item.groupType === "financial_documents" && (isSystemAdminActor || actor.id === item.accountableFinanceUserId && actor.permissions?.canApproveTor !== false);
+  const isDirector = !access.isAdmin && (isSystemAdminActor || actor.id === item.directorUserId || actor.role === "director");
   const isFinanceObserver = !access.isAdmin && actor.role === "finance" && item.groupType === "financial_documents";
   const isProgramDoc = item.groupType === "program_documents";
   const canViewItem = canUserViewApprovalItem(item, actor, access);
@@ -4678,7 +5899,7 @@ function executeApprovalHubAction(params) {
         "Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan persetujuan."
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error(
         "Integritas Persetujuan: Pengaju dokumen (R) tidak diperbolehkan menyetujui pengajuannya sendiri pada tahap pemeriksaan/verifikasi."
       );
@@ -4762,7 +5983,7 @@ function executeApprovalHubAction(params) {
         `Hanya Direktur (${item.directorUserName}) yang berwenang memberikan persetujuan akhir.`
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error(
         "Integritas Persetujuan: Pengaju dokumen (R) tidak diperbolehkan memberikan persetujuan akhir atas pengajuannya sendiri pada tahap yang sama."
       );
@@ -4822,7 +6043,7 @@ function executeApprovalHubAction(params) {
         "Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan persetujuan/revisi."
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error("Pengaju (R) tidak dapat meminta revisi atas dokumennya sendiri.");
     }
     const canReturnForRevision = isProgramDoc && (isA1 || isDirector) || !isProgramDoc && (isA2 || isDirector);
@@ -4847,7 +6068,7 @@ function executeApprovalHubAction(params) {
         "Admin dapat mengatur konfigurasi akses, tetapi tidak otomatis memiliki kewenangan menolak pengajuan."
       );
     }
-    if (isR) {
+    if (isR && !isSystemAdminActor) {
       throw new Error("Pengaju (R) tidak dapat menolak dokumennya sendiri.");
     }
     const canReject = isProgramDoc && (isA1 || isDirector) || !isProgramDoc && (isA2 || isDirector);
@@ -6635,7 +7856,8 @@ async function startServer() {
     }
     return input;
   }
-  const DEFAULT_TESTING_PASSWORD = process.env.DEFAULT_TESTING_PASSWORD || "Wijna@2026";
+  const DEFAULT_TESTING_PASSWORD = (process.env.DEFAULT_TESTING_PASSWORD || "").trim();
+  const DEFAULT_FALLBACK_SCRYPT_HASH = "scrypt$ba9df605a7e35320f89561247f82a861$ad8b4942bc71ce1fa283548b3a339832946411e6ed2096f7f52d5e7fb95120b31b7196388f6c833faeca3b68e704758a0d6266eb797d4e19a9fd6b6a0cf45860";
   function resolvePersistentSessionSecret() {
     const envSecret = String(process.env.SESSION_SECRET || "").trim();
     if (envSecret.length >= 16 && envSecret !== "replace_with_random_64_char_hex_secret") {
@@ -6649,7 +7871,7 @@ async function startServer() {
           return stored;
         }
       }
-      const generated = crypto.randomBytes(32).toString("hex");
+      const generated = crypto2.randomBytes(32).toString("hex");
       const dataDir = path3.dirname(secretFilePath);
       if (!fs3.existsSync(dataDir)) {
         fs3.mkdirSync(dataDir, { recursive: true });
@@ -6657,7 +7879,7 @@ async function startServer() {
       fs3.writeFileSync(secretFilePath, generated, { encoding: "utf-8", mode: 384 });
       return generated;
     } catch {
-      return crypto.randomBytes(32).toString("hex");
+      return crypto2.randomBytes(32).toString("hex");
     }
   }
   const SESSION_HMAC_SECRET = resolvePersistentSessionSecret();
@@ -6668,8 +7890,8 @@ async function startServer() {
   const loginRateLimits = /* @__PURE__ */ new Map();
   const apiRateLimits = /* @__PURE__ */ new Map();
   function hashPassword(plainPassword) {
-    const salt = crypto.randomBytes(16).toString("hex");
-    const derived = crypto.scryptSync(plainPassword, salt, 64).toString("hex");
+    const salt = crypto2.randomBytes(16).toString("hex");
+    const derived = crypto2.scryptSync(plainPassword, salt, 64).toString("hex");
     return `scrypt$${salt}$${derived}`;
   }
   function safeHexEqual(hexA, hexB) {
@@ -6677,7 +7899,7 @@ async function startServer() {
       const bufA = Buffer.from(hexA, "hex");
       const bufB = Buffer.from(hexB, "hex");
       if (bufA.length === 0 || bufA.length !== bufB.length) return false;
-      return crypto.timingSafeEqual(bufA, bufB);
+      return crypto2.timingSafeEqual(bufA, bufB);
     } catch {
       return false;
     }
@@ -6696,7 +7918,7 @@ async function startServer() {
       if (parts.length !== 3) return { valid: false, needsRehash: false };
       const [, salt, originalHex] = parts;
       try {
-        const derivedHex = crypto.scryptSync(plainPassword, salt, 64).toString("hex");
+        const derivedHex = crypto2.scryptSync(plainPassword, salt, 64).toString("hex");
         const valid = safeHexEqual(derivedHex, originalHex);
         return { valid, needsRehash: valid && sep === ":" };
       } catch {
@@ -6710,7 +7932,7 @@ async function startServer() {
         const iterations = parseInt(iterStr, 10) || 1e4;
         try {
           const keyLen = Math.floor(originalHex.length / 2) || 64;
-          const derivedHex = crypto.pbkdf2Sync(plainPassword, salt, iterations, keyLen, "sha512").toString("hex");
+          const derivedHex = crypto2.pbkdf2Sync(plainPassword, salt, iterations, keyLen, "sha512").toString("hex");
           const valid = safeHexEqual(derivedHex, originalHex);
           return { valid, needsRehash: valid };
         } catch {
@@ -6722,8 +7944,8 @@ async function startServer() {
       const parts = trimmedHash.split("$");
       if (parts.length === 3) {
         const [, salt, originalHex] = parts;
-        const digestHex = crypto.createHash("sha256").update(`${salt}${plainPassword}`).digest("hex");
-        const digestHexAlt = crypto.createHash("sha256").update(`${plainPassword}${salt}`).digest("hex");
+        const digestHex = crypto2.createHash("sha256").update(`${salt}${plainPassword}`).digest("hex");
+        const digestHexAlt = crypto2.createHash("sha256").update(`${plainPassword}${salt}`).digest("hex");
         const valid = safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
         return { valid, needsRehash: valid };
       }
@@ -6732,31 +7954,31 @@ async function startServer() {
       const parts = trimmedHash.split("$");
       if (parts.length === 3) {
         const [, salt, originalHex] = parts;
-        const digestHex = crypto.createHash("sha512").update(`${salt}${plainPassword}`).digest("hex");
-        const digestHexAlt = crypto.createHash("sha512").update(`${plainPassword}${salt}`).digest("hex");
+        const digestHex = crypto2.createHash("sha512").update(`${salt}${plainPassword}`).digest("hex");
+        const digestHexAlt = crypto2.createHash("sha512").update(`${plainPassword}${salt}`).digest("hex");
         const valid = safeHexEqual(digestHex, originalHex) || safeHexEqual(digestHexAlt, originalHex);
         return { valid, needsRehash: valid };
       }
     }
     if (/^[a-fA-F0-9]{64}$/.test(trimmedHash)) {
-      const sha256Hex = crypto.createHash("sha256").update(plainPassword).digest("hex");
+      const sha256Hex = crypto2.createHash("sha256").update(plainPassword).digest("hex");
       const valid = safeHexEqual(sha256Hex, trimmedHash.toLowerCase());
       return { valid, needsRehash: valid };
     }
     if (/^[a-fA-F0-9]{128}$/.test(trimmedHash)) {
-      const sha512Hex = crypto.createHash("sha512").update(plainPassword).digest("hex");
+      const sha512Hex = crypto2.createHash("sha512").update(plainPassword).digest("hex");
       const valid = safeHexEqual(sha512Hex, trimmedHash.toLowerCase());
       return { valid, needsRehash: valid };
     }
     if (/^[a-fA-F0-9]{32}$/.test(trimmedHash)) {
-      const md5Hex = crypto.createHash("md5").update(plainPassword).digest("hex");
+      const md5Hex = crypto2.createHash("md5").update(plainPassword).digest("hex");
       const valid = safeHexEqual(md5Hex, trimmedHash.toLowerCase());
       return { valid, needsRehash: valid };
     }
     if (!trimmedHash.startsWith("$2") && !trimmedHash.startsWith("$argon2") && !trimmedHash.includes("$")) {
       const plainBuf = Buffer.from(plainPassword, "utf-8");
       const storedBuf = Buffer.from(trimmedHash, "utf-8");
-      if (plainBuf.length === storedBuf.length && crypto.timingSafeEqual(plainBuf, storedBuf)) {
+      if (plainBuf.length === storedBuf.length && crypto2.timingSafeEqual(plainBuf, storedBuf)) {
         return { valid: true, needsRehash: true };
       }
     }
@@ -6765,7 +7987,7 @@ async function startServer() {
   function verifyPassword(plainPassword, storedHash) {
     return verifyPasswordWithMigration(plainPassword, storedHash).valid;
   }
-  const DUMMY_SCRYPT_HASH = hashPassword(crypto.randomBytes(24).toString("hex"));
+  const DUMMY_SCRYPT_HASH = hashPassword(crypto2.randomBytes(24).toString("hex"));
   function deriveDefaultUsername(email, name) {
     const fromEmail = (email || "").split("@")[0]?.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
     if (fromEmail) return fromEmail;
@@ -6776,7 +7998,7 @@ async function startServer() {
     if (!storedHash) return false;
     const cached = defaultPasswordCheckCache.get(storedHash);
     if (cached !== void 0) return cached;
-    const result = verifyPassword(DEFAULT_TESTING_PASSWORD, storedHash);
+    const result = DEFAULT_TESTING_PASSWORD ? verifyPassword(DEFAULT_TESTING_PASSWORD, storedHash) : storedHash === DEFAULT_FALLBACK_SCRYPT_HASH;
     if (defaultPasswordCheckCache.size > 500) {
       defaultPasswordCheckCache.clear();
     }
@@ -6834,7 +8056,7 @@ async function startServer() {
       (u) => !u.passwordHash && !u.password_hash || !u.username || !u.accountStatus || !u.permissions || u.mustChangePassword === void 0
     );
     if (!needsInit) return;
-    const defaultHash = hashPassword(DEFAULT_TESTING_PASSWORD);
+    const defaultHash = DEFAULT_TESTING_PASSWORD ? hashPassword(DEFAULT_TESTING_PASSWORD) : DEFAULT_FALLBACK_SCRYPT_HASH;
     db.update((draft) => {
       const usedUsernames = /* @__PURE__ */ new Set();
       for (const u of draft.users || []) {
@@ -6862,7 +8084,7 @@ async function startServer() {
           u.passwordUpdatedAt = u.createdAt || (/* @__PURE__ */ new Date()).toISOString();
           u.mustChangePassword = true;
         } else if (u.mustChangePassword === void 0) {
-          u.mustChangePassword = verifyPassword(DEFAULT_TESTING_PASSWORD, u.passwordHash);
+          u.mustChangePassword = isDefaultTestingPasswordHash(u.passwordHash);
         }
       }
     });
@@ -6875,7 +8097,7 @@ async function startServer() {
   }
   function computeTokenHmac(payloadB64, user) {
     const userStateBinding = `${user.id}:${user.role}:${user.accountStatus || "Aktif"}:${user.isActive !== false}:${user.passwordHash || ""}`;
-    return crypto.createHmac("sha256", `${SESSION_HMAC_SECRET}:${userStateBinding}`).update(payloadB64).digest();
+    return crypto2.createHmac("sha256", `${SESSION_HMAC_SECRET}:${userStateBinding}`).update(payloadB64).digest();
   }
   function pruneSessionMaps(nowMs = Date.now()) {
     if (revokedTokens.size > 2e3) {
@@ -6921,7 +8143,7 @@ async function startServer() {
     pruneSessionMaps(nowMs);
     const payload = {
       uid: user.id,
-      jti: crypto.randomBytes(16).toString("hex"),
+      jti: crypto2.randomBytes(16).toString("hex"),
       iat: nowMs,
       exp: nowMs + SESSION_TTL_MS
     };
@@ -6961,7 +8183,7 @@ async function startServer() {
         }
         const expectedSig = computeTokenHmac(payloadB64, user);
         const providedSig = Buffer.from(sigHex, "hex");
-        if (expectedSig.length !== providedSig.length || !crypto.timingSafeEqual(expectedSig, providedSig)) {
+        if (expectedSig.length !== providedSig.length || !crypto2.timingSafeEqual(expectedSig, providedSig)) {
           return null;
         }
         if (decoded.exp - nowMs < SESSION_REFRESH_WINDOW_MS) {
@@ -7248,6 +8470,13 @@ async function startServer() {
   }
   function normalizeRolePermissions(role, rawPermissions) {
     const defaults = {
+      system_admin: {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true
+      },
       admin: {
         canManagePrograms: false,
         canCreateTor: false,
@@ -7298,6 +8527,15 @@ async function startServer() {
         canViewAllTors: false
       }
     };
+    if (role === "system_admin") {
+      return {
+        canManagePrograms: true,
+        canCreateTor: true,
+        canApproveTor: true,
+        canManageUsers: true,
+        canViewAllTors: true
+      };
+    }
     const base = defaults[role] || defaults.staff;
     const merged = {
       canManagePrograms: rawPermissions?.canManagePrograms ?? base.canManagePrograms,
@@ -7695,7 +8933,7 @@ async function startServer() {
   });
   app.post("/api/auth/switch-user", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
         error: "Fitur peralihan sesi tanpa password telah dinonaktifkan demi keamanan produksi. Silakan login menggunakan kredensial resmi."
       });
@@ -7706,6 +8944,11 @@ async function startServer() {
     const user = data.users.find((u) => u.id === userId);
     if (!user) {
       return res.status(404).json({ error: "Pengguna tidak ditemukan" });
+    }
+    if (user.role === "system_admin" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya System Administrator yang dapat mengakses sesi pemulihan System Administrator."
+      });
     }
     if (user.isActive === false) {
       return res.status(403).json({
@@ -7750,9 +8993,9 @@ async function startServer() {
   });
   app.put("/api/organization-settings", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "admin" && currentUser.role !== "director" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && currentUser.role !== "director" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya System Administrator atau Direktur yang berwenang mengubah pengaturan organisasi terpusat."
+        error: "Akses ditolak: Hanya System Administrator, Administrator, atau Direktur yang berwenang mengubah pengaturan organisasi terpusat."
       });
     }
     const body = req.body || {};
@@ -7794,7 +9037,7 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
     }
-    if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
       db.update((d) => {
         d.auditLogs.unshift({
           id: `log-unauth-create-${Date.now()}`,
@@ -7804,12 +9047,12 @@ async function startServer() {
           action: "Percobaan Pembuatan Akun Tanpa Otorisasi",
           entityType: "USER",
           entityId: "unauthorized",
-          details: `Pengguna ${currentUser.name} (${currentUser.roleTitle}) mencoba membuat akun baru tanpa hak akses System Administrator.`,
+          details: `Pengguna ${currentUser.name} (${currentUser.roleTitle}) mencoba membuat akun baru tanpa hak akses manajemen pengguna.`,
           timestamp: (/* @__PURE__ */ new Date()).toISOString()
         });
       });
       return res.status(403).json({
-        error: "Akses ditolak: Hanya System Administrator yang berwenang membuat akun pengguna baru."
+        error: "Akses ditolak: Hanya System Administrator atau Administrator yang berwenang membuat akun pengguna baru."
       });
     }
     const rawName = String(req.body?.name || "").trim();
@@ -7834,12 +9077,13 @@ async function startServer() {
       });
     }
     const passwordToHash = rawInitialPassword || DEFAULT_TESTING_PASSWORD;
-    if (passwordToHash.length < 6) {
+    if (!passwordToHash || passwordToHash.length < 6) {
       return res.status(400).json({
         error: "Password awal minimal harus terdiri dari 6 karakter."
       });
     }
     const validRoles = [
+      "system_admin",
       "admin",
       "director",
       "hr",
@@ -7850,6 +9094,11 @@ async function startServer() {
     ];
     if (!validRoles.includes(role)) {
       return res.status(400).json({ error: "Role pengguna tidak dikenali oleh sistem." });
+    }
+    if (role === "system_admin" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya System Administrator yang dapat membuat atau menetapkan role System Administrator."
+      });
     }
     const currentData = db.getData();
     const duplicateEmail = currentData.users.find(
@@ -7916,9 +9165,9 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
     }
-    if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya System Administrator yang memiliki hak mengelola akun pengguna."
+        error: "Akses ditolak: Hanya System Administrator atau Administrator yang memiliki hak mengelola akun pengguna."
       });
     }
     const { id } = req.params;
@@ -7938,11 +9187,17 @@ async function startServer() {
     if (!targetUser) {
       return res.status(404).json({ error: "Pengguna tidak ditemukan" });
     }
+    if (targetUser.role === "system_admin" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Akun System Administrator (Recovery Access) hanya dapat dikelola oleh System Administrator."
+      });
+    }
     const nextName = name !== void 0 ? String(name).trim() : targetUser.name;
     const nextEmail = email !== void 0 ? String(email).trim().toLowerCase() : targetUser.email.toLowerCase();
     const nextUsername = username !== void 0 ? String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") : targetUser.username || deriveDefaultUsername(targetUser.email, targetUser.name);
     const nextRole = role ?? targetUser.role;
     const allowedUpdateRoles = [
+      "system_admin",
       "admin",
       "director",
       "hr",
@@ -7953,6 +9208,11 @@ async function startServer() {
     ];
     if (!allowedUpdateRoles.includes(nextRole)) {
       return res.status(400).json({ error: "Role pengguna tidak dikenali oleh sistem." });
+    }
+    if (nextRole === "system_admin" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya System Administrator yang dapat menetapkan role System Administrator."
+      });
     }
     let nextAccountStatus = targetUser.accountStatus || (targetUser.isActive === false ? "Nonaktif" : "Aktif");
     if (accountStatus && ["Aktif", "Ditangguhkan", "Nonaktif"].includes(accountStatus)) {
@@ -7999,14 +9259,22 @@ async function startServer() {
         error: "Tidak dapat menonaktifkan atau menangguhkan akun yang sedang Anda gunakan saat ini."
       });
     }
-    const activeAdmins = currentData.users.filter(
-      (u) => u.isActive && (u.role === "admin" || u.permissions?.canManageUsers)
+    const activeSysAdmins = currentData.users.filter(
+      (u) => u.isActive !== false && u.role === "system_admin"
     );
-    const isTargetAdmin = targetUser.role === "admin" || targetUser.permissions?.canManageUsers;
-    const willRemainActiveAdmin = nextIsActive && (nextRole === "admin" || permissions?.canManageUsers);
-    if (isTargetAdmin && !willRemainActiveAdmin && activeAdmins.length <= 1) {
+    if (targetUser.role === "system_admin" && !(nextIsActive && nextRole === "system_admin") && activeSysAdmins.length <= 1) {
       return res.status(400).json({
-        error: "Sistem wajib memiliki minimal 1 akun Administrator aktif."
+        error: "Sistem wajib mempertahankan minimal 1 akun System Administrator (Recovery Access) aktif di MySQL."
+      });
+    }
+    const activeAdmins = currentData.users.filter(
+      (u) => u.isActive && u.role === "admin"
+    );
+    const isTargetRegularAdmin = targetUser.role === "admin";
+    const willRemainActiveRegularAdmin = nextIsActive && nextRole === "admin";
+    if (isTargetRegularAdmin && !willRemainActiveRegularAdmin && activeAdmins.length <= 1) {
+      return res.status(400).json({
+        error: "Sistem wajib mempertahankan akun Administrator yang sudah ada tetap aktif."
       });
     }
     let updatedUser = null;
@@ -8084,9 +9352,9 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
     }
-    if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya System Administrator yang berwenang mereset password pengguna."
+        error: "Akses ditolak: Hanya System Administrator atau Administrator yang berwenang mereset password pengguna."
       });
     }
     const { id } = req.params;
@@ -8101,6 +9369,11 @@ async function startServer() {
     if (!targetUser) {
       return res.status(404).json({ error: "Pengguna tidak ditemukan." });
     }
+    if (targetUser.role === "system_admin" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Password akun System Administrator (Recovery Access) hanya dapat diubah oleh System Administrator."
+      });
+    }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const newHash = hashPassword(newPassword);
     let updatedUser = targetUser;
@@ -8109,7 +9382,7 @@ async function startServer() {
       if (idx !== -1) {
         d.users[idx].passwordHash = newHash;
         d.users[idx].passwordUpdatedAt = nowIso;
-        d.users[idx].mustChangePassword = id === currentUser.id ? verifyPassword(DEFAULT_TESTING_PASSWORD, newHash) : true;
+        d.users[idx].mustChangePassword = id === currentUser.id ? isDefaultTestingPasswordHash(newHash) : true;
         updatedUser = d.users[idx];
       }
       d.auditLogs.unshift({
@@ -8139,8 +9412,8 @@ async function startServer() {
     if (currentUser.isActive === false) {
       return res.status(403).json({ error: "Akun Anda sedang nonaktif." });
     }
-    if (currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
-      return res.status(403).json({ error: "Hanya Admin yang memiliki hak menghapus akun pengguna" });
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManageUsers) {
+      return res.status(403).json({ error: "Hanya System Administrator atau Administrator yang memiliki hak menghapus akun pengguna" });
     }
     const { id } = req.params;
     if (id === currentUser.id) {
@@ -8150,6 +9423,27 @@ async function startServer() {
     const targetUser = currentData.users.find((u) => u.id === id);
     if (!targetUser) {
       return res.status(404).json({ error: "Pengguna tidak ditemukan." });
+    }
+    if (targetUser.role === "system_admin") {
+      if (currentUser.role !== "system_admin") {
+        return res.status(403).json({
+          error: "Akses ditolak: Akun System Administrator (Recovery Access) tidak dapat dihapus oleh role lain."
+        });
+      }
+      const sysAdminCount = currentData.users.filter((u) => u.role === "system_admin").length;
+      if (sysAdminCount <= 1) {
+        return res.status(400).json({
+          error: "Sistem wajib mempertahankan minimal 1 akun System Administrator di database MySQL sebagai akses pemulihan darurat."
+        });
+      }
+    }
+    if (targetUser.role === "admin") {
+      const regularAdminCount = currentData.users.filter((u) => u.role === "admin").length;
+      if (regularAdminCount <= 1) {
+        return res.status(400).json({
+          error: "Akun Administrator yang sudah ada wajib dipertahankan dan tidak boleh dihapus."
+        });
+      }
     }
     const raciRefs = Object.values(currentData.outputRaciRecords || {}).filter(
       (r) => r.responsibleUserId === id || r.accountableUserId === id || r.accountableFinanceUserId === id || (r.consultedUsers || []).includes(targetUser.name) || (r.informedUsers || []).includes(targetUser.name)
@@ -8197,41 +9491,97 @@ async function startServer() {
       subActivities: data.subActivities
     });
   });
-  app.post("/api/programs", (req, res) => {
+  function normalizeProgramDateInput(raw) {
+    if (raw === null || raw === void 0) return "";
+    const s = String(raw).trim();
+    if (!s || s === "-" || s.toLowerCase() === "null" || s.toLowerCase() === "undefined" || s.toLowerCase() === "invalid date" || s.startsWith("0000-00-00")) {
+      return "";
+    }
+    const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      const yyyy = Number(isoMatch[1]);
+      const mm = Number(isoMatch[2]);
+      const dd = Number(isoMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+      }
+      return "";
+    }
+    const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (dmyMatch) {
+      const dd = Number(dmyMatch[1]);
+      const mm = Number(dmyMatch[2]);
+      const yyyy = Number(dmyMatch[3]);
+      if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+      }
+    }
+    const parsed = new Date(s);
+    if (!Number.isNaN(parsed.getTime()) && parsed.getFullYear() > 0) {
+      return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+    }
+    return "";
+  }
+  app.post("/api/programs", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "finance") {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Program baru" });
     }
-    const { name, location, startDate, endDate, description, folderUrl, picId, status } = req.body;
+    const {
+      name,
+      code,
+      donor,
+      totalBudget,
+      budget,
+      currency,
+      location,
+      startDate,
+      start_date,
+      endDate,
+      end_date,
+      description,
+      folderUrl,
+      picId,
+      status
+    } = req.body;
+    const cleanStart = normalizeProgramDateInput(startDate ?? start_date);
+    const cleanEnd = normalizeProgramDateInput(endDate ?? end_date);
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "Nama Program / Judul Program wajib diisi" });
     }
     if (!location || !location.trim()) {
       return res.status(400).json({ error: "Lokasi Program wajib diisi" });
     }
-    if (!startDate) {
-      return res.status(400).json({ error: "Tanggal Mulai program wajib diisi" });
+    if (!cleanStart) {
+      return res.status(400).json({ error: "Tanggal Mulai program wajib diisi dengan format tanggal yang valid" });
     }
-    if (!endDate) {
-      return res.status(400).json({ error: "Tanggal Selesai program wajib diisi" });
+    if (!cleanEnd) {
+      return res.status(400).json({ error: "Tanggal Selesai program wajib diisi dengan format tanggal yang valid" });
     }
-    if (new Date(endDate) < new Date(startDate)) {
+    if (cleanEnd < cleanStart) {
       return res.status(400).json({ error: "Tanggal selesai tidak boleh lebih awal dari tanggal mulai" });
     }
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : currentUser;
+    const resolvedBudget = totalBudget !== void 0 ? Number(totalBudget) || 0 : budget !== void 0 ? Number(budget) || 0 : 0;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const newProgram = {
       id: `prog-${Date.now()}`,
+      code: typeof code === "string" && code.trim() ? code.trim() : void 0,
       name: name.trim(),
+      donor: typeof donor === "string" && donor.trim() ? donor.trim() : void 0,
       location: location.trim(),
-      startDate,
-      endDate,
+      startDate: cleanStart,
+      endDate: cleanEnd,
+      totalBudget: resolvedBudget,
+      currency: typeof currency === "string" && currency.trim() ? currency.trim() : "IDR",
       description: description ? description.trim() : "",
       folderUrl: folderUrl ? String(folderUrl).trim() : "",
       picId: picUser ? picUser.id : currentUser.id,
       picName: picUser ? picUser.name : currentUser.name,
       status: status || "Aktif",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
     db.update((d) => {
       if (!d.programs) d.programs = [];
@@ -8244,55 +9594,112 @@ async function startServer() {
         action: "Pembuatan Program",
         entityType: "PROGRAM",
         entityId: newProgram.id,
-        details: `Membuat Program baru: ${newProgram.name} di ${newProgram.location}`,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        details: `Membuat Program baru: ${newProgram.name} (${cleanStart} s/d ${cleanEnd}) di ${newProgram.location}`,
+        timestamp: nowIso
       });
     });
-    res.status(201).json(newProgram);
+    await db.commitPendingWrites("POST /api/programs");
+    const verified = await db.verifyProgramInMysql(newProgram.id);
+    if (!verified || !verified.startDate || !verified.endDate) {
+      return res.status(500).json({
+        error: "[DATABASE WRITE ERROR] Gagal memverifikasi penyimpanan tanggal Program di database MySQL."
+      });
+    }
+    res.status(201).json(verified);
   });
-  app.put("/api/programs/:id", (req, res) => {
+  app.put("/api/programs/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager") {
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "finance") {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Program" });
     }
     const { id } = req.params;
-    const { name, location, startDate, endDate, description, folderUrl, picId, status } = req.body;
-    if (startDate && endDate && new Date(endDate) < new Date(startDate)) {
-      return res.status(400).json({ error: "Tanggal selesai tidak boleh lebih awal dari tanggal mulai" });
+    const {
+      name,
+      code,
+      donor,
+      totalBudget,
+      budget,
+      currency,
+      location,
+      startDate,
+      start_date,
+      endDate,
+      end_date,
+      description,
+      folderUrl,
+      picId,
+      status
+    } = req.body;
+    const rawStartInput = startDate !== void 0 ? startDate : start_date;
+    const rawEndInput = endDate !== void 0 ? endDate : end_date;
+    const normalizedStartInput = rawStartInput !== void 0 ? normalizeProgramDateInput(rawStartInput) : void 0;
+    const normalizedEndInput = rawEndInput !== void 0 ? normalizeProgramDateInput(rawEndInput) : void 0;
+    if (rawStartInput !== void 0 && String(rawStartInput).trim() !== "" && !normalizedStartInput) {
+      return res.status(400).json({ error: "Format Tanggal Mulai tidak valid" });
+    }
+    if (rawEndInput !== void 0 && String(rawEndInput).trim() !== "" && !normalizedEndInput) {
+      return res.status(400).json({ error: "Format Tanggal Selesai tidak valid" });
     }
     const data = db.getData();
     const picUser = picId ? data.users.find((u) => u.id === picId) : null;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     let updated = null;
+    let dateOrderInvalid = false;
     db.update((d) => {
       if (!d.programs) d.programs = [];
       const idx = d.programs.findIndex((p) => p.id === id);
       if (idx !== -1) {
+        const existingProg = d.programs[idx];
+        const nextBudget = totalBudget !== void 0 ? Number(totalBudget) || 0 : budget !== void 0 ? Number(budget) || 0 : existingProg.totalBudget;
+        const cleanStart = normalizedStartInput !== void 0 ? normalizedStartInput : normalizeProgramDateInput(existingProg.startDate);
+        const cleanEnd = normalizedEndInput !== void 0 ? normalizedEndInput : normalizeProgramDateInput(existingProg.endDate);
+        if (cleanStart && cleanEnd && cleanEnd < cleanStart) {
+          dateOrderInvalid = true;
+          return;
+        }
         d.programs[idx] = {
-          ...d.programs[idx],
-          name: name ? name.trim() : d.programs[idx].name,
-          location: location ? location.trim() : d.programs[idx].location,
-          startDate: startDate ?? d.programs[idx].startDate,
-          endDate: endDate ?? d.programs[idx].endDate,
-          description: description !== void 0 ? description.trim() : d.programs[idx].description,
-          folderUrl: folderUrl !== void 0 ? String(folderUrl).trim() : d.programs[idx].folderUrl,
-          picId: picUser ? picUser.id : d.programs[idx].picId,
-          picName: picUser ? picUser.name : d.programs[idx].picName,
-          status: status ?? d.programs[idx].status,
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          ...existingProg,
+          code: code !== void 0 ? String(code).trim() || void 0 : existingProg.code,
+          name: name ? name.trim() : existingProg.name,
+          donor: donor !== void 0 ? String(donor).trim() || void 0 : existingProg.donor,
+          location: location ? location.trim() : existingProg.location,
+          startDate: cleanStart,
+          endDate: cleanEnd,
+          totalBudget: nextBudget,
+          currency: currency !== void 0 ? String(currency).trim() || "IDR" : existingProg.currency,
+          description: description !== void 0 ? description.trim() : existingProg.description,
+          folderUrl: folderUrl !== void 0 ? String(folderUrl).trim() : existingProg.folderUrl,
+          picId: picUser ? picUser.id : existingProg.picId,
+          picName: picUser ? picUser.name : existingProg.picName,
+          status: status ?? existingProg.status,
+          updatedAt: nowIso
         };
         updated = d.programs[idx];
         if (name && name.trim()) {
+          const cleanProgName = name.trim();
           d.outcomes.forEach((o) => {
             if (o.programId === id) {
-              o.programName = name.trim();
-              o.projectName = name.trim();
+              o.programName = cleanProgName;
+              o.projectName = cleanProgName;
             }
           });
           d.tors.forEach((t) => {
             if (t.programId === id) {
-              t.programName = name.trim();
+              t.programName = cleanProgName;
             }
           });
+          if (d.programBudgets && typeof d.programBudgets === "object") {
+            for (const bKey of Object.keys(d.programBudgets)) {
+              const bDs = d.programBudgets[bKey];
+              if (bDs && bDs.programId === id) {
+                d.programBudgets[bKey] = {
+                  ...bDs,
+                  programName: cleanProgName,
+                  updatedAt: nowIso
+                };
+              }
+            }
+          }
         }
         d.auditLogs.unshift({
           id: `log-${Date.now()}`,
@@ -8302,18 +9709,31 @@ async function startServer() {
           action: "Pembaruan Program",
           entityType: "PROGRAM",
           entityId: id,
-          details: `Memperbarui informasi Program: ${updated.name}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          details: `Memperbarui informasi Program: ${updated.name} (${cleanStart || "-"} s/d ${cleanEnd || "-"})`,
+          timestamp: nowIso
         });
       }
     });
+    if (dateOrderInvalid) {
+      db.rollbackUncommittedChanges();
+      return res.status(400).json({ error: "Tanggal selesai tidak boleh lebih awal dari tanggal mulai" });
+    }
     if (!updated) return res.status(404).json({ error: "Program tidak ditemukan" });
-    res.json(updated);
+    await db.commitPendingWrites(`PUT /api/programs/${id}`);
+    const verified = await db.verifyProgramInMysql(id);
+    if (!verified || normalizedStartInput && verified.startDate !== normalizedStartInput || normalizedEndInput && verified.endDate !== normalizedEndInput) {
+      return res.status(500).json({
+        error: "[DATABASE WRITE ERROR] Tanggal Program gagal diverifikasi pada tabel programs MySQL."
+      });
+    }
+    res.json(verified);
   });
-  app.delete("/api/programs/:id", (req, res) => {
+  app.delete("/api/programs/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "hr" && currentUser.role !== "admin") {
-      return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Program" });
+    if (!currentUser.permissions?.canManagePrograms && currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager") {
+      return res.status(403).json({
+        error: "Tidak memiliki kewenangan menghapus Program (khusus Direktur & Program Manager)."
+      });
     }
     const { id } = req.params;
     const data = db.getData();
@@ -8321,12 +9741,31 @@ async function startServer() {
     if (!targetProgram) {
       return res.status(404).json({ error: "Program tidak ditemukan" });
     }
-    if (targetProgram.status !== "Selesai") {
+    const progOutcomeIds = new Set(
+      (data.outcomes || []).filter((o) => o.programId === id).map((o) => o.id)
+    );
+    const progOutputIds = new Set(
+      (data.outputs || []).filter((op) => op.programId === id || progOutcomeIds.has(op.outcomeId)).map((op) => op.id)
+    );
+    const progActivityIds = new Set(
+      (data.activities || []).filter((act) => act.programId === id || progOutputIds.has(act.outputId)).map((act) => act.id)
+    );
+    const progTors = (data.tors || []).filter(
+      (t) => t.programId === id || progOutcomeIds.has(t.outcomeId) || progOutputIds.has(t.outputId) || progActivityIds.has(t.activityId)
+    );
+    const progTorIds = new Set(progTors.map((t) => t.id));
+    const linkedTorsCount = progTors.length;
+    const normalizedTargetProgName = targetProgram.name.trim().toLowerCase();
+    const linkedCasCount = (data.cashAdvances || []).filter(
+      (ca) => progTorIds.has(ca.torId) || ca.programId === id || (ca.programName || "").trim().toLowerCase() === normalizedTargetProgName
+    ).length;
+    if (linkedTorsCount > 0 || linkedCasCount > 0) {
       return res.status(400).json({
-        error: "Hanya Program yang sudah berstatus Selesai yang dapat dihapus."
+        error: `Program "${targetProgram.name}" tidak dapat dihapus karena masih memiliki ${linkedTorsCount} dokumen ToR dan ${linkedCasCount} Cash Advance historis. Gunakan status "Diarsipkan" agar jejak audit tetap utuh.`
       });
     }
     let deletedName = "";
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     db.update((d) => {
       if (!d.programs) d.programs = [];
       const idx = d.programs.findIndex((p) => p.id === id);
@@ -8337,22 +9776,71 @@ async function startServer() {
           (d.outcomes || []).filter((o) => o.programId === id).map((o) => o.id)
         );
         const outputIds = new Set(
-          (d.outputs || []).filter((op) => outcomeIds.has(op.outcomeId)).map((op) => op.id)
+          (d.outputs || []).filter((op) => op.programId === id || outcomeIds.has(op.outcomeId)).map((op) => op.id)
         );
         const activityIds = new Set(
-          (d.activities || []).filter((act) => outputIds.has(act.outputId)).map((act) => act.id)
+          (d.activities || []).filter((act) => act.programId === id || outputIds.has(act.outputId)).map((act) => act.id)
         );
         if (d.subActivities) {
-          d.subActivities = d.subActivities.filter((sa) => !activityIds.has(sa.activityId));
+          d.subActivities = d.subActivities.filter(
+            (sa) => sa.programId !== id && !activityIds.has(sa.activityId)
+          );
         }
         if (d.activities) {
-          d.activities = d.activities.filter((act) => !outputIds.has(act.outputId));
+          d.activities = d.activities.filter(
+            (act) => act.programId !== id && !outputIds.has(act.outputId)
+          );
         }
         if (d.outputs) {
-          d.outputs = d.outputs.filter((op) => !outcomeIds.has(op.outcomeId));
+          d.outputs = d.outputs.filter(
+            (op) => op.programId !== id && !outcomeIds.has(op.outcomeId)
+          );
         }
         if (d.outcomes) {
           d.outcomes = d.outcomes.filter((o) => o.programId !== id);
+        }
+        if (d.programBudgets && typeof d.programBudgets === "object") {
+          for (const k of Object.keys(d.programBudgets)) {
+            const bgt = d.programBudgets[k];
+            if (bgt?.programId === id || k.startsWith(`${id}__`)) {
+              delete d.programBudgets[k];
+            }
+          }
+        }
+        if (d.outputRaciRecords && typeof d.outputRaciRecords === "object") {
+          for (const outId of Object.keys(d.outputRaciRecords)) {
+            const raci = d.outputRaciRecords[outId];
+            if (outputIds.has(outId) || raci?.programId === id) {
+              delete d.outputRaciRecords[outId];
+            }
+          }
+        }
+        if (d.activityMonitoringRecords && typeof d.activityMonitoringRecords === "object") {
+          for (const actId of Object.keys(d.activityMonitoringRecords)) {
+            const mon = d.activityMonitoringRecords[actId];
+            if (activityIds.has(actId) || mon?.programId === id) {
+              delete d.activityMonitoringRecords[actId];
+            }
+          }
+        }
+        if (d.approvalHubItems && typeof d.approvalHubItems === "object") {
+          for (const itemId of Object.keys(d.approvalHubItems)) {
+            if (d.approvalHubItems[itemId]?.programId === id) {
+              delete d.approvalHubItems[itemId];
+            }
+          }
+        }
+        if (Array.isArray(d.participantDatabase)) {
+          d.participantDatabase = d.participantDatabase.map((pt) => {
+            if (!Array.isArray(pt.programInvolvements)) return pt;
+            const filteredInv = pt.programInvolvements.filter((inv) => inv.programId !== id);
+            if (filteredInv.length === pt.programInvolvements.length) return pt;
+            return {
+              ...pt,
+              programInvolvements: filteredInv,
+              updatedAt: nowIso
+            };
+          });
         }
         d.auditLogs.unshift({
           id: `log-${Date.now()}`,
@@ -8362,16 +9850,17 @@ async function startServer() {
           action: "Penghapusan Program",
           entityType: "PROGRAM",
           entityId: id,
-          details: `Menghapus Program Selesai: ${deletedName}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          details: `Menghapus Program: ${deletedName}`,
+          timestamp: nowIso
         });
       }
     });
+    await db.commitPendingWrites(`DELETE /api/programs/${id}`);
     res.json({ message: "Program berhasil dihapus" });
   });
-  app.post("/api/outcomes", (req, res) => {
+  app.post("/api/outcomes", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Outcome" });
     }
     const { programId, outcomeNumber, name, description, picId, indicators, status } = req.body;
@@ -8407,6 +9896,7 @@ async function startServer() {
       picId: picUser.id,
       picName: picUser.name,
       projectName: program.name,
+      budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || "Belum Dimulai",
       indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: nowIso,
@@ -8426,11 +9916,12 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites("POST /api/outcomes");
     res.status(201).json(newOutcome);
   });
-  app.put("/api/outcomes/:id", (req, res) => {
+  app.put("/api/outcomes/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Outcome" });
     }
     const { id } = req.params;
@@ -8464,7 +9955,8 @@ async function startServer() {
           picId: picUser ? picUser.id : d.outcomes[idx].picId,
           picName: picUser ? picUser.name : d.outcomes[idx].picName,
           projectName: projectName ?? d.outcomes[idx].projectName ?? parentProgram.name,
-          indicators: indicators ?? d.outcomes[idx].indicators,
+          budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : d.outcomes[idx].budgetAllocated,
+          indicators: Array.isArray(indicators) ? indicators : d.outcomes[idx].indicators,
           status: status ?? d.outcomes[idx].status,
           updatedAt: nowIso
         };
@@ -8483,19 +9975,30 @@ async function startServer() {
       }
     });
     if (!updated) return res.status(404).json({ error: "Outcome tidak ditemukan" });
+    await db.commitPendingWrites(`PUT /api/outcomes/${id}`);
     res.json(updated);
   });
-  app.delete("/api/outcomes/:id", (req, res) => {
+  app.delete("/api/outcomes/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Outcome" });
     }
     const { id } = req.params;
     const data = db.getData();
+    const targetOutcome = (data.outcomes || []).find((o) => o.id === id);
+    if (!targetOutcome) {
+      return res.status(404).json({ error: "Outcome tidak ditemukan" });
+    }
     const hasOutputs = data.outputs.some((o) => o.outcomeId === id);
     if (hasOutputs) {
       return res.status(400).json({
         error: "Tidak dapat menghapus Outcome ini karena masih memiliki Output terhubung. Hapus atau pindahkan Output terlebih dahulu."
+      });
+    }
+    const hasTors = data.tors.some((t) => t.outcomeId === id);
+    if (hasTors) {
+      return res.status(400).json({
+        error: "Tidak dapat menghapus Outcome ini karena masih memiliki dokumen ToR terhubung."
       });
     }
     db.update((d) => {
@@ -8508,15 +10011,16 @@ async function startServer() {
         action: "Penghapusan Outcome",
         entityType: "PROGRAM",
         entityId: id,
-        details: `Menghapus Outcome ID: ${id}`,
+        details: `Menghapus Outcome: ${targetOutcome.name}`,
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
+    await db.commitPendingWrites(`DELETE /api/outcomes/${id}`);
     res.json({ message: "Outcome berhasil dihapus" });
   });
-  app.post("/api/outputs", (req, res) => {
+  app.post("/api/outputs", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Output" });
     }
     const { outcomeId, outputNumber, code, name, description, picId, indicators, status } = req.body;
@@ -8550,6 +10054,7 @@ async function startServer() {
       description: cleanDesc || cleanName,
       picId: picUser.id,
       picName: picUser.name,
+      budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || "Belum Dimulai",
       indicators: Array.isArray(indicators) ? indicators : [],
       createdAt: nowIso,
@@ -8569,11 +10074,12 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites("POST /api/outputs");
     res.status(201).json(newOutput);
   });
-  app.put("/api/outputs/:id", (req, res) => {
+  app.put("/api/outputs/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Output" });
     }
     const { id } = req.params;
@@ -8608,7 +10114,8 @@ async function startServer() {
           description: nextDesc ?? d.outputs[idx].description,
           picId: picUser ? picUser.id : d.outputs[idx].picId,
           picName: picUser ? picUser.name : d.outputs[idx].picName,
-          indicators: indicators ?? d.outputs[idx].indicators,
+          budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : d.outputs[idx].budgetAllocated,
+          indicators: Array.isArray(indicators) ? indicators : d.outputs[idx].indicators,
           status: status ?? d.outputs[idx].status,
           updatedAt: nowIso
         };
@@ -8627,23 +10134,37 @@ async function startServer() {
       }
     });
     if (!updated) return res.status(404).json({ error: "Output tidak ditemukan" });
+    await db.commitPendingWrites(`PUT /api/outputs/${id}`);
     res.json(updated);
   });
-  app.delete("/api/outputs/:id", (req, res) => {
+  app.delete("/api/outputs/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Output" });
     }
     const { id } = req.params;
     const data = db.getData();
+    const targetOutput = data.outputs.find((o) => o.id === id);
+    if (!targetOutput) {
+      return res.status(404).json({ error: "Output tidak ditemukan" });
+    }
     const hasActivities = data.activities.some((a) => a.outputId === id);
     if (hasActivities) {
       return res.status(400).json({
         error: "Tidak dapat menghapus Output ini karena masih memiliki Activity terhubung."
       });
     }
+    const hasTors = data.tors.some((t) => t.outputId === id);
+    if (hasTors) {
+      return res.status(400).json({
+        error: "Tidak dapat menghapus Output ini karena masih memiliki dokumen ToR terhubung."
+      });
+    }
     db.update((d) => {
       d.outputs = d.outputs.filter((o) => o.id !== id);
+      if (d.outputRaciRecords && d.outputRaciRecords[id]) {
+        delete d.outputRaciRecords[id];
+      }
       d.auditLogs.unshift({
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
@@ -8652,15 +10173,16 @@ async function startServer() {
         action: "Penghapusan Output",
         entityType: "PROGRAM",
         entityId: id,
-        details: `Menghapus Output ID: ${id}`,
+        details: `Menghapus Output: ${targetOutput.name}`,
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
+    await db.commitPendingWrites(`DELETE /api/outputs/${id}`);
     res.json({ message: "Output berhasil dihapus" });
   });
-  app.post("/api/activities", (req, res) => {
+  app.post("/api/activities", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Activity" });
     }
     const {
@@ -8710,8 +10232,9 @@ async function startServer() {
       plannedParticipantsBreakdown: typeof plannedParticipantsBreakdown === "string" ? plannedParticipantsBreakdown.trim() : void 0,
       picId: picUser.id,
       picName: picUser.name,
-      startDate: startDate || nowIso.slice(0, 10),
-      endDate: endDate || nowIso.slice(0, 10),
+      startDate: startDate ? String(startDate).slice(0, 10) : nowIso.slice(0, 10),
+      endDate: endDate ? String(endDate).slice(0, 10) : nowIso.slice(0, 10),
+      budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || "Belum Dimulai",
       createdAt: nowIso,
       updatedAt: nowIso
@@ -8730,11 +10253,12 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites("POST /api/activities");
     res.status(201).json(newActivity);
   });
-  app.put("/api/activities/:id", (req, res) => {
+  app.put("/api/activities/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Activity" });
     }
     const { id } = req.params;
@@ -8770,23 +10294,24 @@ async function startServer() {
     db.update((d) => {
       const idx = d.activities.findIndex((a) => a.id === id);
       if (idx !== -1) {
-        const nextActNum = activityNumber !== void 0 ? typeof activityNumber === "string" && activityNumber.trim() ? activityNumber.trim() : void 0 : d.activities[idx].activityNumber;
-        const nextCode = code !== void 0 ? typeof code === "string" && code.trim() ? code.trim() : void 0 : d.activities[idx].code || nextActNum;
+        const nextActNum = activityNumber !== void 0 ? typeof activityNumber === "string" && activityNumber.trim() ? activityNumber.trim() : d.activities[idx].activityNumber : d.activities[idx].activityNumber;
+        const nextCode = typeof code === "string" && code.trim() ? code.trim() : d.activities[idx].code || nextActNum;
         d.activities[idx] = {
           ...d.activities[idx],
           programId: resolvedProgramId,
           outcomeId: resolvedOutcomeId,
           outputId: parentOutput.id,
           activityNumber: nextActNum,
-          name: name ?? d.activities[idx].name,
+          name: typeof name === "string" && name.trim() ? name.trim() : d.activities[idx].name,
           code: nextCode,
           description: description ?? d.activities[idx].description,
           anticipatedInputs: anticipatedInputs !== void 0 ? typeof anticipatedInputs === "string" ? anticipatedInputs.trim() : "" : d.activities[idx].anticipatedInputs,
           plannedParticipantsBreakdown: plannedParticipantsBreakdown !== void 0 ? typeof plannedParticipantsBreakdown === "string" ? plannedParticipantsBreakdown.trim() : "" : d.activities[idx].plannedParticipantsBreakdown,
           picId: picUser ? picUser.id : d.activities[idx].picId,
           picName: picUser ? picUser.name : d.activities[idx].picName,
-          startDate: startDate ?? d.activities[idx].startDate,
-          endDate: endDate ?? d.activities[idx].endDate,
+          startDate: startDate !== void 0 ? String(startDate || "").slice(0, 10) : d.activities[idx].startDate,
+          endDate: endDate !== void 0 ? String(endDate || "").slice(0, 10) : d.activities[idx].endDate,
+          budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : d.activities[idx].budgetAllocated,
           status: status ?? d.activities[idx].status,
           updatedAt: nowIso
         };
@@ -8813,24 +10338,34 @@ async function startServer() {
       }
     });
     if (!updated) return res.status(404).json({ error: "Activity tidak ditemukan" });
+    await db.commitPendingWrites(`PUT /api/activities/${id}`);
     res.json(updated);
   });
-  app.delete("/api/activities/:id", (req, res) => {
+  app.delete("/api/activities/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Activity" });
     }
     const { id } = req.params;
     const data = db.getData();
-    const hasTors = data.tors.some((t) => t.activityId === id);
+    const targetAct = data.activities.find((a) => a.id === id);
+    if (!targetAct) {
+      return res.status(404).json({ error: "Activity tidak ditemukan" });
+    }
+    const hasTors = data.tors.some(
+      (t) => t.activityId === id || (t.activityId || "").startsWith(`${id}-`)
+    );
     if (hasTors) {
       return res.status(400).json({
-        error: "Tidak dapat menghapus Activity ini karena masih memiliki TOR terhubung."
+        error: "Tidak dapat menghapus Activity ini karena masih memiliki dokumen TOR terhubung."
       });
     }
     db.update((d) => {
       d.activities = d.activities.filter((a) => a.id !== id);
       d.subActivities = d.subActivities.filter((s) => s.activityId !== id);
+      if (d.activityMonitoringRecords && d.activityMonitoringRecords[id]) {
+        delete d.activityMonitoringRecords[id];
+      }
       d.auditLogs.unshift({
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
@@ -8839,15 +10374,16 @@ async function startServer() {
         action: "Penghapusan Activity",
         entityType: "PROGRAM",
         entityId: id,
-        details: `Menghapus Activity ID: ${id}`,
+        details: `Menghapus Activity: ${targetAct.name}`,
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
+    await db.commitPendingWrites(`DELETE /api/activities/${id}`);
     res.json({ message: "Activity berhasil dihapus" });
   });
-  app.post("/api/sub-activities", (req, res) => {
+  app.post("/api/sub-activities", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan membuat Sub-Activity" });
     }
     const { activityId, name, code, description, picName, startDate, endDate, status } = req.body;
@@ -8872,8 +10408,9 @@ async function startServer() {
       name: String(name).trim(),
       description: description || "",
       picName: picName || "",
-      startDate: startDate || "",
-      endDate: endDate || "",
+      startDate: startDate ? String(startDate).slice(0, 10) : "",
+      endDate: endDate ? String(endDate).slice(0, 10) : "",
+      budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : 0,
       status: status || "Belum Dimulai",
       createdAt: nowIso,
       updatedAt: nowIso
@@ -8892,11 +10429,12 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites("POST /api/sub-activities");
     res.status(201).json(newSub);
   });
-  app.put("/api/sub-activities/:id", (req, res) => {
+  app.put("/api/sub-activities/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "finance" && currentUser.role !== "meal" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan mengubah Sub-Activity" });
     }
     const { id } = req.params;
@@ -8908,30 +10446,66 @@ async function startServer() {
       if (idx !== -1) {
         d.subActivities[idx] = {
           ...d.subActivities[idx],
-          name: name ?? d.subActivities[idx].name,
+          name: typeof name === "string" && name.trim() ? name.trim() : d.subActivities[idx].name,
           code: code !== void 0 ? String(code).trim() || void 0 : d.subActivities[idx].code,
           description: description ?? d.subActivities[idx].description,
           picName: picName ?? d.subActivities[idx].picName,
-          startDate: startDate ?? d.subActivities[idx].startDate,
-          endDate: endDate ?? d.subActivities[idx].endDate,
+          startDate: startDate !== void 0 ? String(startDate || "").slice(0, 10) : d.subActivities[idx].startDate,
+          endDate: endDate !== void 0 ? String(endDate || "").slice(0, 10) : d.subActivities[idx].endDate,
+          budgetAllocated: req.body.budgetAllocated !== void 0 ? Number(req.body.budgetAllocated) || 0 : d.subActivities[idx].budgetAllocated,
           status: status ?? d.subActivities[idx].status,
           updatedAt: nowIso
         };
         updated = d.subActivities[idx];
+        d.auditLogs.unshift({
+          id: `log-sub-upd-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: "Pembaruan Sub-Activity",
+          entityType: "PROGRAM",
+          entityId: id,
+          details: `Memperbarui Sub-Activity: ${updated.name}`,
+          timestamp: nowIso
+        });
       }
     });
     if (!updated) return res.status(404).json({ error: "Sub-Activity tidak ditemukan" });
+    await db.commitPendingWrites(`PUT /api/sub-activities/${id}`);
     res.json(updated);
   });
-  app.delete("/api/sub-activities/:id", (req, res) => {
+  app.delete("/api/sub-activities/:id", async (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "program_manager" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "finance" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({ error: "Tidak memiliki kewenangan menghapus Sub-Activity" });
     }
     const { id } = req.params;
+    const data = db.getData();
+    const targetSub = (data.subActivities || []).find((s) => s.id === id);
+    if (!targetSub) {
+      return res.status(404).json({ error: "Sub-Activity tidak ditemukan" });
+    }
+    const linkedTors = (data.tors || []).filter((t) => t.subActivityId === id);
+    if (linkedTors.length > 0) {
+      return res.status(400).json({
+        error: `Sub-Activity "${targetSub.name}" tidak dapat dihapus karena masih terhubung dengan ${linkedTors.length} dokumen ToR.`
+      });
+    }
     db.update((d) => {
       d.subActivities = d.subActivities.filter((s) => s.id !== id);
+      d.auditLogs.unshift({
+        id: `log-sub-del-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Penghapusan Sub-Activity",
+        entityType: "PROGRAM",
+        entityId: id,
+        details: `Menghapus Sub-Activity: ${targetSub.name}`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
     });
+    await db.commitPendingWrites(`DELETE /api/sub-activities/${id}`);
     res.json({ message: "Sub-Activity berhasil dihapus" });
   });
   app.post("/api/programs/:id/import-hierarchy", async (req, res) => {
@@ -9350,7 +10924,7 @@ async function startServer() {
       activityId,
       activityName: activity.name,
       subActivityId: req.body.subActivityId || null,
-      subActivityName: req.body.subActivityName || null,
+      subActivityName: req.body.subActivityId ? (data.subActivities || []).find((s) => s.id === req.body.subActivityId)?.name || req.body.subActivityName || null : req.body.subActivityName || null,
       picId: picUser.id,
       picName: picUser.name,
       implementingTeam: implementingTeam || [],
@@ -9388,11 +10962,11 @@ async function startServer() {
       customPeriodStartDate: req.body.customPeriodStartDate || void 0,
       customPeriodEndDate: req.body.customPeriodEndDate || void 0,
       customPeriodAllocatedAmount: req.body.customPeriodAllocatedAmount !== void 0 ? Number(req.body.customPeriodAllocatedAmount) : void 0,
-      startDate: startDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
-      endDate: endDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+      startDate: startDate || "",
+      endDate: endDate || "",
       reportingPeriodType: reportingPeriodType || "Sekali / Akhir Kegiatan",
       reportingFrequency: reportingFrequency || "1 kali di akhir kegiatan",
-      reportingDeadline: reportingDeadline || endDate || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+      reportingDeadline: reportingDeadline || endDate || "",
       additionalNotes: additionalNotes || "",
       specificObjectives: req.body.specificObjectives || [],
       timelineItems: req.body.timelineItems || [],
@@ -9403,29 +10977,19 @@ async function startServer() {
       organizerPersonInCharge: req.body.organizerPersonInCharge || void 0,
       activityStatus: "Belum Dimulai",
       submissionStatus: initialStatus,
-      budgetRequested: req.body.budgetRequested !== void 0 ? Number(req.body.budgetRequested) : null,
-      budgetApproved: req.body.budgetApproved !== void 0 ? Number(req.body.budgetApproved) : null,
-      budgetActualSpent: req.body.budgetActualSpent !== void 0 ? Number(req.body.budgetActualSpent) : null,
+      budgetRequested: req.body.budgetRequested !== void 0 && req.body.budgetRequested !== null && req.body.budgetRequested !== "" ? Number(req.body.budgetRequested) : null,
+      budgetApproved: req.body.budgetApproved !== void 0 && req.body.budgetApproved !== null && req.body.budgetApproved !== "" ? Number(req.body.budgetApproved) : null,
+      budgetActualSpent: req.body.budgetActualSpent !== void 0 && req.body.budgetActualSpent !== null && req.body.budgetActualSpent !== "" ? Number(req.body.budgetActualSpent) : null,
       budgetCurrency: req.body.budgetCurrency || "IDR",
       budgetNotes: req.body.budgetNotes || "",
-      budgetApprovalStatus: req.body.budgetApprovalStatus || "Menunggu ACC Direktur",
-      budgetDeterminedByFinanceName: req.body.budgetDeterminedByFinanceName || "Ratna Kusuma, S.E.",
-      budgetDeterminedByFinanceAt: req.body.budgetDeterminedByFinanceAt || (/* @__PURE__ */ new Date()).toISOString(),
+      budgetApprovalStatus: req.body.budgetApprovalStatus || "Menunggu Penentuan Finance",
+      budgetDeterminedByFinanceName: req.body.budgetDeterminedByFinanceName || void 0,
+      budgetDeterminedByFinanceAt: req.body.budgetDeterminedByFinanceAt || void 0,
       budgetUpdatedByA2Name: req.body.budgetUpdatedByA2Name || void 0,
       budgetUpdatedByA2At: req.body.budgetUpdatedByA2At || void 0,
       budgetApprovedByDirectorName: req.body.budgetApprovedByDirectorName || void 0,
       budgetApprovedByDirectorAt: req.body.budgetApprovedByDirectorAt || void 0,
-      budgetAuditLogs: Array.isArray(req.body.budgetAuditLogs) ? req.body.budgetAuditLogs : [
-        {
-          id: `bgt-log-${Date.now()}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-          actorName: req.body.budgetDeterminedByFinanceName || "Ratna Kusuma, S.E.",
-          actorRole: "Finance / A2",
-          actionLabel: "Penentuan Estimasi Budget Awal ToR oleh Finance",
-          amount: req.body.budgetRequested !== void 0 ? Number(req.body.budgetRequested) : 0,
-          status: req.body.budgetApprovalStatus || "Menunggu ACC Direktur"
-        }
-      ],
+      budgetAuditLogs: Array.isArray(req.body.budgetAuditLogs) ? req.body.budgetAuditLogs : [],
       createdById: currentUser.id,
       createdByName: currentUser.name,
       createdByRole: currentUser.role,
@@ -9508,8 +11072,8 @@ async function startServer() {
       return res.status(404).json({ error: "TOR tidak ditemukan" });
     }
     const outputRaci = data.outputRaciRecords?.[existing.outputId];
-    const isDirectorUser = currentUser.role === "director";
-    const isA2OrFinanceUser = currentUser.role === "finance" || (currentUser.roleTitle || "").toLowerCase().includes("finance") || outputRaci?.accountableFinanceUserId === currentUser.id;
+    const isDirectorUser = currentUser.role === "director" || currentUser.role === "system_admin";
+    const isA2OrFinanceUser = currentUser.role === "finance" || currentUser.role === "system_admin" || (currentUser.roleTitle || "").toLowerCase().includes("finance") || outputRaci?.accountableFinanceUserId === currentUser.id;
     const isRUser = currentUser.role !== "admin" && (outputRaci?.responsibleUserId === currentUser.id || existing.picId === currentUser.id || existing.createdById === currentUser.id);
     const isA1User = currentUser.role !== "admin" && (outputRaci?.accountableUserId === currentUser.id || !outputRaci?.accountableUserId && currentUser.role === "program_manager");
     const hasApprovedEditRequest = existing.editRequestStatus === "approved";
@@ -9526,9 +11090,11 @@ async function startServer() {
     }
     const {
       title,
+      programId,
       outcomeId,
       outputId,
       activityId,
+      subActivityId,
       picId,
       implementingTeam,
       background,
@@ -9552,48 +11118,93 @@ async function startServer() {
       additionalNotes,
       activityStatus
     } = req.body;
+    let programName = existing.programName;
     let outcomeName = existing.outcomeName;
     let outputName = existing.outputName;
     let activityName = existing.activityName;
+    let subActivityName = existing.subActivityName;
     let picName = existing.picName;
-    if (outcomeId && outcomeId !== existing.outcomeId) {
-      const oc = data.outcomes.find((o) => o.id === outcomeId);
+    const effectiveOutcomeId = outcomeId ?? existing.outcomeId;
+    const effectiveOutputId = outputId ?? existing.outputId;
+    const effectiveActivityId = activityId ?? existing.activityId;
+    const effectiveSubActivityId = subActivityId !== void 0 ? subActivityId : existing.subActivityId;
+    if (effectiveOutcomeId) {
+      const oc = data.outcomes.find((o) => o.id === effectiveOutcomeId);
       if (oc) outcomeName = oc.name;
     }
-    if (outputId && outputId !== existing.outputId) {
-      const op = data.outputs.find((o) => o.id === outputId);
+    if (effectiveOutputId) {
+      const op = data.outputs.find((o) => o.id === effectiveOutputId);
       if (op) outputName = op.name;
     }
-    if (activityId && activityId !== existing.activityId) {
-      const ac = data.activities.find((a) => a.id === activityId);
+    if (effectiveActivityId) {
+      const ac = data.activities.find((a) => a.id === effectiveActivityId);
       if (ac) activityName = ac.name;
+    }
+    if (effectiveSubActivityId) {
+      const sa = (data.subActivities || []).find((s) => s.id === effectiveSubActivityId);
+      subActivityName = sa ? sa.name : req.body.subActivityName ?? existing.subActivityName;
+    } else if (subActivityId === "" || subActivityId === null) {
+      subActivityName = void 0;
+    }
+    const derivedProgramId = programId || data.outcomes.find((o) => o.id === effectiveOutcomeId)?.programId || existing.programId;
+    const derivedProg = data.programs.find((p) => p.id === derivedProgramId);
+    if (derivedProg) {
+      programName = derivedProg.name;
+    } else if (req.body.programName) {
+      programName = req.body.programName;
     }
     if (picId && picId !== existing.picId) {
       const pu = data.users.find((u) => u.id === picId);
       if (pu) picName = pu.name;
     }
+    const { hierarchyCode: updatedHierarchyCode } = computeHierarchyCode({
+      programId: derivedProgramId,
+      outcomeId: effectiveOutcomeId,
+      outputId: effectiveOutputId,
+      activityId: effectiveActivityId,
+      outcomes: data.outcomes,
+      outputs: data.outputs,
+      activities: data.activities
+    });
+    const updatedProgCode = generateProgramCode(
+      programName || "Program",
+      derivedProg?.code || existing.programCode
+    );
     let updatedTor = null;
     db.update((d) => {
       const idx = d.tors.findIndex((t) => t.id === id);
       if (idx !== -1) {
         const wasApprovedEdit = d.tors[idx].editRequestStatus === "approved";
         const keepUnlockedForRevision = d.tors[idx].submissionStatus === "Perlu Perbaikan";
+        const draftCreatedDate = d.tors[idx].createdAt ? new Date(d.tors[idx].createdAt) : /* @__PURE__ */ new Date();
+        const refreshedDraftNumber = formatTorNumber({
+          sequence: d.tors[idx].torSequence || 1,
+          programCode: updatedProgCode,
+          hierarchyCode: updatedHierarchyCode,
+          romanMonth: getRomanMonth(draftCreatedDate),
+          year: draftCreatedDate.getFullYear()
+        });
         d.tors[idx] = {
           ...d.tors[idx],
           // Rule 9: Nomor yang telah diterbitkan bersifat permanen, unik, dan tidak dapat diedit secara manual
-          torNumber: existing.isOfficialNumber ? existing.torNumber : d.tors[idx].torNumber,
+          torNumber: existing.isOfficialNumber ? existing.torNumber : refreshedDraftNumber,
           isOfficialNumber: existing.isOfficialNumber,
           publishedAt: existing.publishedAt,
           torSequence: existing.torSequence,
-          activityCode: existing.isOfficialNumber ? existing.activityCode : req.body.activityCode || d.tors[idx].activityCode,
-          programCode: existing.isOfficialNumber ? existing.programCode : d.tors[idx].programCode,
+          hierarchyCode: existing.isOfficialNumber ? existing.hierarchyCode || updatedHierarchyCode : updatedHierarchyCode,
+          activityCode: existing.isOfficialNumber ? existing.activityCode : req.body.activityCode || updatedHierarchyCode || d.tors[idx].activityCode,
+          programCode: existing.isOfficialNumber ? existing.programCode : updatedProgCode,
+          programId: derivedProgramId,
+          programName,
           title: title ?? d.tors[idx].title,
-          outcomeId: outcomeId ?? d.tors[idx].outcomeId,
+          outcomeId: effectiveOutcomeId,
           outcomeName,
-          outputId: outputId ?? d.tors[idx].outputId,
+          outputId: effectiveOutputId,
           outputName,
-          activityId: activityId ?? d.tors[idx].activityId,
+          activityId: effectiveActivityId,
           activityName,
+          subActivityId: effectiveSubActivityId || void 0,
+          subActivityName: effectiveSubActivityId ? subActivityName : void 0,
           picId: picId ?? d.tors[idx].picId,
           picName,
           implementingTeam: implementingTeam ?? d.tors[idx].implementingTeam,
@@ -9711,6 +11322,8 @@ async function startServer() {
             };
           });
         }
+        syncMonitoringReportsForTor(d, id);
+        syncApprovalHubData(d);
         if (wasApprovedEdit || currentUser.role === "director") {
           d.approvalRecords.push({
             id: `app-${Date.now()}`,
@@ -9843,9 +11456,9 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const { id } = req.params;
     const { decision, comment } = req.body;
-    if (currentUser.role !== "director") {
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({
-        error: "Hanya Director yang berwenang menyetujui (ACC) atau menolak permintaan edit TOR."
+        error: "Hanya Director atau System Administrator yang berwenang menyetujui (ACC) atau menolak permintaan edit TOR."
       });
     }
     const data = db.getData();
@@ -9881,7 +11494,7 @@ async function startServer() {
     const data = db.getData();
     const tor = data.tors.find((t) => t.id === id);
     if (!tor) return res.status(404).json({ error: "TOR tidak ditemukan" });
-    if (tor.createdById !== currentUser.id && tor.picId !== currentUser.id && currentUser.role !== "director") {
+    if (tor.createdById !== currentUser.id && tor.picId !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({ error: "Hanya pembuat / PIC TOR yang dapat mengajukan dokumen" });
     }
     if (tor.submissionStatus !== "Draft" && tor.submissionStatus !== "Perlu Perbaikan") {
@@ -9962,7 +11575,7 @@ async function startServer() {
     const data = db.getData();
     const tor = data.tors.find((t) => t.id === id);
     if (!tor) return res.status(404).json({ error: "TOR tidak ditemukan" });
-    if (tor.createdById === currentUser.id && currentUser.role !== "director") {
+    if (tor.createdById === currentUser.id && currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({ error: "Pelanggaran Aturan: Pembuat TOR tidak diperbolehkan menyetujui dokumen yang dibuatnya sendiri." });
     }
     try {
@@ -9980,7 +11593,7 @@ async function startServer() {
         } else if (action === "Tolak") {
           hubAction = "reject";
         } else {
-          if (currentUser.role === "director" && (hubItem.status === "Pending Approval" || hubItem.status === "Approved" || tor.submissionStatus === "Menunggu Persetujuan Director")) {
+          if ((currentUser.role === "director" || currentUser.role === "system_admin") && (hubItem.status === "Pending Approval" || hubItem.status === "Approved" || tor.submissionStatus === "Menunggu Persetujuan Director")) {
             hubAction = "director_final_approve";
           } else {
             hubAction = "verify_approve";
@@ -10019,8 +11632,10 @@ async function startServer() {
     const data = db.getData();
     const tor = data.tors.find((t) => t.id === id);
     if (!tor) return res.status(404).json({ error: "TOR tidak ditemukan" });
-    if (tor.picId !== currentUser.id && tor.createdById !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "program_manager") {
-      return res.status(403).json({ error: "Hanya PIC atau Pengelola Program yang dapat mengubah status pelaksanaan kegiatan" });
+    const outpRaci = tor.outputId ? data.outputRaciRecords?.[tor.outputId] : void 0;
+    const isRaciROrA1 = outpRaci?.responsibleUserId === currentUser.id || outpRaci?.accountableUserId === currentUser.id;
+    if (tor.picId !== currentUser.id && tor.createdById !== currentUser.id && !isRaciROrA1 && currentUser.role !== "system_admin" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal") {
+      return res.status(403).json({ error: "Hanya PIC, R/A1 pada Output, atau Pengelola Program yang dapat mengubah status pelaksanaan kegiatan" });
     }
     db.update((d) => {
       const idx = d.tors.findIndex((t) => t.id === id);
@@ -10042,12 +11657,65 @@ async function startServer() {
     });
     res.json({ message: "Status kegiatan berhasil diperbarui", activityStatus });
   });
+  app.put("/api/tors/:id/contribution-report", (req, res) => {
+    const currentUser = getCurrentUser(req);
+    const { id } = req.params;
+    const { contributionReportSummary, contributionReportRecommendations, signOff } = req.body || {};
+    const data = db.getData();
+    const targetTor = (data.tors || []).find((t) => t.id === id);
+    if (!targetTor) {
+      return res.status(404).json({ error: "Dokumen ToR tidak ditemukan." });
+    }
+    const isPicOrCreator = targetTor.picId === currentUser.id || targetTor.createdById === currentUser.id || targetTor.picName === currentUser.name;
+    const canWriteContributionReport = isPicOrCreator || currentUser.role === "director" || currentUser.role === "program_manager" || currentUser.role === "meal" || Boolean(currentUser.permissions?.canApproveTor);
+    if (!canWriteContributionReport) {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya PIC Kegiatan, MEAL, Program Manager, atau Direktur yang dapat menyimpan catatan Laporan Kontribusi."
+      });
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    let updatedTor = null;
+    db.update((d) => {
+      const idx = (d.tors || []).findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      const existing = d.tors[idx];
+      const nextSummary = typeof contributionReportSummary === "string" ? contributionReportSummary.trim() : existing.contributionReportSummary || "";
+      const nextRecs = typeof contributionReportRecommendations === "string" ? contributionReportRecommendations.trim() : existing.contributionReportRecommendations || "";
+      d.tors[idx] = {
+        ...existing,
+        contributionReportSummary: nextSummary,
+        contributionReportRecommendations: nextRecs,
+        contributionReportSignedOffBy: signOff ? `${currentUser.name} (${currentUser.roleTitle || currentUser.role})` : existing.contributionReportSignedOffBy,
+        contributionReportSignedOffAt: signOff ? nowIso : existing.contributionReportSignedOffAt,
+        updatedAt: nowIso
+      };
+      updatedTor = d.tors[idx];
+      d.auditLogs.unshift({
+        id: `log-tor-contrib-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: signOff ? "Pengesahan Laporan Kontribusi (Tahap 07)" : "Penyimpanan Catatan Laporan Kontribusi (Tahap 07)",
+        entityType: "TOR",
+        entityId: id,
+        details: `${signOff ? "Mengesahkan" : "Menyimpan"} ringkasan penutup Laporan Kontribusi untuk ToR ${existing.torNumber}: "${existing.title}".`,
+        timestamp: nowIso
+      });
+    });
+    if (!updatedTor) {
+      return res.status(404).json({ error: "Dokumen ToR tidak ditemukan." });
+    }
+    res.json({
+      message: signOff ? "Laporan Kontribusi (Tahap 07) berhasil disimpan dan disahkan." : "Catatan Laporan Kontribusi (Tahap 07) berhasil disimpan ke database.",
+      tor: updatedTor
+    });
+  });
   app.delete("/api/tors/:id", (req, res) => {
     const currentUser = getCurrentUser(req);
     const { id } = req.params;
-    if (currentUser.role !== "director") {
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({
-        error: "Hanya Direktur yang memiliki kewenangan untuk menghapus dokumen ToR."
+        error: "Hanya Direktur atau System Administrator yang memiliki kewenangan untuk menghapus dokumen ToR."
       });
     }
     const data = db.getData();
@@ -10206,17 +11874,20 @@ async function startServer() {
       autoNumber = `${baseCa}${seqSuffix}`;
     }
     const newId = `ca-${Date.now()}`;
+    const resolvedOrgName = data.organizationSettings?.organizationName || "Yayasan Inti Muda Indonesia (WIJNA)";
     const newRecord = {
       id: newId,
       advanceNumber: body.advanceNumber || autoNumber,
       requestDate: requestDateStr,
-      organizationName: "Yayasan Inti Muda Indonesia (WIJNA)",
+      organizationName: resolvedOrgName,
       requesterId: currentUser.id,
       requesterName: currentUser.name,
       requesterRole: currentUser.roleTitle,
       department: currentUser.department || "Program & Implementasi Lapangan",
       torId: targetTor.id,
       torNumber: targetTor.torNumber,
+      programId: targetTor.programId,
+      activityId: targetTor.activityId,
       activityTitle: targetTor.title,
       programName: targetTor.programName || "Program Yayasan Inti Muda Indonesia",
       activityStartDate: targetTor.startDate,
@@ -10270,6 +11941,7 @@ async function startServer() {
       if (!draft.cashAdvances) draft.cashAdvances = [];
       draft.cashAdvances.push(newRecord);
       syncTorBudgetInDraft(draft, targetTor.id);
+      syncMonitoringReportsForTor(draft, targetTor.id);
       syncApprovalHubData(draft);
       if (newRecord.status === "Diajukan") {
         const hubItem = draft.approvalHubItems?.[`apv-ca-${newRecord.id}`];
@@ -10303,8 +11975,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: "Pembuatan Formulir Cash Advance",
-        entityType: "TOR",
-        entityId: targetTor.id,
+        entityType: "CASH_ADVANCE",
+        entityId: newRecord.id,
         details: `Formulir ${newRecord.advanceNumber} (${newRecord.implementationTimelineSummary}) dibuat untuk TOR ${targetTor.torNumber} senilai ${new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR" }).format(newRecord.totalAmount)}. Batas pelaporan H+7: ${newRecord.reportingDeadlineDate}`,
         timestamp: now.toISOString()
       });
@@ -10416,8 +12088,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: "Tutup Laporan Cash Advance",
-        entityType: "TOR",
-        entityId: found.torId,
+        entityType: "CASH_ADVANCE",
+        entityId: found.id,
         details: `Laporan Cash Advance ${found.advanceNumber} telah ditutup oleh ${currentUser.name}. Realisasi: Rp ${computedRealized.toLocaleString("id-ID")}. Link PDF Expensify: ${found.expensifyPdfLink}`,
         timestamp: nowIso
       });
@@ -10443,7 +12115,7 @@ async function startServer() {
           throw new Error("Laporan keuangan belum dikirimkan oleh Responsible (R).");
         }
         if (stage === "finance") {
-          if (currentUser.role !== "finance" && currentUser.role !== "admin") {
+          if (currentUser.role !== "finance" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
             throw new Error("Hanya Finance (A2) yang berwenang memverifikasi laporan keuangan akhir.");
           }
           if (found.reportApprovalStatus === "Telah Disetujui") {
@@ -10461,7 +12133,7 @@ async function startServer() {
             found.reportVerifiedNotes = notes || "Laporan realisasi & lampiran Expensify telah diperiksa Finance.";
           }
         } else if (stage === "director") {
-          if (currentUser.role !== "director" && currentUser.role !== "admin") {
+          if (currentUser.role !== "director" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
             throw new Error("Hanya Executive Director yang berwenang memberikan persetujuan akhir laporan keuangan.");
           }
           if (found.reportApprovalStatus !== "Menunggu Persetujuan Director" && action !== "revision") {
@@ -10553,6 +12225,17 @@ async function startServer() {
           percentUsed: pct,
           itemCount: (found.items || []).length
         });
+        draft.auditLogs.unshift({
+          id: `log-ca-rep-app-${Date.now()}`,
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.roleTitle,
+          action: `${stageLabel} \u2014 Laporan Cash Advance`,
+          entityType: "CASH_ADVANCE",
+          entityId: found.id,
+          details: `${stageLabel} telah memproses laporan pertanggungjawaban ${found.advanceNumber}. Status: ${found.reportApprovalStatus}.`,
+          timestamp: nowIso
+        });
       });
     } catch (err) {
       return res.status(400).json({ error: err.message || "Gagal memproses persetujuan laporan." });
@@ -10573,7 +12256,7 @@ async function startServer() {
         const index = draft.cashAdvances.findIndex((c) => c.id === id);
         if (index === -1) return;
         const existing = draft.cashAdvances[index];
-        if ((existing.status === "Disetujui" || existing.status === "Dicairkan") && currentUser.role !== "director" && currentUser.role !== "finance") {
+        if ((existing.status === "Disetujui" || existing.status === "Dicairkan") && currentUser.role !== "director" && currentUser.role !== "finance" && currentUser.role !== "system_admin") {
           throw new Error(
             `Cash Advance ${existing.advanceNumber} telah berstatus '${existing.status}' dan rincian pengajuannya tidak dapat diubah lagi.`
           );
@@ -10588,6 +12271,7 @@ async function startServer() {
         updatedRecord = recordToSave;
         draft.cashAdvances[index] = recordToSave;
         syncTorBudgetInDraft(draft, existing.torId);
+        syncMonitoringReportsForTor(draft, existing.torId);
         syncApprovalHubData(draft);
         draft.auditLogs.unshift({
           id: `log-${Date.now()}`,
@@ -10595,8 +12279,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: "Pembaruan Cash Advance",
-          entityType: "TOR",
-          entityId: existing.torId,
+          entityType: "CASH_ADVANCE",
+          entityId: existing.id,
           details: `Formulir kasbon ${existing.advanceNumber} diperbarui. Total: ${new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR" }).format(recordToSave.totalAmount)}`,
           timestamp: (/* @__PURE__ */ new Date()).toISOString()
         });
@@ -10682,8 +12366,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: wasRevision ? "Pengajuan Ulang Kasbon ke Finance" : "Pengajuan Kasbon ke Finance",
-          entityType: "TOR",
-          entityId: found.torId,
+          entityType: "CASH_ADVANCE",
+          entityId: found.id,
           details: `Cash Advance ${found.advanceNumber} diajukan ke Keuangan (A2) untuk verifikasi plafon.`,
           timestamp: nowIso
         });
@@ -10697,7 +12381,7 @@ async function startServer() {
   app.post("/api/cash-advances/:id/verify", (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "finance" && currentUser.role !== "admin") {
+    if (currentUser.role !== "finance" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
         error: "Akses ditolak: Hanya Finance (A2) yang berwenang memverifikasi pengajuan Cash Advance."
       });
@@ -10711,7 +12395,7 @@ async function startServer() {
       if (!draft.cashAdvances) return;
       const found = draft.cashAdvances.find((c) => c.id === id);
       if (!found) return;
-      if (found.requesterId === currentUser.id && currentUser.role !== "director") {
+      if (found.requesterId === currentUser.id && currentUser.role !== "director" && currentUser.role !== "system_admin") {
         errMsg = "Pemohon Cash Advance tidak diperbolehkan memverifikasi pengajuannya sendiri.";
         return;
       }
@@ -10794,8 +12478,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: `Verifikasi Kasbon: ${action}`,
-        entityType: "TOR",
-        entityId: found.torId,
+        entityType: "CASH_ADVANCE",
+        entityId: found.id,
         details: `Finance ${action === "verify" ? "menyetujui verifikasi" : action} pada kasbon ${found.advanceNumber}. Catatan: ${notes || "-"}`,
         timestamp: nowIso
       });
@@ -10807,7 +12491,7 @@ async function startServer() {
   app.post("/api/cash-advances/:id/approve", (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director") {
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({
         error: "Akses ditolak: Hanya Executive Director yang berwenang memberikan persetujuan akhir Cash Advance."
       });
@@ -10897,8 +12581,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: `Persetujuan Direktur Kasbon: ${action}`,
-        entityType: "TOR",
-        entityId: found.torId,
+        entityType: "CASH_ADVANCE",
+        entityId: found.id,
         details: `Direktur ${action === "approve" ? "menyetujui" : "menolak"} otorisasi kasbon ${found.advanceNumber}.`,
         timestamp: nowIso
       });
@@ -10909,7 +12593,7 @@ async function startServer() {
   app.post("/api/cash-advances/:id/disburse", (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "finance" && currentUser.role !== "admin") {
+    if (currentUser.role !== "finance" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
         error: "Akses ditolak: Hanya Finance yang berwenang mencairkan dana Cash Advance."
       });
@@ -11002,8 +12686,8 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: "Pencairan Kasbon (Disbursement)",
-        entityType: "TOR",
-        entityId: found.torId,
+        entityType: "CASH_ADVANCE",
+        entityId: found.id,
         details: `Dana kasbon ${found.advanceNumber} sebesar ${formattedAmt} telah ditransfer kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}`,
         timestamp: nowIso
       });
@@ -11022,11 +12706,11 @@ async function startServer() {
       const idx = draft.cashAdvances.findIndex((c) => c.id === id);
       if (idx !== -1) {
         const item = draft.cashAdvances[idx];
-        if (item.status !== "Draft" && currentUser.role !== "director") {
+        if (item.status !== "Draft" && currentUser.role !== "director" && currentUser.role !== "system_admin") {
           errMsg = `Cash Advance berstatus '${item.status}' tidak dapat dihapus (hanya draf yang dapat dihapus).`;
           return;
         }
-        if (item.requesterId !== currentUser.id && currentUser.role !== "finance" && currentUser.role !== "director") {
+        if (item.requesterId !== currentUser.id && currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "system_admin") {
           errMsg = "Hanya pembuat pengajuan, Finance, atau Direktur yang dapat menghapus draf Cash Advance.";
           return;
         }
@@ -11039,8 +12723,8 @@ async function startServer() {
           actorName: currentUser.name,
           actorRole: currentUser.roleTitle,
           action: "Penghapusan Draf Kasbon",
-          entityType: "TOR",
-          entityId: item.torId,
+          entityType: "CASH_ADVANCE",
+          entityId: item.id,
           details: `Draf kasbon ${item.advanceNumber} telah dihapus.`,
           timestamp: (/* @__PURE__ */ new Date()).toISOString()
         });
@@ -11050,9 +12734,18 @@ async function startServer() {
     if (!deleted) return res.status(404).json({ error: "Cash Advance tidak ditemukan" });
     res.json({ message: "Draf Cash Advance berhasil dihapus" });
   });
+  function createReadOnlyProjectionDraft(source) {
+    return {
+      ...source,
+      monitoringReports: { ...source.monitoringReports || {} },
+      approvalHubItems: { ...source.approvalHubItems || {} },
+      approvalWorkflowConfigs: { ...source.approvalWorkflowConfigs || {} },
+      approvalNotifications: [...source.approvalNotifications || []]
+    };
+  }
   app.get("/api/stats", (req, res) => {
     const currentUser = getCurrentUser(req);
-    const data = db.getData();
+    const data = createReadOnlyProjectionDraft(db.getData());
     syncApprovalHubData(data);
     let tors = [...data.tors];
     if (currentUser.role === "staff" && !currentUser.permissions?.canViewAllTors) {
@@ -11180,7 +12873,7 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.role,
         action: "Pembaruan Ringkasan Realisasi Cash Advance",
-        entityType: "TOR",
+        entityType: "CASH_ADVANCE_SUMMARY",
         entityId: torId,
         details: auditEntry.details,
         timestamp: now.toISOString()
@@ -11199,6 +12892,20 @@ async function startServer() {
     const { stage, notes } = req.body;
     const currentUser = getCurrentUser(req);
     const now = /* @__PURE__ */ new Date();
+    if (!["report", "finance", "director"].includes(stage)) {
+      return res.status(400).json({ error: "Tahap persetujuan Ringkasan Cash Advance tidak valid." });
+    }
+    const isFinanceActor = currentUser.role === "finance" || currentUser.role === "system_admin" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
+    if (stage === "finance" && !isFinanceActor) {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya Finance yang berwenang memeriksa Laporan Keuangan Akhir pada tahap ini."
+      });
+    }
+    if (stage === "director" && currentUser.role !== "director" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya Direktur Eksekutif yang berwenang memberikan persetujuan akhir Laporan Keuangan Akhir."
+      });
+    }
     let updatedSummary = null;
     db.update((draft) => {
       if (!draft.cashAdvanceSummaries) draft.cashAdvanceSummaries = {};
@@ -11214,12 +12921,6 @@ async function startServer() {
       };
       const targetTor = (draft.tors || []).find((t) => t.id === torId);
       const defaultReporter = targetTor?.picName || targetTor?.createdByName || currentUser.name;
-      if (stage === "finance" && currentUser.role !== "finance" && currentUser.role !== "admin") {
-        return;
-      }
-      if (stage === "director" && currentUser.role !== "director" && currentUser.role !== "admin") {
-        return;
-      }
       if (stage === "report") {
         existing.summaryApprovalStatus = "Menunggu Pemeriksaan Finance";
         existing.summaryReportedByName = defaultReporter;
@@ -11276,6 +12977,8 @@ async function startServer() {
       existing.updatedAt = now.toISOString();
       draft.cashAdvanceSummaries[torId] = existing;
       updatedSummary = existing;
+      syncTorBudgetInDraft(draft, torId);
+      syncApprovalHubData(draft);
       if (!draft.cashAdvanceAuditLogs) draft.cashAdvanceAuditLogs = {};
       if (!draft.cashAdvanceAuditLogs[torId]) draft.cashAdvanceAuditLogs[torId] = [];
       const labelMap = {
@@ -11298,6 +13001,17 @@ async function startServer() {
         totalShortage: existing.totalShortage || 0,
         percentUsed: existing.percentUsed || 0,
         itemCount: (existing.summaryRows || []).length
+      });
+      draft.auditLogs.unshift({
+        id: `log-ca-sum-app-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: labelMap[stage] || "Persetujuan Ringkasan Akhir",
+        entityType: "CASH_ADVANCE_SUMMARY",
+        entityId: torId,
+        details: notes || `Ringkasan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
+        timestamp: now.toISOString()
       });
     });
     res.json({
@@ -11365,6 +13079,7 @@ async function startServer() {
       };
       draft.meetingMinutes.unshift(newMom);
       createdRecord = newMom;
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-mom-${Date.now()}`,
         actorId: currentUser.id,
@@ -11419,6 +13134,7 @@ async function startServer() {
       };
       draft.meetingMinutes[idx] = merged;
       updatedRecord = merged;
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-mom-upd-${Date.now()}`,
         actorId: currentUser.id,
@@ -11444,7 +13160,7 @@ async function startServer() {
     if (!target) {
       return res.status(404).json({ error: "Notulen tidak ditemukan" });
     }
-    if (target.createdById && target.createdById !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "admin") {
+    if (target.createdById && target.createdById !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
         error: "Akses ditolak: Hanya pembuat notulen, Program Manager, MEAL, atau Direktur yang dapat menghapus notulen ini."
       });
@@ -11452,6 +13168,7 @@ async function startServer() {
     db.update((draft) => {
       if (!draft.meetingMinutes) return;
       draft.meetingMinutes = draft.meetingMinutes.filter((m) => m.id !== id);
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-mom-del-${Date.now()}`,
         actorId: currentUser.id,
@@ -11565,6 +13282,7 @@ async function startServer() {
         };
       }
       savedRecord = nextDoc;
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-doc-${Date.now()}`,
         actorId: currentUser.id,
@@ -11587,7 +13305,7 @@ async function startServer() {
     if (!target) {
       return res.status(404).json({ error: "Dokumentasi kegiatan tidak ditemukan" });
     }
-    if (target.updatedById && target.updatedById !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "admin") {
+    if (target.updatedById && target.updatedById !== currentUser.id && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "meal" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
         error: "Akses ditolak: Hanya pembuat dokumentasi, Program Manager, MEAL, atau Direktur yang dapat menghapus paket dokumentasi ini."
       });
@@ -11595,6 +13313,26 @@ async function startServer() {
     db.update((draft) => {
       if (!Array.isArray(draft.activityDocumentationList)) return;
       draft.activityDocumentationList = draft.activityDocumentationList.filter((d) => d.id !== id);
+      if (target.torId) {
+        const remainingForTor = draft.activityDocumentationList.filter((d) => d.torId === target.torId);
+        const latestDoc = remainingForTor[0];
+        if (draft.activityDocumentations) {
+          if (latestDoc) {
+            draft.activityDocumentations[target.torId] = latestDoc;
+          } else {
+            delete draft.activityDocumentations[target.torId];
+          }
+        }
+        const tIdx = (draft.tors || []).findIndex((t) => t.id === target.torId);
+        if (tIdx >= 0) {
+          draft.tors[tIdx] = {
+            ...draft.tors[tIdx],
+            documentation: latestDoc || void 0,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          };
+        }
+      }
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-doc-del-${Date.now()}`,
         actorId: currentUser.id,
@@ -11719,6 +13457,7 @@ async function startServer() {
         };
       }
       savedRecord = nextDoc;
+      syncApprovalHubData(draft);
     });
     res.json(savedRecord);
   });
@@ -11737,7 +13476,7 @@ async function startServer() {
         error: "Akun Anda berstatus nonaktif dan tidak dapat mengubah penugasan RACI."
       });
     }
-    const canManageRaci = currentUser.role === "program_manager" || currentUser.role === "admin" || Boolean(currentUser.permissions?.canManagePrograms);
+    const canManageRaci = currentUser.role === "system_admin" || currentUser.role === "director" || currentUser.role === "program_manager" || currentUser.role === "meal" || currentUser.role === "admin" || Boolean(currentUser.permissions?.canManagePrograms);
     if (!canManageRaci) {
       return res.status(403).json({
         error: "Hanya Program Manager atau pengguna dengan izin Kelola Struktur Program yang dapat mengatur penugasan RACI Output."
@@ -11911,9 +13650,9 @@ async function startServer() {
         error: "Akun Anda berstatus nonaktif dan tidak dapat memberikan pengesahan RACI."
       });
     }
-    if (currentUser.role !== "director") {
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
       return res.status(403).json({
-        error: "Hanya Direktur Eksekutif yang memiliki kewenangan mengesahkan atau meminta revisi penugasan RACI Output."
+        error: "Hanya Direktur Eksekutif atau System Administrator yang memiliki kewenangan mengesahkan atau meminta revisi penugasan RACI Output."
       });
     }
     const body = req.body || {};
@@ -12017,9 +13756,9 @@ async function startServer() {
         error: targetRaci?.status === "Menunggu Persetujuan Direktur" ? "Penugasan RACI pada Output ini masih menunggu persetujuan Direktur. Pengelolaan Monitoring Tools belum diizinkan." : "Penugasan RACI pada Output ini belum aktif."
       });
     }
-    const isR = targetRaci.responsibleUserId === currentUser.id;
-    const isA1 = targetRaci.accountableUserId === currentUser.id;
-    const isA2 = currentUser.role === "finance" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
+    const isR = targetRaci.responsibleUserId === currentUser.id || currentUser.role === "system_admin";
+    const isA1 = targetRaci.accountableUserId === currentUser.id || currentUser.role === "system_admin";
+    const isA2 = currentUser.role === "finance" || currentUser.role === "system_admin" || (currentUser.roleTitle || "").toLowerCase().includes("finance");
     if (!isR && !isA1 && !isA2) {
       return res.status(403).json({
         error: "Hanya user dengan penugasan R (Responsible), A1 (Accountable Program), atau A2 (Accountable Finance) yang dapat mengelola Monitoring Tools pada Output ini."
@@ -12058,6 +13797,8 @@ async function startServer() {
       };
       draft.activityMonitoringRecords[activityId] = nextRecord;
       savedRecord = nextRecord;
+      syncMonitoringReportsForTor(draft);
+      syncApprovalHubData(draft);
       draft.auditLogs.unshift({
         id: `log-mon-act-${Date.now()}`,
         actorId: currentUser.id,
@@ -12316,7 +14057,7 @@ async function startServer() {
   }
   app.get("/api/monitoring-reports", (req, res) => {
     const torId = typeof req.query.torId === "string" ? req.query.torId : void 0;
-    const draft = db.getData();
+    const draft = createReadOnlyProjectionDraft(db.getData());
     const syncedItems = syncMonitoringReportsForTor(draft, torId);
     let plannedTools = [];
     let plannedToolsCount = 0;
@@ -12346,6 +14087,7 @@ async function startServer() {
     let updatedItem = null;
     db.update((draft) => {
       if (!draft.monitoringReports) draft.monitoringReports = {};
+      syncMonitoringReportsForTor(draft);
       const existing = draft.monitoringReports[id];
       if (!existing) return;
       const normalizeSection = (incoming, fallback, prefix) => {
@@ -12455,6 +14197,7 @@ async function startServer() {
           }
         }
       }
+      syncApprovalHubData(draft);
       if (!body.isAutoSave) {
         draft.auditLogs.unshift({
           id: `log-mon-rep-${Date.now()}`,
@@ -12476,7 +14219,7 @@ async function startServer() {
   });
   app.get("/api/approval-hub", (req, res) => {
     const currentUser = getCurrentUser(req);
-    const draft = db.getData();
+    const draft = createReadOnlyProjectionDraft(db.getData());
     syncMonitoringReportsForTor(draft);
     const synced = syncApprovalHubData(draft);
     const accessProfile = resolveUserApprovalAccess(draft, currentUser, synced.items);
@@ -12499,6 +14242,7 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const { notificationId, markAll } = req.body || {};
     db.update((draft) => {
+      syncApprovalHubData(draft);
       if (!draft.approvalNotifications) return;
       for (const notif of draft.approvalNotifications) {
         if (markAll || notif.id === notificationId) {
@@ -12538,10 +14282,10 @@ async function startServer() {
     const data = db.getData();
     res.json(data.programBudgets || {});
   });
-  app.put("/api/finance-workspace/budgets/:key", (req, res) => {
+  app.put("/api/finance-workspace/budgets/:key", async (req, res) => {
     const { key } = req.params;
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "admin" && !currentUser.permissions?.canManagePrograms) {
+    if (currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "program_manager" && currentUser.role !== "system_admin" && currentUser.role !== "admin" && !currentUser.permissions?.canManagePrograms) {
       return res.status(403).json({
         error: "Akses ditolak: Hanya Finance, Direktur, atau Program Manager yang berwenang memperbarui Master Budget."
       });
@@ -12563,6 +14307,40 @@ async function startServer() {
         updatedBy: currentUser.name
       };
       draft.programBudgets[key] = savedDataset;
+      if (savedDataset.programId && key !== "__MASTER_BUDGET_ITEMS__") {
+        const effectiveTotalProgBudget = Number(savedDataset.totalProgramBudget) || Number(savedDataset.annualApprovedBudget) || 0;
+        for (const [otherKey, otherDs] of Object.entries(draft.programBudgets)) {
+          if (otherKey !== key && otherKey !== "__MASTER_BUDGET_ITEMS__" && otherDs && otherDs.programId === savedDataset.programId) {
+            draft.programBudgets[otherKey] = {
+              ...otherDs,
+              ...Array.isArray(savedDataset.masterBudgetCodes) ? { masterBudgetCodes: savedDataset.masterBudgetCodes } : {},
+              ...effectiveTotalProgBudget > 0 ? { totalProgramBudget: effectiveTotalProgBudget } : {},
+              updatedAt: nowIso
+            };
+          }
+        }
+        if (Array.isArray(draft.programs)) {
+          const pIdx = draft.programs.findIndex((p) => p.id === savedDataset.programId);
+          if (pIdx !== -1) {
+            const existingProg = draft.programs[pIdx];
+            const periodStarts = (Array.isArray(savedDataset.customPeriods) ? savedDataset.customPeriods : []).map((cp) => normalizeProgramDateInput(cp?.startDate)).filter(Boolean).sort();
+            const periodEnds = (Array.isArray(savedDataset.customPeriods) ? savedDataset.customPeriods : []).map((cp) => normalizeProgramDateInput(cp?.endDate)).filter(Boolean).sort();
+            const nextProgStart = normalizeProgramDateInput(existingProg.startDate) || periodStarts[0] || "";
+            const nextProgEnd = normalizeProgramDateInput(existingProg.endDate) || periodEnds[periodEnds.length - 1] || "";
+            const shouldUpdateBudget = savedDataset.isBudgetConfigured || effectiveTotalProgBudget > 0;
+            const shouldBackfillDates = nextProgStart && nextProgStart !== existingProg.startDate || nextProgEnd && nextProgEnd !== existingProg.endDate;
+            if (shouldUpdateBudget || shouldBackfillDates) {
+              draft.programs[pIdx] = {
+                ...existingProg,
+                ...shouldUpdateBudget ? { totalBudget: effectiveTotalProgBudget } : {},
+                ...nextProgStart ? { startDate: nextProgStart } : {},
+                ...nextProgEnd ? { endDate: nextProgEnd } : {},
+                updatedAt: nowIso
+              };
+            }
+          }
+        }
+      }
       draft.auditLogs.unshift({
         id: `log-fin-bgt-${Date.now()}`,
         actorId: currentUser.id,
@@ -12575,13 +14353,46 @@ async function startServer() {
         timestamp: nowIso
       });
     });
+    await db.commitPendingWrites(`PUT /api/finance-workspace/budgets/${key}`);
     res.json(savedDataset);
+  });
+  app.delete("/api/finance-workspace/budgets/:key", async (req, res) => {
+    const { key } = req.params;
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== "finance" && currentUser.role !== "director" && currentUser.role !== "system_admin" && !currentUser.permissions?.canManagePrograms) {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya Finance atau Direktur yang berwenang menghapus dataset anggaran."
+      });
+    }
+    const existing = db.getData().programBudgets?.[key];
+    if (!existing) {
+      return res.status(404).json({ error: "Dataset anggaran tidak ditemukan." });
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    db.update((draft) => {
+      if (draft.programBudgets && draft.programBudgets[key]) {
+        delete draft.programBudgets[key];
+      }
+      draft.auditLogs.unshift({
+        id: `log-fin-bgt-del-${Date.now()}`,
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        actorRole: currentUser.roleTitle,
+        action: "Penghapusan Dataset Master Budget",
+        entityType: "PROGRAM",
+        entityId: existing.programId || key,
+        details: `Menghapus dataset anggaran ${existing.programName || key} oleh ${currentUser.name}.`,
+        timestamp: nowIso
+      });
+    });
+    await db.commitPendingWrites(`DELETE /api/finance-workspace/budgets/${key}`);
+    res.json({ message: "Dataset anggaran berhasil dihapus", id: key });
   });
   app.post("/api/approval-hub/workflow-config", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "director" && currentUser.role !== "admin") {
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya Direktur yang berwenang mengubah mekanisme alur persetujuan (Approval Hub)."
+        error: "Akses ditolak: Hanya Direktur atau System Administrator yang berwenang mengubah mekanisme alur persetujuan (Approval Hub)."
       });
     }
     const { categoryCode, mechanism, parallelRule } = req.body || {};
@@ -12612,7 +14423,7 @@ async function startServer() {
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
         action: "Pengaturan Alur Persetujuan (Approval Hub)",
-        entityType: "TOR",
+        entityType: "PROGRAM",
         entityId: categoryCode,
         details: `Mengubah mekanisme persetujuan kategori [${categoryCode}] menjadi ${mechanism} (${parallelRule || "PRIMARY_WITH_CONSULTATION"}).`,
         timestamp: nowIso
@@ -12951,7 +14762,7 @@ async function startServer() {
     }
     res.json(updatedRecord);
   });
-  app.post("/api/programs/:programId/participants-link", (req, res) => {
+  app.post("/api/programs/:programId/participants-link", async (req, res) => {
     const { programId } = req.params;
     const currentUser = getCurrentUser(req);
     const { participantIds, roleInProgram, notes, joinedAt } = req.body || {};
@@ -13023,6 +14834,7 @@ async function startServer() {
     if (errorMsg) {
       return res.status(404).json({ error: errorMsg });
     }
+    await db.commitPendingWrites(`POST /api/programs/${programId}/participants-link`);
     res.json({
       message: `${updatedParticipants.length} peserta berhasil dihubungkan ke program.`,
       updatedParticipants
@@ -13030,7 +14842,7 @@ async function startServer() {
   });
   app.delete(
     "/api/programs/:programId/participants-link/:participantId",
-    (req, res) => {
+    async (req, res) => {
       const { programId, participantId } = req.params;
       const currentUser = getCurrentUser(req);
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -13071,6 +14883,9 @@ async function startServer() {
       if (!updatedRecord) {
         return res.status(404).json({ error: "Data peserta tidak ditemukan." });
       }
+      await db.commitPendingWrites(
+        `DELETE /api/programs/${programId}/participants-link/${participantId}`
+      );
       res.json(updatedRecord);
     }
   );
@@ -13137,10 +14952,10 @@ async function startServer() {
     });
   }
   function isHrAuthorized(user) {
-    return user.role === "finance" || user.role === "hr" || user.role === "admin";
+    return user.role === "finance" || user.role === "hr" || user.role === "system_admin" || user.role === "admin";
   }
   function isDirectorAuthorized(user) {
-    return user.role === "director" || user.role === "admin";
+    return user.role === "director" || user.role === "system_admin" || user.role === "admin";
   }
   function buildAttendanceBundleForUser(currentUser) {
     const bundle = ensureAttendanceSystemInitialized(db.getData());
@@ -13777,8 +15592,8 @@ async function startServer() {
           };
         }
       } else {
-        const isDirectHrForEmployee = !isStaffRequest && isHrAuthorized(currentUser) && wf === "EMPLOYEE_TO_FINANCE_APPROVAL";
-        const initialStatus = wf === "DIRECTOR_TO_FINANCE_NOTIFY" ? "Notified to Finance" : wf === "FINANCE_TO_DIRECTOR_REVIEW" ? "Submitted for Review" : isDirectHrForEmployee ? "Approved" : "Pending";
+        const isDirectAssignForEmployee = !isStaffRequest && (isHrAuthorized(currentUser) || isDirectorAuthorized(currentUser)) && wf === "EMPLOYEE_TO_FINANCE_APPROVAL";
+        const initialStatus = wf === "DIRECTOR_TO_FINANCE_NOTIFY" ? "Notified to Finance" : wf === "FINANCE_TO_DIRECTOR_REVIEW" ? "Submitted for Review" : isDirectAssignForEmployee ? "Approved" : "Pending";
         const activeOnCalendar = isAttendanceArrangementActiveOnCalendar(initialStatus, wf);
         const newFlex = {
           id: `flex-${Date.now()}`,
@@ -13794,9 +15609,9 @@ async function startServer() {
           scheduleArrangement: String(scheduleArrangement).trim(),
           policyNotes: String(policyNotes || "").trim(),
           assignedById: currentUser.id,
-          assignedByName: wf === "DIRECTOR_TO_FINANCE_NOTIFY" ? `${currentUser.name} (Director \u2192 Finance: Notify for Information)` : wf === "FINANCE_TO_DIRECTOR_REVIEW" ? `${currentUser.name} (Finance \u2192 Director: Submit for Review)` : isDirectHrForEmployee ? `${currentUser.name} (Finance)` : `${currentUser.name} (Employee \u2192 Finance: Submit for Approval)`,
-          reviewedByName: isDirectHrForEmployee ? currentUser.name : void 0,
-          reviewedAt: isDirectHrForEmployee ? nowIso : void 0,
+          assignedByName: wf === "DIRECTOR_TO_FINANCE_NOTIFY" ? `${currentUser.name} (Director \u2192 Finance: Notify for Information)` : wf === "FINANCE_TO_DIRECTOR_REVIEW" ? `${currentUser.name} (Finance \u2192 Director: Submit for Review)` : isDirectAssignForEmployee ? `${currentUser.name} (${isDirectorAuthorized(currentUser) ? "Director" : "Finance"})` : `${currentUser.name} (Employee \u2192 Finance: Submit for Approval)`,
+          reviewedByName: isDirectAssignForEmployee ? currentUser.name : void 0,
+          reviewedAt: isDirectAssignForEmployee ? nowIso : void 0,
           createdAt: nowIso,
           updatedAt: nowIso
         };
@@ -13869,16 +15684,32 @@ async function startServer() {
           errMsg = "Pengajuan dari Finance direview oleh Director untuk masukan strategis.";
           return;
         }
+        const isReturnedByDirector = decision === "return" || decision === "reject";
+        const cleanDirectorNote = notes ? String(notes).trim() : isReturnedByDirector ? "Diminta penyesuaian jadwal oleh Director." : "Telah direview oleh Director (tanpa keberatan).";
         sys.flextimeAssignments[idx] = {
           ...prev,
           workflowType: wf,
-          isActive: true,
-          status: "Reviewed by Director",
+          isActive: !isReturnedByDirector,
+          status: isReturnedByDirector ? "Returned" : "Reviewed by Director",
+          returnReason: isReturnedByDirector ? cleanDirectorNote : void 0,
           directorReviewedByName: currentUser.name,
           directorReviewedAt: nowIso,
-          directorReviewNotes: notes ? String(notes).trim() : "Telah direview oleh Director (tanpa keberatan).",
+          directorReviewNotes: cleanDirectorNote,
           updatedAt: nowIso
         };
+        if (!isReturnedByDirector) {
+          for (let i = 0; i < sys.records.length; i++) {
+            const rec = sys.records[i];
+            if (rec.userId === prev.userId && rec.recordType === "ATTENDANCE" && rec.date >= prev.startDate && rec.date <= prev.endDate) {
+              sys.records[i] = {
+                ...rec,
+                isFlextimeApplied: true,
+                flextimeRuleLabel: prev.scheduleArrangement,
+                updatedAt: nowIso
+              };
+            }
+          }
+        }
       } else {
         if (!isHrAuthorized(currentUser)) {
           errMsg = "Pengajuan staf (Employee \u2192 Finance) disetujui atau dikembalikan oleh Finance.";
@@ -13927,24 +15758,30 @@ async function startServer() {
   });
   app.delete("/api/attendance-system/flextime/:id", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (!isHrAuthorized(currentUser)) {
-      return res.status(403).json({ error: "Hanya HR yang dapat menghapus atau menonaktifkan pengaturan Flextime." });
-    }
     const { id } = req.params;
+    let errMsg = null;
     db.update((draft) => {
       const sys = ensureAttendanceSystemInitialized(draft);
       const target = sys.flextimeAssignments.find((f) => f.id === id);
       if (!target) return;
+      const canSelfCancel = target.userId === currentUser.id && (target.status === "Pending" || target.status === "Returned" || target.status === "Diajukan Staf");
+      if (!isHrAuthorized(currentUser) && !isDirectorAuthorized(currentUser) && !canSelfCancel) {
+        errMsg = "Hanya Direktur, Finance/HR, atau pengaju (saat masih Pending/Returned) yang dapat menghapus pengaturan Flextime.";
+        return;
+      }
       sys.flextimeAssignments = sys.flextimeAssignments.filter((f) => f.id !== id);
       appendAttendanceAudit(
         draft,
         currentUser,
         "FLEXTIME",
-        "Penghapusan Periode Flextime oleh HR",
-        `HR (${currentUser.name}) menghapus pengaturan Flextime milik ${target.userName} (${target.startDate} s/d ${target.endDate}).`,
+        "Penghapusan Periode Flextime",
+        `${currentUser.name} (${currentUser.roleTitle}) menghapus pengaturan Flextime milik ${target.userName} (${target.startDate} s/d ${target.endDate}).`,
         target.userName
       );
     });
+    if (errMsg) {
+      return res.status(403).json({ error: errMsg });
+    }
     res.json({ bundle: db.getData().attendanceSystem });
   });
   app.post("/api/attendance-system/leave-policies", (req, res) => {
@@ -15035,9 +16872,48 @@ async function startServer() {
     });
     res.json({ bundle: db.getData().attendanceSystem });
   });
+  app.post("/api/attendance-system/work-recap-reset", (req, res) => {
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
+      return res.status(403).json({
+        error: "Akses ditolak: Hanya Direktur yang berwenang melakukan reset data Rekap Kerja."
+      });
+    }
+    if (!req.body?.confirmReset) {
+      return res.status(400).json({
+        error: "Konfirmasi reset data Rekap Kerja wajib disertakan."
+      });
+    }
+    db.update((draft) => {
+      const sys = ensureAttendanceSystemInitialized(draft);
+      const prevRecordsCount = (sys.records || []).length;
+      const prevWfaCount = (sys.wfaRequests || []).length;
+      const prevFlexCount = (sys.flextimeAssignments || []).length;
+      const prevLeaveCount = (sys.leaveRequests || []).length;
+      const prevHolidayCount = (sys.holidayRequests || []).length;
+      const prevVerifCount = Object.keys(sys.workRecapVerifications || {}).length;
+      sys.records = [];
+      sys.wfaRequests = [];
+      sys.flextimeAssignments = [];
+      sys.leaveRequests = [];
+      sys.holidayRequests = [];
+      sys.workRecapVerifications = {};
+      appendAttendanceAudit(
+        draft,
+        currentUser,
+        "TIMESHEET",
+        "Reset Seluruh Data Rekap Kerja oleh Direktur",
+        `${currentUser.name} (${currentUser.roleTitle}) mereset seluruh data Rekap Kerja (Kehadiran/Timesheet: ${prevRecordsCount}, WFA: ${prevWfaCount}, Flextime: ${prevFlexCount}, Cuti/Izin: ${prevLeaveCount}, Libur: ${prevHolidayCount}, Verifikasi Rekap: ${prevVerifCount}).`
+      );
+    });
+    res.json({
+      message: "Seluruh data pada Rekap Kerja telah berhasil dihapus dan direset oleh Direktur.",
+      bundle: buildAttendanceBundleForUser(currentUser)
+    });
+  });
   app.post("/api/reset-data", (req, res) => {
     const currentUser = getCurrentUser(req);
-    if (currentUser.role !== "admin" && currentUser.role !== "director" && !currentUser.permissions?.canManageUsers) {
+    if (currentUser.role !== "system_admin" && currentUser.role !== "admin" && currentUser.role !== "director" && !currentUser.permissions?.canManageUsers) {
       return res.status(403).json({
         error: "Akses ditolak: Hanya System Administrator atau Direktur yang berwenang mereset database."
       });

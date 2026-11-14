@@ -18,11 +18,47 @@ const INDONESIAN_MONTHS_SHORT = [
   'Des',
 ];
 
+function normalizeDisplayDateStr(raw?: string | null): string {
+  if (!raw) return '';
+  const trimmed = String(raw).trim();
+  if (
+    !trimmed ||
+    trimmed === '-' ||
+    trimmed.toLowerCase() === 'null' ||
+    trimmed.toLowerCase() === 'undefined' ||
+    trimmed.toLowerCase() === 'invalid date' ||
+    trimmed.startsWith('0000-00-00')
+  ) {
+    return '';
+  }
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const yyyy = Number(isoMatch[1]);
+    const mm = Number(isoMatch[2]);
+    const dd = Number(isoMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    }
+    return '';
+  }
+  const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const dd = Number(dmyMatch[1]);
+    const mm = Number(dmyMatch[2]);
+    const yyyy = Number(dmyMatch[3]);
+    if (yyyy > 0 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    }
+  }
+  return trimmed;
+}
+
 export function formatIndonesianDate(dateStr: string): string {
-  if (!dateStr) return '-';
+  const cleanStr = normalizeDisplayDateStr(dateStr);
+  if (!cleanStr) return '-';
   try {
     // If format is YYYY-MM-DD
-    const parts = dateStr.split('-');
+    const parts = cleanStr.split('-');
     if (parts.length === 3) {
       const year = parts[0];
       const monthIdx = parseInt(parts[1], 10) - 1;
@@ -31,7 +67,7 @@ export function formatIndonesianDate(dateStr: string): string {
       return `${day} ${monthName} ${year}`;
     }
 
-    const d = new Date(dateStr);
+    const d = new Date(cleanStr);
     if (!isNaN(d.getTime())) {
       const day = d.getDate();
       const monthName = INDONESIAN_MONTHS_SHORT[d.getMonth()];
@@ -39,20 +75,22 @@ export function formatIndonesianDate(dateStr: string): string {
       return `${day} ${monthName} ${year}`;
     }
 
-    return dateStr;
+    return cleanStr;
   } catch {
-    return dateStr;
+    return cleanStr;
   }
 }
 
 export function formatPeriodRange(startDateStr: string, endDateStr: string): string {
-  if (!startDateStr && !endDateStr) return '-';
-  if (!startDateStr) return formatIndonesianDate(endDateStr);
-  if (!endDateStr) return formatIndonesianDate(startDateStr);
+  const cleanStart = normalizeDisplayDateStr(startDateStr);
+  const cleanEnd = normalizeDisplayDateStr(endDateStr);
+  if (!cleanStart && !cleanEnd) return '-';
+  if (!cleanStart) return formatIndonesianDate(cleanEnd);
+  if (!cleanEnd) return formatIndonesianDate(cleanStart);
 
   try {
-    const sParts = startDateStr.split('-');
-    const eParts = endDateStr.split('-');
+    const sParts = cleanStart.split('-');
+    const eParts = cleanEnd.split('-');
 
     if (sParts.length === 3 && eParts.length === 3) {
       const sY = sParts[0];
@@ -75,9 +113,9 @@ export function formatPeriodRange(startDateStr: string, endDateStr: string): str
       }
     }
 
-    return `${formatIndonesianDate(startDateStr)} – ${formatIndonesianDate(endDateStr)}`;
+    return `${formatIndonesianDate(cleanStart)} – ${formatIndonesianDate(cleanEnd)}`;
   } catch {
-    return `${startDateStr} s/d ${endDateStr}`;
+    return `${cleanStart} s/d ${cleanEnd}`;
   }
 }
 
