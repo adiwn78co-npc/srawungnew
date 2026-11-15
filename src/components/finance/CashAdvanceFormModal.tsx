@@ -637,6 +637,7 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
             return {
               ...it,
               budgetCode: '',
+              budgetCategory: '',
               description: '',
               notes: '',
             };
@@ -855,6 +856,7 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
           );
 
           if (progCodeItem) {
+            updated.budgetCategory = progCodeItem.budgetCategory;
             const shouldReplaceDesc =
               !updated.description.trim() ||
               (prevCodeItem &&
@@ -864,6 +866,8 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
               updated.description = progCodeItem.budgetCategory;
             }
             updated.notes = progCodeItem.budgetCategory;
+          } else {
+            updated.budgetCategory = '';
           }
         }
 
@@ -1023,14 +1027,18 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
         ? `Langsung Semua Implementasi (${torTimelineItems.length} Tahap)`
         : chosenTimelines.map((t) => t.activity).join(' | ');
 
-    // Pastikan setiap item memiliki referensi timeline
+    // Pastikan setiap item memiliki referensi timeline serta Kode & Kategori Budget
     const normalizedItems = items.map((it) => {
       const matchedTl =
         torTimelineItems.find((t) => t.id === it.timelineItemId) ||
         chosenTimelines[0] ||
         torTimelineItems[0];
+      const matchedProgCode = programBudgetCodes.find(
+        (b) => b.code.trim().toLowerCase() === (it.budgetCode || '').trim().toLowerCase()
+      );
       return {
         ...it,
+        budgetCategory: matchedProgCode?.budgetCategory || it.budgetCategory || '',
         timelineItemId: matchedTl?.id || it.timelineItemId || 'tl-1',
         timelinePeriod: matchedTl?.period || it.timelinePeriod || '',
         timelineActivity: matchedTl?.activity || it.timelineActivity || '',

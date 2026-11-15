@@ -23,7 +23,7 @@ import {
   Download,
   Edit3,
 } from 'lucide-react';
-import { Tor, CashAdvanceRecord, User } from '../../types/index.js';
+import { Tor, CashAdvanceRecord, User, MonitoringReportItem } from '../../types/index.js';
 import { formatRupiah } from '../../lib/terbilang.js';
 import { api } from '../../lib/api.js';
 import { useOrganizationSettings } from '../../lib/organizationSettings.js';
@@ -44,6 +44,7 @@ interface SummaryRowState {
   timelinePeriod: string;
   timelineActivity: string;
   budgetCode: string;
+  budgetCategory?: string;
   description: string;
   advanceAmount: number;
   actualSpent: number;
@@ -122,6 +123,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
   const [isApprovingStage, setIsApprovingStage] = useState<boolean>(false);
   const [showClosurePanel, setShowClosurePanel] = useState<boolean>(false);
   const [systemUsers, setSystemUsers] = useState<User[]>([]);
+  const [monitoringItems, setMonitoringItems] = useState<MonitoringReportItem[]>([]);
+  const [monitoringLoaded, setMonitoringLoaded] = useState<boolean>(false);
 
   const [, setBudgetHydrationTick] = useState(0);
 
@@ -208,6 +211,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
             timelinePeriod: resolvedTl?.period || item.timelinePeriod || 'Tahap Implementasi',
             timelineActivity: resolvedTl?.activity || item.timelineActivity || ca.activityTitle,
             budgetCode: item.budgetCode || '-',
+            budgetCategory: item.budgetCategory || '',
             description: item.description || ca.activityTitle,
             advanceAmount: Number(item.totalAmount) || 0,
             actualSpent: initialSpent,
@@ -248,10 +252,17 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
   // Load saved summary & dedicated Cash Advance Summary Audit Trail from backend
   useEffect(() => {
     let isMounted = true;
+    setMonitoringLoaded(false);
     const loadSummaryAndAudit = async () => {
       try {
-        const res = await api.getCashAdvanceSummary(tor.id);
+        const [res, monRes] = await Promise.all([
+          api.getCashAdvanceSummary(tor.id),
+          api.getMonitoringReports(tor.id).catch(() => ({ items: [] as MonitoringReportItem[] })),
+        ]);
         if (!isMounted) return;
+
+        setMonitoringItems(Array.isArray(monRes?.items) ? monRes.items : []);
+        setMonitoringLoaded(true);
 
         const savedMap: Record<
           string,
@@ -279,6 +290,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
         }
       } catch {
         if (!isMounted) return;
+        setMonitoringLoaded(true);
         setRows(buildBaseRowsFromCashAdvances(cashAdvances));
       }
     };
@@ -1154,8 +1166,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         <thead>
                           <tr className="bg-[#EFEFEF] text-black font-bold">
                             <th className="py-1.5 px-1.5 w-[5%] text-center border border-black">No</th>
-                            <th className="py-1.5 px-2 w-[17%] border border-black">Kode &amp; Nama Master</th>
-                            <th className="py-1.5 px-2.5 w-[26%] border border-black">Uraian Item</th>
+                            <th className="py-1.5 px-2 w-[18%] border border-black">Kode &amp; Kategori Budget</th>
+                            <th className="py-1.5 px-2.5 w-[25%] border border-black">Uraian Item</th>
                             <th className="py-1.5 px-2 w-[13%] text-right border border-black">Uang Muka (Rp)</th>
                             <th className="py-1.5 px-2 w-[13%] text-right border border-black">Realisasi (Rp)</th>
                             <th className="py-1.5 px-2 w-[11%] text-right border border-black">Sisa Dana</th>
@@ -1174,7 +1186,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                             const itemShort = Math.max(0, itemSpent - itemAdv);
                             const itemPct =
                               itemAdv > 0 ? Math.round((itemSpent / itemAdv) * 100) : 0;
-                            const masterInfo = resolveMasterBudgetByCode(it.budgetCode, tor);
+                            const masterInfo = resolveMasterBudgetByCode(
+                              it.budgetCode,
+                              tor,
+                              it.budgetCategory
+                            );
 
                             return (
                               <tr key={it.id || itemIdx} className="align-top">
@@ -1183,7 +1199,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                 </td>
                                 <td className="py-1.5 px-2 border border-black">
                                   <div className="font-bold">{masterInfo.code}</div>
-                                  <div className="text-[12px] leading-snug">{masterInfo.masterName}</div>
+                                  <div className="text-[12px] leading-snug">{masterInfo.budgetCategory}</div>
                                 </td>
                                 <td className="py-1.5 px-2.5 border border-black">
                                   <div className="font-bold leading-snug">{it.description}</div>
@@ -1552,10 +1568,10 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           <th className="py-2 px-1.5 w-[4.5%] text-center border-r border-slate-400 align-middle">
                             No
                           </th>
-                          <th className="py-2 px-2 w-[16.5%] border-r border-slate-400 align-middle">
-                            Kode &amp; Nama Master
+                          <th className="py-2 px-2 w-[17.5%] border-r border-slate-400 align-middle">
+                            Kode &amp; Kategori Budget
                           </th>
-                          <th className="py-2 px-2.5 w-[27%] border-r border-slate-400 align-middle">
+                          <th className="py-2 px-2.5 w-[26%] border-r border-slate-400 align-middle">
                             Uraian Item
                           </th>
                           <th className="py-2 px-2 w-[13%] text-right border-r border-slate-400 align-middle">
@@ -1586,7 +1602,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           const itemShort = Math.max(0, itemSpent - itemAdv);
                           const itemPct =
                             itemAdv > 0 ? Math.round((itemSpent / itemAdv) * 100) : 0;
-                          const masterInfo = resolveMasterBudgetByCode(it.budgetCode, tor);
+                          const masterInfo = resolveMasterBudgetByCode(
+                            it.budgetCode,
+                            tor,
+                            it.budgetCategory
+                          );
 
                           return (
                             <tr key={it.id || itemIdx} className="hover:bg-slate-50/70 align-top">
@@ -1598,7 +1618,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   {masterInfo.code}
                                 </span>
                                 <div className="font-semibold text-slate-800 text-[11px] mt-1 leading-snug">
-                                  {masterInfo.masterName}
+                                  {masterInfo.budgetCategory}
                                 </div>
                               </td>
                               <td className="py-2 px-2.5 border-r border-slate-300 break-words">
@@ -2091,10 +2111,10 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                   <th className="py-2 px-2 w-[15.5%] border-r border-slate-800 align-middle">
                     No. Form Kasbon
                   </th>
-                  <th className="py-2 px-1.5 w-[12%] text-center border-r border-slate-800 align-middle">
-                    Kode &amp; Master
+                  <th className="py-2 px-1.5 w-[13.5%] text-left border-r border-slate-800 align-middle">
+                    Kode &amp; Kategori Budget
                   </th>
-                  <th className="py-2 px-2 w-[20.5%] border-r border-slate-800 align-middle">
+                  <th className="py-2 px-2 w-[19%] border-r border-slate-800 align-middle">
                     Uraian Kebutuhan / Pos Pengeluaran
                   </th>
                   <th className="py-2 px-1.5 w-[10.5%] text-right border-r border-slate-800 align-middle">
@@ -2181,7 +2201,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           const parentCa = cashAdvances.find(
                             (c) => c.id === row.advanceId
                           );
-                          const masterInfo = resolveMasterBudgetByCode(row.budgetCode, tor);
+                          const masterInfo = resolveMasterBudgetByCode(
+                            row.budgetCode,
+                            tor,
+                            row.budgetCategory
+                          );
 
                           return (
                             <tr
@@ -2197,12 +2221,12 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   {row.timelineActivity || tl.activity}
                                 </div>
                               </td>
-                              <td className="py-2 px-1.5 text-center border-r border-slate-400 break-words">
+                              <td className="py-2 px-1.5 text-left border-r border-slate-400 break-words">
                                 <span className="inline-block font-mono font-bold text-slate-900">
                                   {masterInfo.code}
                                 </span>
                                 <div className="text-[10px] text-slate-600 font-medium leading-tight mt-0.5">
-                                  {masterInfo.masterName}
+                                  {masterInfo.budgetCategory}
                                 </div>
                               </td>
                               <td className="py-2 px-2 text-slate-900 border-r border-slate-400 break-words">
@@ -2350,8 +2374,21 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
               activeCas.length > 0 && activeCas.every((c) => Boolean(c.isReported));
             const allCasReportApproved =
               activeCas.length > 0 && activeCas.every(isCaReportClosedAndAcc);
+            const execSummaryItems = monitoringItems.filter(
+              (m) => m.toolId === 'EXEC-SUMMARY'
+            );
+            const completedExecSummaries = execSummaryItems.filter(
+              (m) => m.status === 'Completed'
+            );
+            const allExecSummariesCompleted =
+              monitoringLoaded &&
+              (execSummaryItems.length === 0 ||
+                completedExecSummaries.length === execSummaryItems.length);
             const canTriggerFinalFinancialClosure =
-              allStagesHaveCa && allCasReported && allCasReportApproved;
+              allStagesHaveCa &&
+              allCasReported &&
+              allCasReportApproved &&
+              allExecSummariesCompleted;
 
             const lastReportedCa =
               approvedReportCas.length > 0
@@ -2391,10 +2428,20 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         {reportedAdvances.length}/{activeCas.length}
                       </strong>
                     </span>
-                    <span className="font-semibold text-slate-700">
+                    <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
                       CA Ditutup &amp; Di-ACC:{' '}
                       <strong className="font-mono text-emerald-700">
-                        {approvedReportCas.length} / {activeCas.length} Cash Advance
+                        {approvedReportCas.length}/{activeCas.length}
+                      </strong>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
+                      Exec. Summary Selesai:{' '}
+                      <strong
+                        className={`font-mono ${
+                          allExecSummariesCompleted ? 'text-emerald-700' : 'text-amber-700'
+                        }`}
+                      >
+                        {completedExecSummaries.length}/{execSummaryItems.length}
                       </strong>
                     </span>
                   </div>
@@ -2410,7 +2457,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                       : 'bg-amber-50/60 border-amber-200 text-amber-900'
                   }`}
                 >
-                  <div className="space-y-0.5">
+                  <div className="space-y-0.5 min-w-0 flex-1">
                     <div className="font-bold flex items-center gap-1.5">
                       <FileCheck2 className="w-4 h-4 shrink-0" />
                       <span>
@@ -2419,61 +2466,68 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           : isFinalReported
                           ? 'Laporan Keuangan Akhir Telah Dilaporkan — Menunggu Pemeriksaan Finance Manager / Persetujuan Director'
                           : canTriggerFinalFinancialClosure
-                          ? 'Seluruh Laporan Cash Advance Telah Ditutup & Di-ACC — Siap Melaporkan Laporan Keuangan Akhir'
-                          : 'Syarat Tombol Laporkan Laporan Keuangan Akhir: Seluruh Laporan Cash Advance Harus Sudah Ditutup & Di-ACC'}
+                          ? 'Seluruh Cash Advance & Executive Summary Telah Selesai — Siap Melaporkan Laporan Keuangan Akhir'
+                          : 'Syarat Laporan Keuangan Final: Seluruh Cash Advance (Ditutup & Di-ACC) dan Seluruh Executive Summary Harus Sudah Selesai'}
                       </span>
                     </div>
                     <p className="text-[11px] opacity-90">
                       {canTriggerFinalFinancialClosure
-                        ? 'Seluruh laporan Cash Advance telah ditutup dan di-ACC oleh Finance Manager & Direktur. Silakan klik tombol Laporkan di bawah untuk mengajukan Laporan Keuangan Akhir.'
-                        : `Saat ini ${reportedAdvances.length}/${activeCas.length} laporan CA telah ditutup dan ${approvedReportCas.length}/${activeCas.length} laporan CA telah di-ACC oleh Finance Manager & Direktur. Tombol Laporkan akan muncul otomatis setelah seluruh laporan CA ditutup dan di-ACC.`}
+                        ? 'Seluruh laporan Cash Advance telah ditutup & di-ACC dan seluruh Executive Summary terkait telah diselesaikan. Silakan klik tombol Laporkan di bawah untuk mengajukan Laporan Keuangan Akhir.'
+                        : `Saat ini ${approvedReportCas.length}/${activeCas.length} Cash Advance telah ditutup & di-ACC dan ${completedExecSummaries.length}/${execSummaryItems.length} Executive Summary telah selesai (Completed). Penggunaan dana dari setiap Cash Advance yang laporannya telah selesai tetap tercatat dan terakumulasi di Laporan Keuangan Final.`}
                     </p>
                   </div>
 
-                  {canTriggerFinalFinancialClosure && (
-                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                      {!isFinalReported && (
-                        <button
-                          type="button"
-                          disabled={isApprovingStage}
-                          onClick={() => handleApproveSummary('report')}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Laporkan Laporan Keuangan Akhir</span>
-                        </button>
-                      )}
-                      {isFinalReported && !isFinalVerifiedByFinance && (
-                        <button
-                          type="button"
-                          disabled={isApprovingStage}
-                          onClick={() => handleApproveSummary('finance')}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Periksa Lap. Keuangan Akhir (Finance Manager)</span>
-                        </button>
-                      )}
-                      {isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
-                        <button
-                          type="button"
-                          disabled={isApprovingStage}
-                          onClick={() => handleApproveSummary('director')}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Setujui Lap. Keuangan Akhir (Director)</span>
-                        </button>
-                      )}
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {canTriggerFinalFinancialClosure && !isFinalReported && (
                       <button
                         type="button"
-                        onClick={() => onNavigateStage(8)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 font-semibold text-xs cursor-pointer"
+                        disabled={isApprovingStage}
+                        onClick={() => handleApproveSummary('report')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
                       >
-                        <span>Buka Tahap 08 Lap. Keuangan →</span>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Laporkan Laporan Keuangan Akhir</span>
                       </button>
-                    </div>
-                  )}
+                    )}
+                    {canTriggerFinalFinancialClosure && isFinalReported && !isFinalVerifiedByFinance && (
+                      <button
+                        type="button"
+                        disabled={isApprovingStage}
+                        onClick={() => handleApproveSummary('finance')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Periksa Lap. Keuangan Akhir (Finance Manager)</span>
+                      </button>
+                    )}
+                    {canTriggerFinalFinancialClosure && isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
+                      <button
+                        type="button"
+                        disabled={isApprovingStage}
+                        onClick={() => handleApproveSummary('director')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Setujui Lap. Keuangan Akhir (Director)</span>
+                      </button>
+                    )}
+                    {!canTriggerFinalFinancialClosure && !allExecSummariesCompleted && (
+                      <button
+                        type="button"
+                        onClick={() => onNavigateStage(6)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white hover:bg-amber-50 text-amber-900 border border-amber-300 font-semibold text-xs cursor-pointer"
+                      >
+                        <span>Selesaikan Exec. Summary (Tahap 06) →</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onNavigateStage(8)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 font-semibold text-xs cursor-pointer"
+                    >
+                      <span>Buka Tahap 08 Lap. Keuangan →</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto">
@@ -2578,6 +2632,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                             ? `TELAH DILAPORKAN (${approvedReportCas.length}/${activeCas.length} CA)`
                             : canTriggerFinalFinancialClosure
                             ? 'SIAP DILAPORKAN'
+                            : allStagesHaveCa && allCasReported && allCasReportApproved && !allExecSummariesCompleted
+                            ? 'MENUNGGU EXEC. SUMMARY SELESAI'
                             : 'MENUNGGU TUTUP & ACC CA'
                         }
                       />

@@ -51,6 +51,7 @@ import { ProgramStructureView } from '../program/ProgramStructureView.js';
 import {
   MasterBudgetItem,
   DEFAULT_MASTER_BUDGET_ITEMS,
+  resolveMasterBudgetByCode,
 } from '../../lib/masterBudgetStorage.js';
 import {
   BudgetPeriodStructureType,
@@ -3275,7 +3276,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                 <thead>
                   <tr className="border-b border-[#E5E5E3] bg-[#F7F7F5] text-[11px] font-bold uppercase text-[#787774]">
                     <th className="py-2.5 px-3">Final Report & CA Ref</th>
-                    <th className="py-2.5 px-3">Master ToR & Budget Code</th>
+                    <th className="py-2.5 px-3">Master ToR • Kode &amp; Kategori Budget</th>
                     <th className="py-2.5 px-3 text-right">Original CA</th>
                     <th className="py-2.5 px-3 text-right">Actual Expenditure</th>
                     <th className="py-2.5 px-3 text-right">Returned Funds</th>
@@ -3334,9 +3335,48 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                               <div className="font-medium text-[#252525]">
                                 {ca.activityTitle}
                               </div>
-                              <div className="text-[10px] font-mono text-[#2851C5]">
-                                ToR: {ca.torNumber} • Code:{' '}
-                                <strong>{ca.items?.[0]?.budgetCode || '-'}</strong>
+                              <div className="text-[10px] font-mono text-[#787774]">
+                                ToR: {ca.torNumber}
+                              </div>
+                              <div className="mt-1 flex flex-col gap-0.5">
+                                {(() => {
+                                  const parentTor = tors.find((t) => t.id === ca.torId);
+                                  const seenCodes = new Set<string>();
+                                  const entries = (ca.items || [])
+                                    .map((it) =>
+                                      resolveMasterBudgetByCode(
+                                        it.budgetCode,
+                                        parentTor || {
+                                          programId: ca.programId,
+                                          programName: ca.programName,
+                                        },
+                                        it.budgetCategory
+                                      )
+                                    )
+                                    .filter((info) => {
+                                      if (seenCodes.has(info.code)) return false;
+                                      seenCodes.add(info.code);
+                                      return true;
+                                    });
+                                  if (entries.length === 0) {
+                                    return (
+                                      <span className="text-[10.5px] font-mono text-[#2851C5]">
+                                        -
+                                      </span>
+                                    );
+                                  }
+                                  return entries.map((info) => (
+                                    <div
+                                      key={info.code}
+                                      className="text-[10.5px] text-[#2851C5] leading-snug"
+                                    >
+                                      <strong className="font-mono">{info.code}</strong>
+                                      {info.budgetCategory && info.budgetCategory !== '-'
+                                        ? ` — ${info.budgetCategory}`
+                                        : ''}
+                                    </div>
+                                  ));
+                                })()}
                               </div>
                             </td>
                             <td className="py-3 px-3 text-right font-mono text-[#5A5A58]">
@@ -3961,7 +4001,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-[#F7F7F5] border-b border-[#E5E5E3] text-[10px] font-bold uppercase text-[#787774]">
-                      <th className="py-2 px-3">Code</th>
+                      <th className="py-2 px-3">Kode &amp; Kategori Budget</th>
                       <th className="py-2 px-3">Uraian Item Cash Advance</th>
                       <th className="py-2 px-3 text-right">Uang Muka (CA)</th>
                       <th className="py-2 px-3 text-right">
@@ -3978,10 +4018,24 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                         0,
                         (Number(item.totalAmount) || 0) - actVal
                       );
+                      const parentTor = tors.find((t) => t.id === closingReportCa.torId);
+                      const masterInfo = resolveMasterBudgetByCode(
+                        item.budgetCode,
+                        parentTor || {
+                          programId: closingReportCa.programId,
+                          programName: closingReportCa.programName,
+                        },
+                        item.budgetCategory
+                      );
                       return (
-                        <tr key={item.id}>
-                          <td className="py-2 px-3 font-mono font-bold">
-                            {item.budgetCode}
+                        <tr key={item.id} className="align-top">
+                          <td className="py-2 px-3">
+                            <div className="font-mono font-bold text-[#1E3A8A]">
+                              {masterInfo.code}
+                            </div>
+                            <div className="text-[11px] text-[#252525] font-medium leading-snug">
+                              {masterInfo.budgetCategory}
+                            </div>
                           </td>
                           <td className="py-2 px-3">{item.description}</td>
                           <td className="py-2 px-3 text-right font-mono">

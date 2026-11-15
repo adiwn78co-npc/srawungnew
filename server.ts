@@ -5771,7 +5771,37 @@ async function startServer() {
       bankName: body.bankName || 'Bank Mandiri',
       bankAccountNumber: body.bankAccountNumber || '',
       bankAccountHolder: body.bankAccountHolder || currentUser.name,
-      items: Array.isArray(body.items) ? body.items : [],
+      items: Array.isArray(body.items)
+        ? body.items.map((it: any) => {
+            const rawCode = String(it?.budgetCode || '').trim();
+            let resolvedCat = String(it?.budgetCategory || '').trim();
+            if (rawCode && !resolvedCat && data.programBudgets) {
+              const normCode = rawCode.toLowerCase();
+              const datasets = Object.values(data.programBudgets) as any[];
+              for (const ds of datasets) {
+                if (!ds || typeof ds !== 'object') continue;
+                const matchProg =
+                  (targetTor.programId && ds.programId === targetTor.programId) ||
+                  (targetTor.programName &&
+                    String(ds.programName || '').trim().toLowerCase() ===
+                      targetTor.programName.trim().toLowerCase());
+                if (!matchProg) continue;
+                const found = (ds.masterBudgetCodes || []).find(
+                  (mc: any) =>
+                    String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
+                );
+                if (found?.budgetCategory) {
+                  resolvedCat = String(found.budgetCategory).trim();
+                  break;
+                }
+              }
+            }
+            return {
+              ...it,
+              ...(resolvedCat ? { budgetCategory: resolvedCat } : {}),
+            };
+          })
+        : [],
       totalAmount: Number(body.totalAmount) || 0,
       amountInWords: body.amountInWords || '',
       complianceNotes: body.complianceNotes || [
@@ -6236,9 +6266,43 @@ async function startServer() {
           );
         }
 
+        const parentTor = (draft.tors || []).find((t) => t.id === existing.torId);
+        const enrichedBodyItems = Array.isArray(body.items)
+          ? body.items.map((it: any) => {
+              const rawCode = String(it?.budgetCode || '').trim();
+              let resolvedCat = String(it?.budgetCategory || '').trim();
+              if (rawCode && !resolvedCat && draft.programBudgets) {
+                const normCode = rawCode.toLowerCase();
+                const datasets = Object.values(draft.programBudgets) as any[];
+                for (const ds of datasets) {
+                  if (!ds || typeof ds !== 'object') continue;
+                  const matchProg =
+                    (parentTor?.programId && ds.programId === parentTor.programId) ||
+                    (parentTor?.programName &&
+                      String(ds.programName || '').trim().toLowerCase() ===
+                        parentTor.programName.trim().toLowerCase());
+                  if (!matchProg) continue;
+                  const found = (ds.masterBudgetCodes || []).find(
+                    (mc: any) =>
+                      String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
+                  );
+                  if (found?.budgetCategory) {
+                    resolvedCat = String(found.budgetCategory).trim();
+                    break;
+                  }
+                }
+              }
+              return {
+                ...it,
+                ...(resolvedCat ? { budgetCategory: resolvedCat } : {}),
+              };
+            })
+          : undefined;
+
         const recordToSave: CashAdvanceRecord = {
           ...existing,
           ...body,
+          ...(enrichedBodyItems ? { items: enrichedBodyItems } : {}),
           id: existing.id,
           advanceNumber: existing.advanceNumber,
           updatedAt: new Date().toISOString(),
@@ -7067,7 +7131,8 @@ async function startServer() {
     }
 
     // Validasi wajib untuk tahap pelaporan Laporan Keuangan Akhir:
-    // Seluruh Cash Advance aktif pada ToR ini harus sudah ditutup (isReported) DAN telah di-ACC (reportApprovalStatus === 'Telah Disetujui')
+    // 1. Seluruh Cash Advance aktif pada ToR ini harus sudah ditutup (isReported) DAN telah di-ACC (reportApprovalStatus === 'Telah Disetujui')
+    // 2. Seluruh Executive Summary terkait ToR ini (Tahap 06) harus sudah diselesaikan (Completed)
     const currentData = db.getData();
     const activeCasForTor = (currentData.cashAdvances || []).filter(
       (ca) => ca.torId === torId && ca.status !== 'Ditolak'
@@ -7086,7 +7151,45 @@ async function startServer() {
       if (unclosedOrUnapproved.length > 0) {
         const sampleNums = unclosedOrUnapproved.map((ca) => ca.advanceNumber).join(', ');
         return res.status(400).json({
-          error: `Laporan Keuangan Akhir hanya dapat dilaporkan apabila seluruh laporan Cash Advance telah ditutup dan di-ACC oleh pihak berwenang (Finance Manager & Direktur). Belum selesai: ${sampleNums}.`,
+          error: `Laporan Keuangan Akhir hanya dapat disampaikan setelah seluruh Cash Advance dan Executive Summary terkait telah diselesaikan. Cash Advance belum ditutup & di-ACC: ${sampleNums}.`,
+        });
+      }
+
+      const projectionDraft = createReadOnlyProjectionDraft(currentData);
+      const syncedMon = syncMonitoringReportsForTor(projectionDraft, torId);
+      const activeCaIdSet = new Set(activeCasForTor.map((ca) => ca.id));
+      const execMap = new Map<string, MonitoringReportItem>();
+      for (const m of syncedMon) {
+        if (m.toolId === 'EXEC-SUMMARY') {
+          execMap.set(m.id, m);
+        }
+      }
+      for (const m of Object.values(currentData.monitoringReports || {}) as MonitoringReportItem[]) {
+        if (
+          m &&
+          m.torId === torId &&
+          m.toolId === 'EXEC-SUMMARY' &&
+          (!m.cashAdvanceId || activeCaIdSet.has(m.cashAdvanceId)) &&
+          !execMap.has(m.id)
+        ) {
+          execMap.set(m.id, m);
+        }
+      }
+      const execSummariesForTor = Array.from(execMap.values());
+      const uncompletedExecs = execSummariesForTor.filter((exec) => {
+        const hubItem = currentData.approvalHubItems?.[`apv-exec-${exec.id}`];
+        if (hubItem?.status === 'Rejected' || hubItem?.status === 'Revision Required') {
+          return true;
+        }
+        return exec.status !== 'Completed';
+      });
+      if (uncompletedExecs.length > 0) {
+        const sampleLabels = uncompletedExecs
+          .slice(0, 3)
+          .map((m) => m.cashAdvanceNumber || m.timelineActivity || m.id)
+          .join(', ');
+        return res.status(400).json({
+          error: `Laporan Keuangan Akhir hanya dapat disampaikan setelah seluruh Cash Advance dan Executive Summary terkait telah diselesaikan. Masih terdapat ${uncompletedExecs.length} Executive Summary yang belum diselesaikan (${sampleLabels}).`,
         });
       }
     }

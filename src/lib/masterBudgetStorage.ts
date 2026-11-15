@@ -138,6 +138,7 @@ export function deleteMasterBudgetItem(id: string): void {
 
 export interface ResolvedMasterBudgetInfo {
   code: string;
+  budgetCategory: string;
   masterName: string;
   activityCode: string;
   outcomeName: string;
@@ -190,11 +191,11 @@ function findProgramBudgetCategoryByCode(
           const found = (ds.masterBudgetCodes || []).find(
             (mc: any) => String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
           );
-          if (found) {
+          if (found && found.budgetCategory) {
             const resolvedCode = String((found as any).code || (found as any).budgetCode || cleanCode).trim();
             return {
               code: resolvedCode,
-              budgetCategory: found.budgetCategory,
+              budgetCategory: found.budgetCategory.trim(),
               programName: ds.programName,
             };
           }
@@ -206,11 +207,11 @@ function findProgramBudgetCategoryByCode(
         const found = (ds?.masterBudgetCodes || []).find(
           (mc: any) => String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
         );
-        if (found) {
+        if (found && found.budgetCategory) {
           const resolvedCode = String((found as any).code || (found as any).budgetCode || cleanCode).trim();
           return {
             code: resolvedCode,
-            budgetCategory: found.budgetCategory,
+            budgetCategory: found.budgetCategory.trim(),
             programName: ds.programName,
           };
         }
@@ -245,7 +246,8 @@ export function resolveMasterBudgetByCode(
     outcomeName?: string;
     outputName?: string;
     title?: string;
-  }
+  },
+  explicitBudgetCategory?: string
 ): ResolvedMasterBudgetInfo {
   const cleanCode =
     (rawCode && rawCode !== '-' ? rawCode.trim() : '') ||
@@ -257,7 +259,7 @@ export function resolveMasterBudgetByCode(
     ? cleanCode.split('.').slice(0, 2).join('.')
     : cleanCode;
 
-  // Eksklusif mengambil nama dari Master Budget (tanpa mencampur Outcome / Output / Activity)
+  // Eksklusif mengambil Kode & Kategori Budget dari Master Budget (tanpa mencampur Outcome / Output / Activity)
   const matchedProgCode = findProgramBudgetCategoryByCode(
     cleanCode,
     fallbackTor?.programId,
@@ -265,25 +267,45 @@ export function resolveMasterBudgetByCode(
   );
 
   if (matchedProgCode) {
+    const cat = matchedProgCode.budgetCategory || '-';
     return {
       code: matchedProgCode.code,
-      masterName: matchedProgCode.budgetCategory,
+      budgetCategory: cat,
+      masterName: cat,
       activityCode: derivedParent,
       outcomeName: '',
       outputName: '',
-      activityDescription: matchedProgCode.budgetCategory,
-      formattedMasterLabel: matchedProgCode.budgetCategory,
+      activityDescription: cat,
+      formattedMasterLabel:
+        cat && cat !== '-' ? `${matchedProgCode.code} — ${cat}` : matchedProgCode.code,
+    };
+  }
+
+  const persistedCat = (explicitBudgetCategory || '').trim();
+  if (persistedCat && persistedCat !== '-') {
+    return {
+      code: cleanCode,
+      budgetCategory: persistedCat,
+      masterName: persistedCat,
+      activityCode: derivedParent,
+      outcomeName: '',
+      outputName: '',
+      activityDescription: persistedCat,
+      formattedMasterLabel:
+        cleanCode && cleanCode !== '-' ? `${cleanCode} — ${persistedCat}` : persistedCat,
     };
   }
 
   return {
     code: cleanCode,
+    budgetCategory: '-',
     masterName: '-',
     activityCode: derivedParent,
     outcomeName: '',
     outputName: '',
     activityDescription: '',
-    formattedMasterLabel: '-',
+    formattedMasterLabel: cleanCode,
   };
 }
+
 

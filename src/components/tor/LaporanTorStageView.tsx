@@ -800,31 +800,36 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                 meta: `Ref CA: ${ent.cashAdvanceNumber} · ${ent.period}`,
               })),
             },
-            {
-              stageNum: '08',
-              stageIndex: 8,
-              sectionKey: null,
-              title: 'Tahap 08 — Laporan Keuangan Akhir',
-              subtitle: `Akumulasi Master Budget & penutupan laporan keuangan akhir (${tor.torNumber})`,
-              countLabel:
-                activeCashAdvances.length === 0
-                  ? 'Menunggu CA'
-                  : activeCashAdvances.every(
-                      (ca) =>
-                        Boolean(ca.isReported) &&
-                        (ca.reportApprovalStatus === 'Telah Disetujui' || Boolean(ca.reportApprovedAt))
-                    )
-                  ? 'Siap Dilaporkan'
-                  : 'Menunggu Tutup & ACC CA',
-              isAvailable:
+            (() => {
+              const allCasDone =
                 activeCashAdvances.length > 0 &&
                 activeCashAdvances.every(
                   (ca) =>
                     Boolean(ca.isReported) &&
                     (ca.reportApprovalStatus === 'Telah Disetujui' || Boolean(ca.reportApprovedAt))
-                ),
-              subLinks: [],
-            },
+                );
+              const execItems = monitoringItems.filter((m) => m.toolId === 'EXEC-SUMMARY');
+              const allExecDone =
+                execItems.length === 0 || execItems.every((m) => m.status === 'Completed');
+              const stage8Ready = allCasDone && allExecDone;
+              return {
+                stageNum: '08',
+                stageIndex: 8,
+                sectionKey: null,
+                title: 'Tahap 08 — Laporan Keuangan Akhir',
+                subtitle: `Akumulasi Master Budget & penutupan laporan keuangan akhir (${tor.torNumber})`,
+                countLabel:
+                  activeCashAdvances.length === 0
+                    ? 'Menunggu CA'
+                    : !allCasDone
+                    ? 'Menunggu Tutup & ACC CA'
+                    : !allExecDone
+                    ? 'Menunggu Exec. Summary'
+                    : 'Siap Dilaporkan',
+                isAvailable: stage8Ready,
+                subLinks: [],
+              };
+            })(),
           ].map((row) => (
             <div
               key={row.stageNum}

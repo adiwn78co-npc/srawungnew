@@ -1828,10 +1828,14 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                     ? Number(ca.realizedAmount)
                     : adv;
                 const rawCode = matched?.budgetCode || it.budgetCode || '-';
-                const resolved = resolveMasterBudgetByCode(rawCode, tor || undefined);
+                const resolved = resolveMasterBudgetByCode(
+                  rawCode,
+                  tor || undefined,
+                  matched?.budgetCategory || it.budgetCategory
+                );
                 return {
                   code: resolved.code,
-                  masterName: resolved.masterName,
+                  masterName: resolved.budgetCategory,
                   advanceAmount: adv,
                   actualSpent: spent,
                 };
@@ -1844,7 +1848,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
             return [
               {
                 code: resolved.code,
-                masterName: resolved.masterName,
+                masterName: resolved.budgetCategory,
                 advanceAmount: adv,
                 actualSpent: spent,
               },
@@ -1855,7 +1859,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
               const resolved = resolveMasterBudgetByCode('-', tor || undefined);
               return {
                 code: resolved.code,
-                masterName: resolved.masterName,
+                masterName: resolved.budgetCategory,
                 advanceAmount: preview.approvedAmount ?? preview.requestedAmount ?? 0,
                 actualSpent: preview.realizedAmount ?? preview.approvedAmount ?? 0,
               };
@@ -1880,6 +1884,13 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
       if (existing) {
         existing.advanceAmount += r.advanceAmount;
         existing.actualSpent += r.actualSpent;
+        if (
+          (!existing.masterName || existing.masterName === '-') &&
+          r.masterName &&
+          r.masterName !== '-'
+        ) {
+          existing.masterName = r.masterName;
+        }
       } else {
         groupedMap.set(r.code, {
           code: r.code,
@@ -1914,7 +1925,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
           <h1 className="text-[16px] font-bold text-black tracking-normal leading-snug uppercase">
             {isPerCaReport
               ? 'LAPORAN PERTANGGUNGJAWABAN KEUANGAN CASH ADVANCE'
-              : 'LAPORAN KEUANGAN AKHIR & REKAPITULASI AKUMULASI DANA PER KODE BUDGET'}
+              : 'LAPORAN KEUANGAN AKHIR & REKAPITULASI AKUMULASI DANA PER KODE & KATEGORI BUDGET'}
           </h1>
           <div className="text-[13.5px] font-bold text-black mt-0.5 leading-snug">
             {item.activityName} ({item.referenceNumber})
@@ -1926,7 +1937,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
             className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13px]"
             style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
           >
-            1. Rincian Realisasi &amp; Rekonsiliasi Dana (Akumulasi Cash Advance yang Telah Ditutup &amp; Di-ACC)
+            1. Rincian Realisasi &amp; Rekonsiliasi Dana per Kode &amp; Kategori Budget (Akumulasi Cash Advance Ditutup &amp; Di-ACC)
           </div>
           <table className="w-full text-left border-collapse border border-black text-[12px]">
             <thead>
@@ -1934,7 +1945,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <th className="py-1.5 px-1.5 w-[5%] text-center border border-black">No</th>
                 <th className="py-1.5 px-2 w-[12%] text-left border border-black">Kode Budget</th>
                 <th className="py-1.5 px-2.5 w-[31%] border border-black">
-                  Jenis Kegiatan (berdasarkan Budget / Outcome)
+                  Kategori Budget
                 </th>
                 <th className="py-1.5 px-2 w-[15%] text-right border border-black">
                   Uang Muka (Rp)
@@ -1953,7 +1964,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <tr key={idx} className="align-top">
                   <td className="py-1.5 px-1.5 text-center border border-black">{idx + 1}</td>
                   <td className="py-1.5 px-2 text-left font-bold border border-black">{r.code}</td>
-                  <td className="py-1.5 px-2.5 border border-black">{r.masterName}</td>
+                  <td className="py-1.5 px-2.5 border border-black font-semibold">{r.masterName}</td>
                   <td className="py-1.5 px-2 text-right border border-black">
                     {formatRupiah(r.advanceAmount)}
                   </td>

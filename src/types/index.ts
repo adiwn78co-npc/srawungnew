@@ -513,6 +513,7 @@ export interface CashAdvanceItem {
   id: string;
   itemNo: number;
   budgetCode: string;
+  budgetCategory?: string;
   description: string;
   volume: number;
   unit: string;
@@ -986,7 +987,7 @@ export interface ApprovalHubItem {
     attachments: { label: string; url: string; refCode?: string }[];
     // Khusus Cash Advance Request (Kategori 5)
     purposeOfFunds?: string;
-    budgetLines?: { code: string; description: string; amount: number }[];
+    budgetLines?: { code: string; budgetCategory?: string; description: string; amount: number }[];
     requestedAmount?: number;
     plannedUsageDate?: string;
     plannedSettlementDate?: string;

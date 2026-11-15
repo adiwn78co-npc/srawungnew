@@ -8,6 +8,7 @@ import {
   BestPhotoSlot,
   HumanInterestStoryItem,
   GeneralPhotoLinkItem,
+  MonitoringReportItem,
 } from '../../types/index.js';
 import { formatIndonesianDate } from '../../lib/dateUtils.js';
 import { formatRupiah } from '../../lib/terbilang.js';
@@ -348,6 +349,8 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
   const { organizationName } = useOrganizationSettings();
   const { currentUser } = useAuth();
   const [summaryData, setSummaryData] = useState<any>(null);
+  const [monitoringItems, setMonitoringItems] = useState<MonitoringReportItem[]>([]);
+  const [monitoringLoaded, setMonitoringLoaded] = useState(false);
   const [systemUsers, setSystemUsers] = useState<User[]>([]);
   const [, setBudgetLookupVersion] = useState(0);
 
@@ -602,6 +605,25 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
       window.removeEventListener('master-budget-updated', handleBudgetRefresh);
     };
   }, [tor.id]);
+
+  useEffect(() => {
+    let active = true;
+    setMonitoringLoaded(false);
+    api
+      .getMonitoringReports(tor.id)
+      .then((res) => {
+        if (active) {
+          setMonitoringItems(Array.isArray(res?.items) ? res.items : []);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setMonitoringLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [tor.id, cashAdvances]);
 
   const timelineItems = tor.timelineItems || [];
   const specificObjectives = tor.specificObjectives || [];
@@ -1862,9 +1884,15 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
     Boolean(c.isReported) &&
     (c.reportApprovalStatus === 'Telah Disetujui' || Boolean(c.reportApprovedAt));
 
-  // Hanya Cash Advance yang laporannya TELAH DITUTUP DAN DI-ACC oleh pihak berwenang (Finance Manager & Direktur) yang masuk ke dalam Laporan Keuangan Akhir
+  // Setiap Cash Advance yang laporannya telah ditutup dan di-ACC tetap tercatat dan terakumulasi per Kode & Kategori Budget
   const closedOnlyCas = activeCas.filter((c) => Boolean(c.isReported));
   const closedCas = activeCas.filter(isCaReportClosedAndAcc);
+  const execSummaryItems = monitoringItems.filter((m) => m.toolId === 'EXEC-SUMMARY');
+  const completedExecSummaries = execSummaryItems.filter((m) => m.status === 'Completed');
+  const allExecSummariesCompleted =
+    monitoringLoaded &&
+    (execSummaryItems.length === 0 ||
+      completedExecSummaries.length === execSummaryItems.length);
   const accumulatedMap = new Map<string, AccumulatedBudgetCodeRow>();
 
   closedCas.forEach((ca) => {
@@ -1879,7 +1907,11 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           tor.activityCode ||
           tor.hierarchyCode ||
           '-';
-        const resolved = resolveMasterBudgetByCode(rawCode, tor);
+        const resolved = resolveMasterBudgetByCode(
+          rawCode,
+          tor,
+          matchedSummaryRow?.budgetCategory || item.budgetCategory
+        );
         const key = resolved.code;
 
         const advAmt = Number(item.totalAmount) || 0;
@@ -1899,6 +1931,13 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           existing.advanceAmount += advAmt;
           existing.actualSpent += spentAmt;
           existing.itemCount += 1;
+          if (
+            (!existing.masterName || existing.masterName === '-') &&
+            resolved.budgetCategory &&
+            resolved.budgetCategory !== '-'
+          ) {
+            existing.masterName = resolved.budgetCategory;
+          }
           if (!existing.caNumbers.includes(ca.advanceNumber)) {
             existing.caNumbers.push(ca.advanceNumber);
           }
@@ -1908,7 +1947,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
         } else {
           accumulatedMap.set(key, {
             code: resolved.code,
-            masterName: resolved.masterName,
+            masterName: resolved.budgetCategory,
             activityCode: resolved.activityCode,
             outcomeName: resolved.outcomeName,
             outputName: resolved.outputName,
@@ -1928,8 +1967,9 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
       const rowKey = `${ca.id}-main`;
       const matchedSummaryRow = summaryRows.find((sr) => sr.id === rowKey);
       const resolved = resolveMasterBudgetByCode(
-        tor.activityCode || tor.hierarchyCode || '-',
-        tor
+        matchedSummaryRow?.budgetCode || tor.activityCode || tor.hierarchyCode || '-',
+        tor,
+        matchedSummaryRow?.budgetCategory
       );
       const key = resolved.code;
       const advAmt = Number(ca.totalAmount) || 0;
@@ -2021,11 +2061,10 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
       <div className="bg-white rounded-lg border border-[#EAEAEA] px-4 sm:px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 print:hidden">
         <div>
           <h3 className="text-sm font-semibold text-[#2F3437]">
-            08. Laporan Keuangan &amp; Rekonsiliasi Akumulasi Kode Budget
+            08. Laporan Keuangan &amp; Rekonsiliasi Kode &amp; Kategori Budget
           </h3>
           <p className="text-xs text-[#787774] mt-0.5">
-            Rekapitulasi laporan keuangan berdasarkan akumulasi <strong>Kode Budget</strong> &amp;{' '}
-            <strong>Master Budget</strong> dari <strong>TOR ({tor.torNumber})</strong>.
+            Rekapitulasi laporan keuangan akhir berdasarkan akumulasi <strong>Kode &amp; Kategori Budget</strong> dari <strong>TOR ({tor.torNumber})</strong>.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -2168,7 +2207,10 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           const allCasReportApproved =
             activeCas.length > 0 && activeCas.every(isCaReportClosedAndAcc);
           const canTriggerFinalFinancialClosure =
-            allStagesHaveCa && allCasReported && allCasReportApproved;
+            allStagesHaveCa &&
+            allCasReported &&
+            allCasReportApproved &&
+            allExecSummariesCompleted;
 
           const lastReportedCa =
             reportedAdvances.length > 0
@@ -2224,10 +2266,10 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                       <strong>{tor.programName || organizationName}</strong> — {tor.title}
                     </td>
                     <td className="font-bold py-1.5 px-2.5 border border-black">
-                      Laporan CA Ditutup &amp; Di-ACC
+                      Kelengkapan CA &amp; Exec. Summary
                     </td>
                     <td className="py-1.5 px-2.5 border border-black font-bold">
-                      {reportedAdvances.length} / {activeCas.length} Cash Advance
+                      CA: {reportedAdvances.length}/{activeCas.length} · Exec. Summary: {completedExecSummaries.length}/{execSummaryItems.length}
                     </td>
                   </tr>
                   <tr className="align-top">
@@ -2257,7 +2299,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                   className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13.5px]"
                   style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
                 >
-                  1. Rekapitulasi Akumulasi Dana per Kode Budget &amp; Master Budget
+                  1. Rekapitulasi Akumulasi Dana per Kode &amp; Kategori Budget
                 </div>
                 <table className="w-full table-fixed text-left border-collapse border border-black text-[12px]">
                   <thead>
@@ -2269,7 +2311,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                         Kode Budget
                       </th>
                       <th className="py-1.5 px-2.5 w-[27%] border border-black">
-                        Jenis Kegiatan (berdasarkan Budget / Outcome)
+                        Kategori Budget
                       </th>
                       <th className="py-1.5 px-2 w-[12%] text-right border border-black">
                         Uang Muka Diterima (Rp)
@@ -2506,6 +2548,8 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                                 ? `TELAH DILAPORKAN (${reportedAdvances.length}/${activeCas.length} CA)`
                                 : canTriggerFinalFinancialClosure
                                 ? 'SIAP DILAPORKAN'
+                                : allStagesHaveCa && allCasReported && allCasReportApproved && !allExecSummariesCompleted
+                                ? 'MENUNGGU EXEC. SUMMARY SELESAI'
                                 : 'MENUNGGU TUTUP & ACC CA'
                             }
                           />
@@ -2642,10 +2686,10 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
         <div className="border-b-2 border-slate-900 pb-2 flex flex-col sm:flex-row sm:items-end justify-between gap-2">
           <div>
             <h2 className="text-sm sm:text-base font-extrabold tracking-wide uppercase text-slate-900">
-              LAPORAN KEUANGAN &amp; REKAPITULASI AKUMULASI DANA PER KODE BUDGET
+              LAPORAN KEUANGAN &amp; REKAPITULASI AKUMULASI DANA PER KODE &amp; KATEGORI BUDGET
             </h2>
             <p className="text-xs text-slate-600">
-              {organizationName} — Akumulasi Uang Muka &amp; Realisasi Belanja Berdasarkan Kode Budget dan Master Budget
+              {organizationName} — Akumulasi Uang Muka &amp; Realisasi Belanja Berdasarkan Kode &amp; Kategori Budget
             </p>
           </div>
           <div className="text-xs font-mono text-slate-700">
@@ -2676,7 +2720,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                     Kode Budget
                   </th>
                   <th className="py-2.5 px-2.5 w-[26.5%] border-r border-slate-700 align-middle">
-                    Jenis Kegiatan (berdasarkan Budget / Outcome)
+                    Kategori Budget
                   </th>
                   <th className="py-2.5 px-2 w-[12%] text-right border-r border-slate-700 align-middle">
                     Uang Muka Diterima (Rp)
@@ -2873,7 +2917,10 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
           const allCasReportApproved =
             activeCas.length > 0 && activeCas.every(isCaReportClosedAndAcc);
           const canTriggerFinalFinancialClosure =
-            allStagesHaveCa && allCasReported && allCasReportApproved;
+            allStagesHaveCa &&
+            allCasReported &&
+            allCasReportApproved &&
+            allExecSummariesCompleted;
 
           const lastReportedCa =
             reportedAdvances.length > 0
@@ -2908,10 +2955,20 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                       {closedOnlyCas.length}/{activeCas.length}
                     </strong>
                   </span>
-                  <span className="font-semibold text-slate-700">
+                  <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
                     CA Ditutup &amp; Di-ACC:{' '}
                     <strong className="font-mono text-emerald-700">
-                      {reportedAdvances.length} / {activeCas.length} Cash Advance
+                      {reportedAdvances.length}/{activeCas.length}
+                    </strong>
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
+                    Exec. Summary Selesai:{' '}
+                    <strong
+                      className={`font-mono ${
+                        allExecSummariesCompleted ? 'text-emerald-700' : 'text-amber-700'
+                      }`}
+                    >
+                      {completedExecSummaries.length}/{execSummaryItems.length}
                     </strong>
                   </span>
                 </div>
@@ -2927,7 +2984,7 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                     : 'bg-amber-50/60 border-amber-200 text-amber-900'
                 }`}
               >
-                <div className="space-y-0.5">
+                <div className="space-y-0.5 min-w-0 flex-1">
                   <div className="font-bold flex items-center gap-1.5">
                     <ShieldCheck className="w-4 h-4 shrink-0" />
                     <span>
@@ -2936,16 +2993,26 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                         : isFinalReported
                         ? 'Laporan Keuangan Akhir Telah Dilaporkan — Menunggu Pemeriksaan Finance Manager / Persetujuan Director'
                         : canTriggerFinalFinancialClosure
-                        ? 'Seluruh Laporan Cash Advance Telah Ditutup & Di-ACC — Siap Melaporkan Laporan Keuangan Akhir'
-                        : 'Syarat Tombol Laporkan Laporan Keuangan Akhir: Seluruh Laporan Cash Advance Harus Sudah Ditutup & Di-ACC'}
+                        ? 'Seluruh Cash Advance & Executive Summary Telah Selesai — Siap Melaporkan Laporan Keuangan Akhir'
+                        : 'Syarat Laporan Keuangan Final: Seluruh Cash Advance (Ditutup & Di-ACC) dan Seluruh Executive Summary Harus Sudah Selesai'}
                     </span>
                   </div>
                   <p className="text-[11px] opacity-90">
                     {canTriggerFinalFinancialClosure
-                      ? 'Seluruh laporan Cash Advance telah ditutup dan di-ACC oleh Finance Manager & Direktur. Silakan klik tombol Laporkan untuk mengajukan Laporan Keuangan Akhir.'
-                      : `Saat ini ${closedOnlyCas.length}/${activeCas.length} laporan CA telah ditutup dan ${reportedAdvances.length}/${activeCas.length} laporan CA telah di-ACC oleh Finance Manager & Direktur. Tombol Laporkan akan muncul otomatis setelah seluruh laporan CA ditutup dan di-ACC.`}
+                      ? 'Seluruh laporan Cash Advance telah ditutup & di-ACC dan seluruh Executive Summary terkait telah diselesaikan. Silakan klik tombol Laporkan untuk mengajukan Laporan Keuangan Akhir.'
+                      : `Saat ini ${reportedAdvances.length}/${activeCas.length} Cash Advance telah ditutup & di-ACC dan ${completedExecSummaries.length}/${execSummaryItems.length} Executive Summary telah selesai (Completed). Penggunaan dana dari setiap Cash Advance yang laporannya telah selesai tetap tercatat dan terakumulasi pada tabel di atas.`}
                   </p>
                 </div>
+
+                {!canTriggerFinalFinancialClosure && !allExecSummariesCompleted && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateStage(6)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white hover:bg-amber-50 text-amber-900 border border-amber-300 font-semibold text-xs cursor-pointer shrink-0"
+                  >
+                    <span>Selesaikan Exec. Summary (Tahap 06) →</span>
+                  </button>
+                )}
 
                 {canTriggerFinalFinancialClosure && (
                   <div className="flex flex-wrap items-center gap-1.5 shrink-0">
@@ -3102,6 +3169,8 @@ export const DownstreamStagesView: React.FC<DownstreamStagesViewProps> = ({
                           ? `TELAH DILAPORKAN (${reportedAdvances.length}/${activeCas.length} CA)`
                           : canTriggerFinalFinancialClosure
                           ? 'SIAP DILAPORKAN'
+                          : allStagesHaveCa && allCasReported && allCasReportApproved && !allExecSummariesCompleted
+                          ? 'MENUNGGU EXEC. SUMMARY SELESAI'
                           : 'MENUNGGU TUTUP & ACC CA'
                       }
                     />
