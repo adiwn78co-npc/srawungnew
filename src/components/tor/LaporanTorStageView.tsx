@@ -21,6 +21,7 @@ import {
   TorSpecificObjectiveItem,
   TorTimelineItem,
   TorMonitoringItem,
+  User,
 } from '../../types/index.js';
 import { api } from '../../lib/api.js';
 import { formatIndonesianDate } from '../../lib/dateUtils.js';
@@ -115,6 +116,7 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
   const [notulenRecords, setNotulenRecords] = useState<MeetingMinutesRecord[]>([]);
   const [docRecords, setDocRecords] = useState<ActivityDocumentationRecord[]>([]);
   const [monitoringItems, setMonitoringItems] = useState<MonitoringReportItem[]>([]);
+  const [systemUsers, setSystemUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [exportingDocx, setExportingDocx] = useState<boolean>(false);
 
@@ -207,14 +209,16 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
   const loadAllSources = useCallback(async () => {
     setLoading(true);
     try {
-      const [notulens, docsList, singleDoc, monRes] = await Promise.all([
+      const [notulens, docsList, singleDoc, monRes, usersList] = await Promise.all([
         api.getMeetingMinutes(tor.id).catch(() => []),
         api.getDocumentationList(tor.id).catch(() => []),
         api.getDocumentation(tor.id).catch(() => null),
         api.getMonitoringReports(tor.id).catch(() => ({ items: [] as MonitoringReportItem[] })),
+        api.getUsers().catch(() => [] as User[]),
       ]);
 
       setNotulenRecords(Array.isArray(notulens) ? notulens : []);
+      if (Array.isArray(usersList)) setSystemUsers(usersList);
 
       if (Array.isArray(docsList) && docsList.length > 0) {
         setDocRecords(docsList);
@@ -229,6 +233,15 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
       setLoading(false);
     }
   }, [tor.id]);
+
+  const financeManagerUser = useMemo(
+    () => systemUsers.find((u) => u.isActive !== false && u.role === 'finance'),
+    [systemUsers]
+  );
+  const directorUser = useMemo(
+    () => systemUsers.find((u) => u.isActive !== false && u.role === 'director'),
+    [systemUsers]
+  );
 
   useEffect(() => {
     loadAllSources();
@@ -792,9 +805,24 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
               stageIndex: 8,
               sectionKey: null,
               title: 'Tahap 08 — Laporan Keuangan Akhir',
-              subtitle: `Akumulasi kode budget & penutupan laporan keuangan akhir (${tor.torNumber})`,
-              countLabel: activeCashAdvances.length > 0 ? 'Tersedia' : 'Menunggu CA',
-              isAvailable: activeCashAdvances.length > 0,
+              subtitle: `Akumulasi Master Budget & penutupan laporan keuangan akhir (${tor.torNumber})`,
+              countLabel:
+                activeCashAdvances.length === 0
+                  ? 'Menunggu CA'
+                  : activeCashAdvances.every(
+                      (ca) =>
+                        Boolean(ca.isReported) &&
+                        (ca.reportApprovalStatus === 'Telah Disetujui' || Boolean(ca.reportApprovedAt))
+                    )
+                  ? 'Siap Dilaporkan'
+                  : 'Menunggu Tutup & ACC CA',
+              isAvailable:
+                activeCashAdvances.length > 0 &&
+                activeCashAdvances.every(
+                  (ca) =>
+                    Boolean(ca.isReported) &&
+                    (ca.reportApprovalStatus === 'Telah Disetujui' || Boolean(ca.reportApprovedAt))
+                ),
               subLinks: [],
             },
           ].map((row) => (
@@ -1888,13 +1916,13 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                             1. Diajukan Oleh (Pemohon / PIC)
                           </th>
                           <th className="w-1/4 border border-black px-2 py-1.5 font-bold text-center">
-                            2. Diperiksa Oleh (Finance)
+                            2. Diperiksa Oleh (Finance Manager)
                           </th>
                           <th className="w-1/4 border border-black px-2 py-1.5 font-bold text-center">
                             3. Disetujui Oleh (Executive Director)
                           </th>
                           <th className="w-1/4 border border-black px-2 py-1.5 font-bold text-center">
-                            4. Dicairkan Oleh (Kasir / Finance)
+                            4. Dikonfirmasi &amp; Dicairkan Oleh (Finance Manager)
                           </th>
                         </tr>
                       </thead>
@@ -1944,7 +1972,9 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                                   documentNumber={record.advanceNumber}
                                   roleCode="FIN"
                                   signerName={
-                                    record.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'
+                                    record.signatures?.verifiedBy?.name ||
+                                    financeManagerUser?.name ||
+                                    '-'
                                   }
                                   signDate={
                                     record.signatures?.verifiedBy?.date || record.requestDate
@@ -1954,14 +1984,20 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                               ) : (
                                 `[${
                                   record.signatures?.verifiedBy?.status ||
-                                  'Menunggu Verifikasi Finance'
+                                  'Menunggu Verifikasi Finance Manager'
                                 }]`
                               )}
                             </div>
                             <div className="font-bold underline">
-                              {record.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'}
+                              {record.signatures?.verifiedBy?.name ||
+                                financeManagerUser?.name ||
+                                '-'}
                             </div>
-                            <div className="text-[12px]">Finance Specialist</div>
+                            <div className="text-[12px]">
+                              {record.signatures?.verifiedBy?.roleTitle ||
+                                financeManagerUser?.roleTitle ||
+                                'Finance Manager'}
+                            </div>
                             <div className="text-[11.5px] mt-1">
                               Tanggal:{' '}
                               {record.signatures?.verifiedBy?.date
@@ -1980,7 +2016,9 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                                   documentNumber={record.advanceNumber}
                                   roleCode="DIR"
                                   signerName={
-                                    record.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'
+                                    record.signatures?.approvedBy?.name ||
+                                    directorUser?.name ||
+                                    '-'
                                   }
                                   signDate={
                                     record.signatures?.approvedBy?.date || record.requestDate
@@ -1990,14 +2028,20 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                               ) : (
                                 `[${
                                   record.signatures?.approvedBy?.status ||
-                                  'Pending'
+                                  'Menunggu Otorisasi Direktur'
                                 }]`
                               )}
                             </div>
                             <div className="font-bold underline">
-                              {record.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'}
+                              {record.signatures?.approvedBy?.name ||
+                                directorUser?.name ||
+                                '-'}
                             </div>
-                            <div className="text-[12px]">Executive Director</div>
+                            <div className="text-[12px]">
+                              {record.signatures?.approvedBy?.roleTitle ||
+                                directorUser?.roleTitle ||
+                                'Executive Director'}
+                            </div>
                             <div className="text-[11.5px] mt-1">
                               Tanggal:{' '}
                               {record.signatures?.approvedBy?.date
@@ -2013,23 +2057,33 @@ export const LaporanTorStageView: React.FC<LaporanTorStageViewProps> = ({
                                 <ApprovalBarcodeStamp
                                   compact
                                   documentNumber={record.advanceNumber}
-                                  roleCode="CSH"
+                                  roleCode="FM"
                                   signerName={
-                                    record.signatures?.disbursedBy?.name || 'Ratna Sari'
+                                    record.signatures?.disbursedBy?.name ||
+                                    financeManagerUser?.name ||
+                                    '-'
                                   }
                                   signDate={
                                     record.signatures?.disbursedBy?.date || record.requestDate
                                   }
-                                  statusLabel="DICAIRKAN"
+                                  statusLabel="DIKONFIRMASI & DICAIRKAN"
                                 />
+                              ) : record.status === 'Disetujui' ? (
+                                '[Menunggu Konfirmasi Finance Manager]'
                               ) : (
-                                '[Belum Dicairkan]'
+                                '[Menunggu ACC Direktur]'
                               )}
                             </div>
                             <div className="font-bold underline">
-                              {record.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                              {record.signatures?.disbursedBy?.name ||
+                                financeManagerUser?.name ||
+                                '-'}
                             </div>
-                            <div className="text-[12px]">Kasir / Finance Officer</div>
+                            <div className="text-[12px]">
+                              {record.signatures?.disbursedBy?.roleTitle ||
+                                financeManagerUser?.roleTitle ||
+                                'Finance Manager'}
+                            </div>
                             <div className="text-[11.5px] mt-1">
                               Tanggal:{' '}
                               {record.signatures?.disbursedBy?.date

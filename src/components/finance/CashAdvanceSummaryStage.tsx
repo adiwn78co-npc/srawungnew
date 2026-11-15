@@ -28,7 +28,11 @@ import { formatRupiah } from '../../lib/terbilang.js';
 import { api } from '../../lib/api.js';
 import { useOrganizationSettings } from '../../lib/organizationSettings.js';
 import { downloadElementAsPdf } from '../../lib/pdfDownload.js';
-import { resolveMasterBudgetByCode } from '../../lib/masterBudgetStorage.js';
+import {
+  resolveMasterBudgetByCode,
+  syncMasterBudgetLookupWithServerMap,
+} from '../../lib/masterBudgetStorage.js';
+import { hydrateProgramBudgetDatasetsFromServer } from '../../lib/programBudgetStorage.js';
 import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
 
 interface SummaryRowState {
@@ -117,6 +121,38 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
   const [summaryMeta, setSummaryMeta] = useState<Record<string, any>>({});
   const [isApprovingStage, setIsApprovingStage] = useState<boolean>(false);
   const [showClosurePanel, setShowClosurePanel] = useState<boolean>(false);
+  const [systemUsers, setSystemUsers] = useState<User[]>([]);
+
+  const [, setBudgetHydrationTick] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getUsers()
+      .then((list) => {
+        if (active && Array.isArray(list)) setSystemUsers(list);
+      })
+      .catch(() => {});
+    api
+      .getFinanceProgramBudgets()
+      .then((map) => {
+        if (!active || !map) return;
+        hydrateProgramBudgetDatasetsFromServer(map);
+        syncMasterBudgetLookupWithServerMap(map);
+        setBudgetHydrationTick((t) => t + 1);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const financeManagerUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'finance'
+  );
+  const directorUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'director'
+  );
 
   const timelineItems = getEffectiveTimelineItems(tor);
 
@@ -1354,7 +1390,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   signerName={
                                     closingCa.reportVerifiedByName ||
                                     closingCa.signatures?.verifiedBy?.name ||
-                                    'Ratna Kusuma, S.E.'
+                                    financeManagerUser?.name ||
+                                    '-'
                                   }
                                   signDate={
                                     closingCa.reportVerifiedAt ||
@@ -1363,9 +1400,9 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   }
                                   statusLabel={
                                     isFinVerified
-                                      ? 'TERVERIFIKASI FINANCE'
+                                      ? 'TERVERIFIKASI FINANCE MANAGER'
                                       : closingCa.isReported
-                                      ? 'MENUNGGU PEMERIKSAAN FINANCE'
+                                      ? 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                                       : 'MENUNGGU LAPORAN DITUTUP'
                                   }
                                 />
@@ -1373,9 +1410,12 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                               <div className="font-bold underline">
                                 {closingCa.reportVerifiedByName ||
                                   closingCa.signatures?.verifiedBy?.name ||
-                                  'Ratna Kusuma, S.E.'}
+                                  financeManagerUser?.name ||
+                                  '-'}
                               </div>
-                              <div className="text-[11.5px]">Finance &amp; Compliance</div>
+                              <div className="text-[11.5px]">
+                                {financeManagerUser?.roleTitle || 'Finance Manager'}
+                              </div>
                             </td>
                             <td className="py-2.5 px-2 border border-black">
                               <div className="my-1.5 flex justify-center">
@@ -1387,7 +1427,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   signerName={
                                     closingCa.reportApprovedByName ||
                                     closingCa.signatures?.approvedBy?.name ||
-                                    'Dr. Hendra Wijaya'
+                                    directorUser?.name ||
+                                    '-'
                                   }
                                   signDate={
                                     closingCa.reportApprovedAt ||
@@ -1399,16 +1440,19 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                       ? 'DISETUJUI DIRECTOR'
                                       : isFinVerified
                                       ? 'MENUNGGU PERSETUJUAN DIRECTOR'
-                                      : 'MENUNGGU PEMERIKSAAN FINANCE'
+                                      : 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                                   }
                                 />
                               </div>
                               <div className="font-bold underline">
                                 {closingCa.reportApprovedByName ||
                                   closingCa.signatures?.approvedBy?.name ||
-                                  'Dr. Hendra Wijaya'}
+                                  directorUser?.name ||
+                                  '-'}
                               </div>
-                              <div className="text-[11.5px]">Executive Director</div>
+                              <div className="text-[11.5px]">
+                                {directorUser?.roleTitle || 'Executive Director'}
+                              </div>
                             </td>
                           </tr>
                         </tbody>
@@ -1748,14 +1792,15 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                 signerName={
                                   closingCa.reportVerifiedByName ||
                                   closingCa.signatures?.verifiedBy?.name ||
-                                  'Ratna Kusuma, S.E.'
+                                  financeManagerUser?.name ||
+                                  '-'
                                 }
                                 signDate={closingCa.reportVerifiedAt || closingCa.reportedAt || closingCa.requestDate}
                                 statusLabel={
                                   isFinVerified
-                                    ? 'TERVERIFIKASI FINANCE'
+                                    ? 'TERVERIFIKASI FINANCE MANAGER'
                                     : closingCa.isReported
-                                    ? 'MENUNGGU PEMERIKSAAN FINANCE'
+                                    ? 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                                     : 'MENUNGGU LAPORAN DITUTUP'
                                 }
                               />
@@ -1766,7 +1811,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                   onClick={() => handleApproveCaReport(closingCa.id, 'finance', 'approve')}
                                   className="px-2.5 py-1 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white text-[10px] font-semibold cursor-pointer shadow-2xs disabled:opacity-50"
                                 >
-                                  ✓ Periksa &amp; Verifikasi (Finance)
+                                  ✓ Periksa &amp; Verifikasi (Finance Manager)
                                 </button>
                               )}
                             </>
@@ -1775,10 +1820,13 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                       </div>
                       <div>
                         <div className="font-semibold underline">
-                          {closingCa.reportVerifiedByName || closingCa.signatures?.verifiedBy?.name || 'Ratna Kusuma, S.E.'}
+                          {closingCa.reportVerifiedByName ||
+                            closingCa.signatures?.verifiedBy?.name ||
+                            financeManagerUser?.name ||
+                            '-'}
                         </div>
                         <div className="text-[10.5px] text-slate-600">
-                          Finance &amp; Compliance
+                          {financeManagerUser?.roleTitle || 'Finance Manager'}
                         </div>
                       </div>
                     </div>
@@ -1805,7 +1853,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                 signerName={
                                   closingCa.reportApprovedByName ||
                                   closingCa.signatures?.approvedBy?.name ||
-                                  'Dr. Hendra Wijaya'
+                                  directorUser?.name ||
+                                  '-'
                                 }
                                 signDate={
                                   closingCa.reportApprovedAt ||
@@ -1817,7 +1866,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                                     ? 'DISETUJUI DIRECTOR'
                                     : isFinVerified
                                     ? 'MENUNGGU PERSETUJUAN DIRECTOR'
-                                    : 'MENUNGGU PEMERIKSAAN FINANCE'
+                                    : 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                                 }
                               />
                               {isFinVerified && !isDirApproved && (
@@ -1836,10 +1885,13 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                       </div>
                       <div>
                         <div className="font-semibold underline">
-                          {closingCa.reportApprovedByName || closingCa.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'}
+                          {closingCa.reportApprovedByName ||
+                            closingCa.signatures?.approvedBy?.name ||
+                            directorUser?.name ||
+                            '-'}
                         </div>
                         <div className="text-[10.5px] text-slate-600">
-                          Executive Director
+                          {directorUser?.roleTitle || 'Executive Director'}
                         </div>
                       </div>
                     </div>
@@ -2273,6 +2325,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
           {/* ========================================================================= */}
           {(() => {
             const activeCas = cashAdvances.filter((c) => c.status !== 'Ditolak');
+            const isCaReportClosedAndAcc = (c: CashAdvanceRecord) =>
+              Boolean(c.isReported) &&
+              (c.reportApprovalStatus === 'Telah Disetujui' || Boolean(c.reportApprovedAt));
+            const approvedReportCas = activeCas.filter(isCaReportClosedAndAcc);
+
             const coveredStageCount =
               timelineItems.length === 0
                 ? activeCas.length > 0
@@ -2291,39 +2348,26 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
               activeCas.length > 0 && coveredStageCount >= totalStageCount;
             const allCasReported =
               activeCas.length > 0 && activeCas.every((c) => Boolean(c.isReported));
-            const canTriggerFinalFinancialClosure = allStagesHaveCa && allCasReported;
+            const allCasReportApproved =
+              activeCas.length > 0 && activeCas.every(isCaReportClosedAndAcc);
+            const canTriggerFinalFinancialClosure =
+              allStagesHaveCa && allCasReported && allCasReportApproved;
 
             const lastReportedCa =
-              reportedAdvances.length > 0
+              approvedReportCas.length > 0
+                ? approvedReportCas[approvedReportCas.length - 1]
+                : reportedAdvances.length > 0
                 ? reportedAdvances[reportedAdvances.length - 1]
                 : null;
 
-            // Complement upgrade from last financial report approval or summaryMeta
-            const isFinalReported =
-              Boolean(summaryMeta.summaryReportedAt) ||
-              (canTriggerFinalFinancialClosure && Boolean(lastReportedCa?.isReported));
+            const isFinalReported = Boolean(summaryMeta.summaryReportedAt);
             const isFinalVerifiedByFinance =
               Boolean(summaryMeta.summaryVerifiedAt) ||
               summaryMeta.summaryApprovalStatus === 'Menunggu Persetujuan Director' ||
-              summaryMeta.summaryApprovalStatus === 'Telah Disetujui' ||
-              (canTriggerFinalFinancialClosure &&
-                reportedAdvances.length > 0 &&
-                reportedAdvances.every(
-                  (c) =>
-                    Boolean(c.reportVerifiedAt) ||
-                    c.reportApprovalStatus === 'Menunggu Persetujuan Director' ||
-                    c.reportApprovalStatus === 'Telah Disetujui'
-                ));
+              summaryMeta.summaryApprovalStatus === 'Telah Disetujui';
             const isFinalApprovedByDirector =
               Boolean(summaryMeta.summaryApprovedAt) ||
-              summaryMeta.summaryApprovalStatus === 'Telah Disetujui' ||
-              (canTriggerFinalFinancialClosure &&
-                reportedAdvances.length > 0 &&
-                reportedAdvances.every(
-                  (c) =>
-                    Boolean(c.reportApprovedAt) ||
-                    c.reportApprovalStatus === 'Telah Disetujui'
-                ));
+              summaryMeta.summaryApprovalStatus === 'Telah Disetujui';
 
             const effectiveSignDate =
               summaryMeta.reportDate || reportDate || new Date().toISOString().slice(0, 10);
@@ -2332,7 +2376,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
               <div className="pt-4 space-y-2.5 border-t border-slate-200">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs sm:text-sm font-bold text-black uppercase tracking-wide">
-                    RINGKASAN AKHIR (AKUMULASI LAPORAN YANG TELAH DITUTUP)
+                    RINGKASAN AKHIR (AKUMULASI LAPORAN YANG TELAH DITUTUP &amp; DI-ACC)
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
@@ -2341,10 +2385,16 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         {coveredStageCount}/{totalStageCount}
                       </strong>
                     </span>
-                    <span className="font-semibold text-slate-700">
-                      Laporan yang Telah Ditutup:{' '}
+                    <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 font-medium">
+                      CA Ditutup:{' '}
                       <strong className="font-mono text-[#1E3A8A]">
-                        {reportedAdvances.length} / {activeCas.length} Cash Advance
+                        {reportedAdvances.length}/{activeCas.length}
+                      </strong>
+                    </span>
+                    <span className="font-semibold text-slate-700">
+                      CA Ditutup &amp; Di-ACC:{' '}
+                      <strong className="font-mono text-emerald-700">
+                        {approvedReportCas.length} / {activeCas.length} Cash Advance
                       </strong>
                     </span>
                   </div>
@@ -2365,22 +2415,24 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                       <FileCheck2 className="w-4 h-4 shrink-0" />
                       <span>
                         {isFinalApprovedByDirector
-                          ? 'Laporan Keuangan Akhir Telah Ditutup, Diperiksa Finance & Disetujui Director'
+                          ? 'Laporan Keuangan Akhir Telah Ditutup, Diperiksa Finance Manager & Disetujui Director'
+                          : isFinalReported
+                          ? 'Laporan Keuangan Akhir Telah Dilaporkan — Menunggu Pemeriksaan Finance Manager / Persetujuan Director'
                           : canTriggerFinalFinancialClosure
-                          ? 'Seluruh Tahap Implementasi Memiliki Cash Advance & Telah Dilaporkan — Siap Tutup Laporan Keuangan Akhir'
-                          : 'Syarat Tutup Laporan Keuangan Akhir: Semua Tahap Implementasi Memiliki Cash Advance & Seluruh CA Telah Dilaporkan'}
+                          ? 'Seluruh Laporan Cash Advance Telah Ditutup & Di-ACC — Siap Melaporkan Laporan Keuangan Akhir'
+                          : 'Syarat Tombol Laporkan Laporan Keuangan Akhir: Seluruh Laporan Cash Advance Harus Sudah Ditutup & Di-ACC'}
                       </span>
                     </div>
                     <p className="text-[11px] opacity-90">
                       {canTriggerFinalFinancialClosure
-                        ? 'Silakan klik tombol di bawah untuk melaporkan Laporan Keuangan Akhir, lalu diperiksa oleh Finance dan disetujui oleh Director (complement upgrade otomatis dengan Laporan Keuangan Tahap 08).'
-                        : `Saat ini ${coveredStageCount}/${totalStageCount} tahap implementasi memiliki CA dan ${reportedAdvances.length}/${activeCas.length} CA telah ditutup laporannya.`}
+                        ? 'Seluruh laporan Cash Advance telah ditutup dan di-ACC oleh Finance Manager & Direktur. Silakan klik tombol Laporkan di bawah untuk mengajukan Laporan Keuangan Akhir.'
+                        : `Saat ini ${reportedAdvances.length}/${activeCas.length} laporan CA telah ditutup dan ${approvedReportCas.length}/${activeCas.length} laporan CA telah di-ACC oleh Finance Manager & Direktur. Tombol Laporkan akan muncul otomatis setelah seluruh laporan CA ditutup dan di-ACC.`}
                     </p>
                   </div>
 
                   {canTriggerFinalFinancialClosure && (
                     <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                      {!summaryMeta.summaryReportedAt && (
+                      {!isFinalReported && (
                         <button
                           type="button"
                           disabled={isApprovingStage}
@@ -2388,7 +2440,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#1E3A8A] hover:bg-[#1E40AF] text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
                         >
                           <Send className="w-3.5 h-3.5" />
-                          <span>Tutup Laporan &amp; Laporkan Lap. Keuangan Akhir</span>
+                          <span>Laporkan Laporan Keuangan Akhir</span>
                         </button>
                       )}
                       {isFinalReported && !isFinalVerifiedByFinance && (
@@ -2399,7 +2451,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold text-xs shadow-2xs cursor-pointer disabled:opacity-50"
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Periksa Lap. Keuangan Akhir (Finance)</span>
+                          <span>Periksa Lap. Keuangan Akhir (Finance Manager)</span>
                         </button>
                       )}
                       {isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
@@ -2523,11 +2575,13 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         }
                         statusLabel={
                           isFinalReported
-                            ? `TELAH DILAPORKAN (${reportedAdvances.length}/${activeCas.length} CA)`
-                            : 'BELUM ADA LAPORAN DITUTUP'
+                            ? `TELAH DILAPORKAN (${approvedReportCas.length}/${activeCas.length} CA)`
+                            : canTriggerFinalFinancialClosure
+                            ? 'SIAP DILAPORKAN'
+                            : 'MENUNGGU TUTUP & ACC CA'
                         }
                       />
-                      {canTriggerFinalFinancialClosure && !summaryMeta.summaryReportedAt && (
+                      {canTriggerFinalFinancialClosure && !isFinalReported && (
                         <button
                           type="button"
                           disabled={isApprovingStage}
@@ -2564,7 +2618,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           summaryMeta.summaryVerifiedByName ||
                           lastReportedCa?.reportVerifiedByName ||
                           activeCas[0]?.signatures?.verifiedBy?.name ||
-                          'Ratna Kusuma, S.E.'
+                          financeManagerUser?.name ||
+                          '-'
                         }
                         signDate={
                           summaryMeta.summaryVerifiedAt ||
@@ -2573,9 +2628,9 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         }
                         statusLabel={
                           isFinalVerifiedByFinance
-                            ? 'TERVERIFIKASI FINANCE'
+                            ? 'TERVERIFIKASI FINANCE MANAGER'
                             : isFinalReported
-                            ? 'MENUNGGU PEMERIKSAAN FINANCE'
+                            ? 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                             : 'MENUNGGU LAPORAN DITUTUP'
                         }
                       />
@@ -2586,7 +2641,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           onClick={() => handleApproveSummary('finance')}
                           className="px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[10.5px] font-semibold cursor-pointer shadow-2xs print:hidden"
                         >
-                          ✓ Periksa &amp; Verifikasi (Finance)
+                          ✓ Periksa &amp; Verifikasi (Finance Manager)
                         </button>
                       )}
                     </div>
@@ -2595,10 +2650,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         {summaryMeta.summaryVerifiedByName ||
                           lastReportedCa?.reportVerifiedByName ||
                           activeCas[0]?.signatures?.verifiedBy?.name ||
-                          'Ratna Kusuma, S.E.'}
+                          financeManagerUser?.name ||
+                          '-'}
                       </div>
                       <div className="text-[11px] text-slate-600">
-                        Finance &amp; Compliance
+                        {financeManagerUser?.roleTitle || 'Finance Manager'}
                       </div>
                     </div>
                   </div>
@@ -2615,7 +2671,8 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                           summaryMeta.summaryApprovedByName ||
                           lastReportedCa?.reportApprovedByName ||
                           activeCas[0]?.signatures?.approvedBy?.name ||
-                          'Dr. Hendra Wijaya'
+                          directorUser?.name ||
+                          '-'
                         }
                         signDate={
                           summaryMeta.summaryApprovedAt ||
@@ -2627,7 +2684,7 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                             ? 'DISETUJUI DIRECTOR (FINAL)'
                             : isFinalVerifiedByFinance
                             ? 'MENUNGGU PERSETUJUAN DIRECTOR'
-                            : 'MENUNGGU PEMERIKSAAN FINANCE'
+                            : 'MENUNGGU PEMERIKSAAN FINANCE MANAGER'
                         }
                       />
                       {isFinalVerifiedByFinance && !isFinalApprovedByDirector && (
@@ -2646,10 +2703,11 @@ export const CashAdvanceSummaryStage: React.FC<CashAdvanceSummaryStageProps> = (
                         {summaryMeta.summaryApprovedByName ||
                           lastReportedCa?.reportApprovedByName ||
                           activeCas[0]?.signatures?.approvedBy?.name ||
-                          'Dr. Hendra Wijaya'}
+                          directorUser?.name ||
+                          '-'}
                       </div>
                       <div className="text-[11px] text-slate-600">
-                        Executive Director
+                        {directorUser?.roleTitle || 'Executive Director'}
                       </div>
                     </div>
                   </div>

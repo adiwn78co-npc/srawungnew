@@ -295,9 +295,9 @@ function getNextTorSequenceForYear(data: ReturnType<typeof db.getData>, targetYe
 }
 
 async function startServer() {
-  // Pastikan proses inisialisasi database (termasuk pembacaan dari MySQL jika dikonfigurasi)
-  // telah benar-benar selesai sebelum inisialisasi akun maupun sebelum server menerima request.
-  await db.ready();
+  // Jalankan inisialisasi MySQL di latar belakang agar port 3000 langsung aktif (< 1 detik) pada cold start,
+  // sementara setiap endpoint /api/* tetap menunggu dbReadyTask sebelum memproses request.
+  const dbReadyTask = db.ready();
 
   const app = express();
   // Pastikan seluruh async route handler pada Express 4 meneruskan Promise rejection ke error middleware
@@ -417,24 +417,36 @@ async function startServer() {
     ) {
       return envSecret;
     }
-    const secretFilePath = path.join(__dirname, 'data', '.session_secret');
-    try {
-      if (fs.existsSync(secretFilePath)) {
-        const stored = fs.readFileSync(secretFilePath, 'utf-8').trim();
-        if (stored.length >= 32) {
-          return stored;
+    const candidates = [
+      path.join(process.cwd(), 'data', '.session_secret'),
+      '/tmp/.meal_session_secret',
+    ];
+    for (const secretFilePath of candidates) {
+      try {
+        if (fs.existsSync(secretFilePath)) {
+          const stored = fs.readFileSync(secretFilePath, 'utf-8').trim();
+          if (stored.length >= 32) {
+            return stored;
+          }
         }
+      } catch {
+        // try next candidate
       }
-      const generated = crypto.randomBytes(32).toString('hex');
-      const dataDir = path.dirname(secretFilePath);
-      if (!fs.existsSync(dataDir)) {
-        fs.mkdirSync(dataDir, { recursive: true });
-      }
-      fs.writeFileSync(secretFilePath, generated, { encoding: 'utf-8', mode: 0o600 });
-      return generated;
-    } catch {
-      return crypto.randomBytes(32).toString('hex');
     }
+    const generated = crypto.randomBytes(32).toString('hex');
+    for (const secretFilePath of candidates) {
+      try {
+        const dataDir = path.dirname(secretFilePath);
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true });
+        }
+        fs.writeFileSync(secretFilePath, generated, { encoding: 'utf-8', mode: 0o600 });
+        return generated;
+      } catch {
+        // try next writable candidate
+      }
+    }
+    return generated;
   }
 
   const SESSION_HMAC_SECRET = resolvePersistentSessionSecret();
@@ -716,12 +728,18 @@ async function startServer() {
     });
   }
 
-    if (db.isOperational()) {
-      ensureUserSecurityFieldsInitialized();
-      if (!db.isMysqlReady() && !db.isStrictMysqlRequired()) {
-        await db.flushWrites();
+  const finishDbUserBootstrap = dbReadyTask
+    .then(async () => {
+      if (db.isOperational()) {
+        ensureUserSecurityFieldsInitialized();
+        if (!db.isMysqlReady() && !db.isStrictMysqlRequired()) {
+          await db.flushWrites();
+        }
       }
-    }
+    })
+    .catch((err) => {
+      console.error('[DB Startup] Background initialization error:', err);
+    });
 
   // Cryptographic HMAC-SHA256 Session Token (bound to user passwordHash, role, and active status)
   function computeTokenHmac(payloadB64: string, user: User): Buffer {
@@ -907,8 +925,8 @@ async function startServer() {
 
   app.get('/api/health', async (_req: Request, res: Response) => {
     const diag = db.getDiagnostics();
-    res.status(diag.operational ? 200 : 503).json({
-      status: diag.operational ? 'ok' : 'unavailable',
+    res.status(200).json({
+      status: diag.operational ? 'ok' : 'starting',
       database: diag,
       timestamp: new Date().toISOString(),
     });
@@ -932,7 +950,10 @@ async function startServer() {
 
     // 0. Database Operational Guard (Prevents serving placeholder/seed state or losing writes if MySQL is unreachable)
     if (!db.isOperational()) {
-      await db.ready();
+      await finishDbUserBootstrap;
+      if (!db.isOperational()) {
+        await db.ready();
+      }
       if (!db.isOperational()) {
         if (isWriteMethod) {
           console.error(
@@ -5774,17 +5795,23 @@ async function startServer() {
         },
         verifiedBy: {
           name: '',
-          roleTitle: 'Finance Specialist',
+          roleTitle: 'Finance Manager',
           date: '',
           status: 'Pending',
           notes: '',
         },
         approvedBy: {
           name: '',
-          roleTitle: 'Director',
+          roleTitle: 'Executive Director',
           date: '',
           status: 'Pending',
           notes: '',
+        },
+        disbursedBy: {
+          name: '',
+          roleTitle: 'Finance Manager',
+          date: '',
+          isDisbursed: false,
         },
       },
       status: (body.status as any) || 'Draft',
@@ -5843,7 +5870,7 @@ async function startServer() {
   });
 
   // Close Cash Advance Report ("Tutup Laporan" in Ringkasan Cash Advance + Mandatory Expensify PDF Link)
-  app.post('/api/cash-advances/:id/close-report', (req: Request, res: Response) => {
+  app.post('/api/cash-advances/:id/close-report', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const { expensifyPdfLink, realizedAmount, reportNotes, itemRealizations } = req.body;
@@ -5977,11 +6004,12 @@ async function startServer() {
     if (!updatedRecord) {
       return res.status(404).json({ error: 'Cash Advance tidak ditemukan' });
     }
+    await db.commitPendingWrites('POST /api/cash-advances/:id/close-report');
     res.json(updatedRecord);
   });
 
   // Approve Closed Cash Advance Report (Sequential: Finance A2 -> Director)
-  app.post('/api/cash-advances/:id/approve-report', (req: Request, res: Response) => {
+  app.post('/api/cash-advances/:id/approve-report', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     const { stage, action, notes } = req.body; // stage: 'finance' | 'director', action: 'approve' | 'revision'
@@ -6168,6 +6196,8 @@ async function startServer() {
           details: `${stageLabel} telah memproses laporan pertanggungjawaban ${found.advanceNumber}. Status: ${found.reportApprovalStatus}.`,
           timestamp: nowIso,
         });
+        syncTorBudgetInDraft(draft, found.torId);
+        syncApprovalHubData(draft);
       });
     } catch (err: any) {
       return res.status(400).json({ error: err.message || 'Gagal memproses persetujuan laporan.' });
@@ -6176,6 +6206,7 @@ async function startServer() {
     if (!updatedRecord) {
       return res.status(404).json({ error: 'Cash Advance tidak ditemukan' });
     }
+    await db.commitPendingWrites('POST /api/cash-advances/:id/approve-report');
     res.json(updatedRecord);
   });
 
@@ -6339,8 +6370,8 @@ async function startServer() {
     res.json(record);
   });
 
-  // Finance verifikasi
-  app.post('/api/cash-advances/:id/verify', (req: Request, res: Response) => {
+  // Finance Manager verifikasi
+  app.post('/api/cash-advances/:id/verify', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (
@@ -6349,7 +6380,7 @@ async function startServer() {
       currentUser.role !== 'admin'
     ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya Finance (A2) yang berwenang memverifikasi pengajuan Cash Advance.',
+        error: 'Akses ditolak: Hanya Finance Manager yang berwenang memverifikasi pengajuan Cash Advance.',
       });
     }
     const { action, notes } = req.body; // action: 'verify' | 'revision' | 'reject'
@@ -6376,16 +6407,16 @@ async function startServer() {
         found.status = 'Diverifikasi Finance';
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || 'Finance Specialist',
+          roleTitle: currentUser.roleTitle || 'Finance Manager',
           date: nowIso.slice(0, 10),
           status: 'Terverifikasi',
-          notes: notes || 'Pagu anggaran, rincian biaya, dan kelengkapan administrasi telah diverifikasi valid.',
+          notes: notes || 'Pagu anggaran, rincian biaya, dan kelengkapan administrasi telah diverifikasi valid oleh Finance Manager.',
         };
       } else if (action === 'revision') {
         found.status = 'Perlu Perbaikan';
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || 'Finance Specialist',
+          roleTitle: currentUser.roleTitle || 'Finance Manager',
           date: nowIso.slice(0, 10),
           status: 'Perlu Perbaikan',
           notes: notes || 'Perlu penyesuaian rincian item kasbon.',
@@ -6394,10 +6425,10 @@ async function startServer() {
         found.status = 'Ditolak';
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || 'Finance Specialist',
+          roleTitle: currentUser.roleTitle || 'Finance Manager',
           date: nowIso.slice(0, 10),
           status: 'Ditolak',
-          notes: notes || 'Pengajuan ditolak oleh Finance.',
+          notes: notes || 'Pengajuan ditolak oleh Finance Manager.',
         };
       }
 
@@ -6487,11 +6518,12 @@ async function startServer() {
 
     if (errMsg) return res.status(403).json({ error: errMsg });
     if (!record) return res.status(404).json({ error: 'Cash Advance tidak ditemukan' });
+    await db.commitPendingWrites('POST /api/cash-advances/:id/verify');
     res.json(record);
   });
 
   // Director approve
-  app.post('/api/cash-advances/:id/approve', (req: Request, res: Response) => {
+  app.post('/api/cash-advances/:id/approve', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
@@ -6564,13 +6596,13 @@ async function startServer() {
           responsibleName: found.requesterName,
           actionLabel:
             action === 'approve'
-              ? 'Menyetujui Akhir Cash Advance (Direktur) — Siap Dicairkan Finance'
+              ? 'Menyetujui Akhir Cash Advance (Direktur) — Menunggu Konfirmasi Finance Manager'
               : 'Menolak Pengajuan Cash Advance (Direktur)',
           resultingStatus: hubItem.status,
           comment:
             found.signatures.approvedBy?.notes ||
             (action === 'approve'
-              ? 'Disetujui oleh Direktur. Menunggu pencairan dana oleh Finance ke rekening pengaju.'
+              ? 'Disetujui oleh Direktur. Menunggu konfirmasi & pencairan dana oleh Finance Manager ke rekening pengaju.'
               : 'Ditolak oleh Direktur.'),
           version: hubItem.version || 1,
         });
@@ -6593,7 +6625,7 @@ async function startServer() {
         eventType: action === 'approve' ? 'FINAL_COMPLETED' : 'REJECTED',
         message:
           action === 'approve'
-            ? `[Disetujui Direktur · Siap Dicairkan Finance] Cash Advance "${found.activityTitle}" (${found.advanceNumber}) sebesar ${formattedAmt} telah disetujui oleh Direktur (${currentUser.name}). Selanjutnya Finance akan mencairkan dana ke rekening pengaju (${found.requesterName} — ${found.bankName} ${found.bankAccountNumber}).`
+            ? `[Disetujui Direktur · Menunggu Konfirmasi Finance Manager] Cash Advance "${found.activityTitle}" (${found.advanceNumber}) sebesar ${formattedAmt} telah disetujui oleh Direktur (${currentUser.name}). Selanjutnya Finance Manager melakukan konfirmasi & pencairan dana ke rekening pengaju (${found.requesterName} — ${found.bankName} ${found.bankAccountNumber}).`
             : `[Cash Advance Request] "${found.activityTitle}" (${found.advanceNumber}) ditolak oleh Direktur (${currentUser.name}): "${found.signatures.approvedBy?.notes || ''}"`,
         targetUserIds:
           action === 'approve'
@@ -6618,11 +6650,12 @@ async function startServer() {
     });
 
     if (!record) return res.status(404).json({ error: 'Cash Advance tidak ditemukan' });
+    await db.commitPendingWrites('POST /api/cash-advances/:id/approve');
     res.json(record);
   });
 
-  // Disburse cash advance (Pencairan kasir/finance)
-  app.post('/api/cash-advances/:id/disburse', (req: Request, res: Response) => {
+  // Konfirmasi & Pencairan Cash Advance oleh Finance Manager (setelah disetujui Direktur)
+  app.post('/api/cash-advances/:id/disburse', async (req: Request, res: Response) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (
@@ -6631,10 +6664,10 @@ async function startServer() {
       currentUser.role !== 'admin'
     ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya Finance yang berwenang mencairkan dana Cash Advance.',
+        error: 'Akses ditolak: Hanya Finance Manager yang berwenang mengonfirmasi & mencairkan dana Cash Advance.',
       });
     }
-    const { transferReference, bankSource } = req.body;
+    const { transferReference, bankSource, notes } = req.body || {};
     const now = new Date();
     const nowIso = now.toISOString();
 
@@ -6645,16 +6678,33 @@ async function startServer() {
       const found = draft.cashAdvances.find((c) => c.id === id);
       if (!found) return;
       if (found.status !== 'Disetujui' && found.status !== 'Dicairkan') {
-        errMsg = `Cash Advance harus berstatus 'Disetujui' oleh Direktur sebelum dapat dicairkan oleh Finance (status saat ini: ${found.status}).`;
+        errMsg = `Cash Advance harus berstatus 'Disetujui' oleh Direktur sebelum dapat dikonfirmasi & dicairkan oleh Finance Manager (status saat ini: ${found.status}).`;
         return;
       }
+
+      const resolvedRoleTitle = currentUser.roleTitle || 'Finance Manager';
+      const resolvedRef =
+        typeof transferReference === 'string' && transferReference.trim()
+          ? transferReference.trim()
+          : `KONF-FM-${Date.now().toString().slice(-6)}`;
+      const resolvedBank =
+        typeof bankSource === 'string' && bankSource.trim()
+          ? bankSource.trim()
+          : 'Bank Mandiri Operasional Yayasan';
+      const resolvedNotes =
+        typeof notes === 'string' && notes.trim()
+          ? notes.trim()
+          : 'Telah dikonfirmasi & dicairkan oleh Finance Manager pasca persetujuan Direktur.';
 
       found.status = 'Dicairkan';
       found.signatures.disbursedBy = {
         name: currentUser.name,
+        roleTitle: resolvedRoleTitle,
         date: nowIso.slice(0, 10),
-        transferReference: transferReference || `TRF-WIJNA-${Date.now().toString().slice(-6)}`,
-        bankSource: bankSource || 'Bank Mandiri Operasional Yayasan',
+        confirmedAt: nowIso,
+        transferReference: resolvedRef,
+        bankSource: resolvedBank,
+        notes: resolvedNotes,
         isDisbursed: true,
       };
 
@@ -6686,9 +6736,11 @@ async function startServer() {
           ...hubItem.previewData,
           isDisbursed: true,
           disbursedByName: found.signatures.disbursedBy.name,
+          disbursedRoleTitle: resolvedRoleTitle,
           disbursedAt: found.signatures.disbursedBy.date,
           transferReference: found.signatures.disbursedBy.transferReference,
           bankSource: found.signatures.disbursedBy.bankSource,
+          disbursedNotes: resolvedNotes,
         };
         hubItem.updatedAt = nowIso;
         hubItem.timeline = hubItem.timeline || [];
@@ -6698,11 +6750,11 @@ async function startServer() {
           actorId: currentUser.id,
           actorName: currentUser.name,
           actorRoleCode: 'A2',
-          actorRoleTitle: currentUser.roleTitle || 'Kasir / Finance Officer',
+          actorRoleTitle: resolvedRoleTitle,
           responsibleName: found.requesterName,
-          actionLabel: 'Mencairkan Dana Cash Advance ke Pengaju (Finance)',
+          actionLabel: 'Konfirmasi & Pencairan Dana Cash Advance (Finance Manager)',
           resultingStatus: 'Approved',
-          comment: `Dana sebesar ${formattedAmt} telah dicairkan oleh ${currentUser.name} ke rekening pengaju ${found.bankName} (${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference} (${found.signatures.disbursedBy.bankSource}).`,
+          comment: `Dikonfirmasi & dicairkan sebesar ${formattedAmt} oleh ${currentUser.name} (${resolvedRoleTitle}) ke rekening pengaju ${found.bankName} (${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref: ${found.signatures.disbursedBy.transferReference} (${found.signatures.disbursedBy.bankSource}). Catatan: ${resolvedNotes}`,
           version: hubItem.version || 1,
         });
       }
@@ -6716,7 +6768,7 @@ async function startServer() {
         categoryCode: 'cash_advance',
         categoryLabel: 'Cash Advance Request',
         eventType: 'FINAL_COMPLETED',
-        message: `[Dana Telah Dicairkan · Cash Advance] Dana sebesar ${formattedAmt} untuk "${found.activityTitle}" (${found.advanceNumber}) telah dicairkan oleh Finance (${currentUser.name}) ke rekening pengaju (${found.bankName} · ${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference}.`,
+        message: `[Dikonfirmasi & Dicairkan · Finance Manager] Dana sebesar ${formattedAmt} untuk "${found.activityTitle}" (${found.advanceNumber}) telah dikonfirmasi dan dicairkan oleh Finance Manager (${currentUser.name}) ke rekening pengaju (${found.bankName} · ${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference}.`,
         targetUserIds: reqTargets,
         targetRoleCodes: ['R'],
         createdAt: nowIso,
@@ -6727,17 +6779,18 @@ async function startServer() {
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
         actorName: currentUser.name,
-        actorRole: currentUser.roleTitle,
-        action: 'Pencairan Kasbon (Disbursement)',
+        actorRole: resolvedRoleTitle,
+        action: 'Konfirmasi & Pencairan Kasbon (Finance Manager)',
         entityType: 'CASH_ADVANCE',
         entityId: found.id,
-        details: `Dana kasbon ${found.advanceNumber} sebesar ${formattedAmt} telah ditransfer kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}`,
+        details: `Finance Manager (${currentUser.name}) mengonfirmasi & mencairkan kasbon ${found.advanceNumber} sebesar ${formattedAmt} kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}. Catatan: ${resolvedNotes}`,
         timestamp: nowIso,
       });
     });
 
     if (errMsg) return res.status(400).json({ error: errMsg });
     if (!record) return res.status(404).json({ error: 'Cash Advance tidak ditemukan' });
+    await db.commitPendingWrites('POST /api/cash-advances/:id/disburse');
     res.json(record);
   });
 
@@ -6989,7 +7042,7 @@ async function startServer() {
   });
 
   // Sequential Approval for RINGKASAN AKHIR (Pemohon -> Finance -> Director)
-  app.post('/api/cash-advance-summaries/:torId/approve', (req: Request, res: Response) => {
+  app.post('/api/cash-advance-summaries/:torId/approve', async (req: Request, res: Response) => {
     const { torId } = req.params;
     const { stage, notes } = req.body; // stage: 'report' | 'finance' | 'director'
     const currentUser = getCurrentUser(req);
@@ -7004,13 +7057,38 @@ async function startServer() {
       (currentUser.roleTitle || '').toLowerCase().includes('finance');
     if (stage === 'finance' && !isFinanceActor) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya Finance yang berwenang memeriksa Laporan Keuangan Akhir pada tahap ini.',
+        error: 'Akses ditolak: Hanya Finance Manager yang berwenang memeriksa Laporan Keuangan Akhir pada tahap ini.',
       });
     }
     if (stage === 'director' && currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
       return res.status(403).json({
         error: 'Akses ditolak: Hanya Direktur Eksekutif yang berwenang memberikan persetujuan akhir Laporan Keuangan Akhir.',
       });
+    }
+
+    // Validasi wajib untuk tahap pelaporan Laporan Keuangan Akhir:
+    // Seluruh Cash Advance aktif pada ToR ini harus sudah ditutup (isReported) DAN telah di-ACC (reportApprovalStatus === 'Telah Disetujui')
+    const currentData = db.getData();
+    const activeCasForTor = (currentData.cashAdvances || []).filter(
+      (ca) => ca.torId === torId && ca.status !== 'Ditolak'
+    );
+    if (stage === 'report') {
+      if (activeCasForTor.length === 0) {
+        return res.status(400).json({
+          error: 'Belum terdapat Cash Advance aktif pada ToR ini untuk dilaporkan sebagai Laporan Keuangan Akhir.',
+        });
+      }
+      const unclosedOrUnapproved = activeCasForTor.filter(
+        (ca) =>
+          !ca.isReported ||
+          (ca.reportApprovalStatus !== 'Telah Disetujui' && !ca.reportApprovedAt)
+      );
+      if (unclosedOrUnapproved.length > 0) {
+        const sampleNums = unclosedOrUnapproved.map((ca) => ca.advanceNumber).join(', ');
+        return res.status(400).json({
+          error: `Laporan Keuangan Akhir hanya dapat dilaporkan apabila seluruh laporan Cash Advance telah ditutup dan di-ACC oleh pihak berwenang (Finance Manager & Direktur). Belum selesai: ${sampleNums}.`,
+        });
+      }
     }
 
     let updatedSummary: any = null;
@@ -7034,17 +7112,6 @@ async function startServer() {
         existing.summaryApprovalStatus = 'Menunggu Pemeriksaan Finance';
         existing.summaryReportedByName = defaultReporter;
         existing.summaryReportedAt = now.toISOString();
-        // Ensure all active CAs for this TOR are marked reported if closing final financial report
-        (draft.cashAdvances || []).forEach((ca) => {
-          if (ca.torId === torId && ca.status !== 'Ditolak') {
-            ca.isReported = true;
-            ca.reportedByName = ca.reportedByName || defaultReporter;
-            ca.reportedAt = ca.reportedAt || now.toISOString();
-            if (!ca.reportApprovalStatus) {
-              ca.reportApprovalStatus = 'Menunggu Pemeriksaan Finance';
-            }
-          }
-        });
       } else if (stage === 'finance') {
         if (!existing.summaryReportedByName) {
           existing.summaryReportedByName = defaultReporter;
@@ -7053,15 +7120,6 @@ async function startServer() {
         existing.summaryApprovalStatus = 'Menunggu Persetujuan Director';
         existing.summaryVerifiedByName = currentUser.name;
         existing.summaryVerifiedAt = now.toISOString();
-        (draft.cashAdvances || []).forEach((ca) => {
-          if (ca.torId === torId && ca.status !== 'Ditolak' && ca.isReported) {
-            ca.reportVerifiedByName = existing.summaryVerifiedByName;
-            ca.reportVerifiedAt = ca.reportVerifiedAt || now.toISOString();
-            if (ca.reportApprovalStatus !== 'Telah Disetujui') {
-              ca.reportApprovalStatus = 'Menunggu Persetujuan Director';
-            }
-          }
-        });
       } else if (stage === 'director') {
         if (!existing.summaryReportedByName) {
           existing.summaryReportedByName = defaultReporter;
@@ -7074,15 +7132,6 @@ async function startServer() {
         existing.summaryApprovalStatus = 'Telah Disetujui';
         existing.summaryApprovedByName = currentUser.name;
         existing.summaryApprovedAt = now.toISOString();
-        (draft.cashAdvances || []).forEach((ca) => {
-          if (ca.torId === torId && ca.status !== 'Ditolak' && ca.isReported) {
-            ca.reportVerifiedByName = ca.reportVerifiedByName || existing.summaryVerifiedByName;
-            ca.reportVerifiedAt = ca.reportVerifiedAt || now.toISOString();
-            ca.reportApprovedByName = existing.summaryApprovedByName;
-            ca.reportApprovedAt = ca.reportApprovedAt || now.toISOString();
-            ca.reportApprovalStatus = 'Telah Disetujui';
-          }
-        });
       }
 
       existing.updatedAt = now.toISOString();
@@ -7095,9 +7144,9 @@ async function startServer() {
       if (!draft.cashAdvanceAuditLogs[torId]) draft.cashAdvanceAuditLogs[torId] = [];
 
       const labelMap: Record<string, string> = {
-        report: 'Pelaporan Ringkasan Akhir oleh Pemohon',
-        finance: 'Pemeriksaan & Persetujuan Finance pada Ringkasan Akhir',
-        director: 'Persetujuan Akhir Director pada Ringkasan Akhir',
+        report: 'Pelaporan Laporan Keuangan Akhir oleh Pemohon',
+        finance: 'Pemeriksaan & Persetujuan Finance Manager pada Laporan Keuangan Akhir',
+        director: 'Persetujuan Akhir Director pada Laporan Keuangan Akhir',
       };
 
       draft.cashAdvanceAuditLogs[torId].unshift({
@@ -7113,12 +7162,12 @@ async function startServer() {
             : existing.summaryReportedByName,
         actorRole:
           stage === 'finance'
-            ? 'Finance & Compliance'
+            ? currentUser.roleTitle || 'Finance Manager'
             : stage === 'director'
-            ? 'Executive Director'
+            ? currentUser.roleTitle || 'Executive Director'
             : 'Pemohon / Pelaksana Kegiatan',
-        action: labelMap[stage] || 'Persetujuan Ringkasan Akhir',
-        details: notes || `Ringkasan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
+        action: labelMap[stage] || 'Persetujuan Laporan Keuangan Akhir',
+        details: notes || `Laporan Keuangan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
         totalAdvance: existing.totalAdvance || 0,
         totalSpent: existing.totalSpent || 0,
         totalRemaining: existing.totalRemaining || 0,
@@ -7132,14 +7181,15 @@ async function startServer() {
         actorId: currentUser.id,
         actorName: currentUser.name,
         actorRole: currentUser.roleTitle,
-        action: labelMap[stage] || 'Persetujuan Ringkasan Akhir',
+        action: labelMap[stage] || 'Persetujuan Laporan Keuangan Akhir',
         entityType: 'CASH_ADVANCE_SUMMARY',
         entityId: torId,
-        details: notes || `Ringkasan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
+        details: notes || `Laporan Keuangan Akhir telah diproses pada tahap ${labelMap[stage] || stage}. Status saat ini: ${existing.summaryApprovalStatus}.`,
         timestamp: now.toISOString(),
       });
     });
 
+    await db.commitPendingWrites('POST /api/cash-advance-summaries/:torId/approve');
     res.json({
       success: true,
       summary: updatedSummary,

@@ -795,7 +795,8 @@ export function ApprovalCenterView({
       } else if (canApproveTorEditRequest) {
         authorityLabel = 'Direktur · Keputusan ACC / Tolak Request Edit ToR';
       } else if (canDisburseCashAdvance) {
-        authorityLabel = 'Finance / Kasir · Eksekusi Pencairan Dana ke Pengaju';
+        authorityLabel =
+          'Finance Manager · Konfirmasi & Pencairan Dana (Setelah ACC Direktur)';
       } else if (isSelfSubmitter) {
         authorityLabel = 'R (Responsible) · Mode Tracking & Pengelolaan Dokumen Asli';
       } else if (isDesignatedDirector) {
@@ -1804,7 +1805,7 @@ export function ApprovalCenterView({
     }
   };
 
-  // Eksekusi pencairan dana Cash Advance oleh Finance (setelah disetujui Direktur) & kirim notifikasi ke pengaju
+  // Eksekusi Konfirmasi & Pencairan Dana Cash Advance oleh Finance Manager (setelah disetujui Direktur) & kirim notifikasi ke pengaju
   const handleDisburseCashAdvanceFromHub = async (
     item: ApprovalHubItem,
     customTransferRef?: string
@@ -1825,8 +1826,11 @@ export function ApprovalCenterView({
     try {
       await api.disburseCashAdvance(
         caId,
-        rawNote || `TRF-WIJNA-${Date.now().toString().slice(-6)}`,
-        'Bank Mandiri Operasional Yayasan'
+        rawNote || `KONF-FM-${Date.now().toString().slice(-6)}`,
+        'Bank Mandiri Operasional Yayasan',
+        rawNote
+          ? `Konfirmasi Finance Manager (${currentUser.name}): ${rawNote}`
+          : `Dikonfirmasi & dicairkan oleh Finance Manager (${currentUser.name}) pasca ACC Direktur.`
       );
       setCommentInput('');
       setInlineComments((prev) => {
@@ -1840,10 +1844,13 @@ export function ApprovalCenterView({
       }
       showToast(
         'success',
-        `Dana Cash Advance ${item.referenceNumber} berhasil dicairkan ke rekening pengaju (${item.responsibleUserName}) dan notifikasi telah dikirim.`
+        `Cash Advance ${item.referenceNumber} telah dikonfirmasi & dicairkan oleh Finance Manager ke rekening pengaju (${item.responsibleUserName}).`
       );
     } catch (err: any) {
-      showToast('error', err?.message || 'Gagal mencairkan dana Cash Advance.');
+      showToast(
+        'error',
+        err?.message || 'Gagal mengonfirmasi & mencairkan dana Cash Advance.'
+      );
     } finally {
       setActionLoading(false);
     }
@@ -2500,7 +2507,7 @@ export function ApprovalCenterView({
                         selectedItem.status === 'Reported to Director'
                       ? 'Akses Edit ToR (R):'
                       : auth.canDisburseCashAdvance
-                      ? 'Tindak Lanjut Finance (Setelah Disetujui Direktur):'
+                      ? 'Konfirmasi Finance Manager (Setelah Di-ACC Direktur):'
                       : 'Keputusan Pemeriksa:'}
                   </span>
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -2604,10 +2611,10 @@ export function ApprovalCenterView({
                             disabled={actionLoading}
                             onClick={() => handleDisburseCashAdvanceFromHub(selectedItem)}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#0F7B6C] hover:bg-[#0b6256] text-white text-[11px] font-semibold transition-colors disabled:opacity-50 cursor-pointer"
-                            title="Cairkan dana ke rekening pengaju & kirim notifikasi"
+                            title="Konfirmasi & cairkan dana ke rekening pengaju oleh Finance Manager"
                           >
                             <Wallet className="w-3 h-3" />
-                            <span>Cairkan Dana ke Pengaju &amp; Kirim Notifikasi</span>
+                            <span>Konfirmasi &amp; Cairkan Dana (Finance Manager)</span>
                           </button>
                         )}
 
@@ -2935,7 +2942,7 @@ export function ApprovalCenterView({
             }}
             placeholder={
               auth.canDisburseCashAdvance
-                ? 'Nomor Referensi Transfer (opsional)...'
+                ? 'No. Referensi Transfer / Catatan Konfirmasi Finance Manager...'
                 : 'Tulis komentar diskusi / audit...'
             }
             className="flex-1 min-w-[140px] h-7 px-2.5 text-[11px] rounded border border-[#E3E2E0] bg-white focus:outline-none focus:border-[#2F3437]"
@@ -2979,10 +2986,10 @@ export function ApprovalCenterView({
               disabled={actionLoading}
               onClick={() => handleDisburseCashAdvanceFromHub(doc, inlineVal)}
               className="inline-flex items-center gap-1 h-7 px-2.5 rounded bg-[#0F7B6C] hover:bg-[#0b6256] text-white text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap"
-              title="Cairkan dana ke rekening pengaju & kirim notifikasi"
+              title="Konfirmasi & cairkan dana oleh Finance Manager"
             >
               <Wallet className="w-3 h-3 shrink-0" />
-              <span>Cairkan Dana ke Pengaju</span>
+              <span>Konfirmasi &amp; Cairkan (Finance Manager)</span>
             </button>
           )}
 

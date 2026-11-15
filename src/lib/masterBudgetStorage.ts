@@ -164,58 +164,70 @@ function findProgramBudgetCategoryByCode(
 ): { code: string; budgetCategory: string; programName?: string } | null {
   if (!cleanCode || cleanCode === '-') return null;
   try {
-    const all: Record<string, any> | null = serverBudgetMapRef;
-    if (!all || typeof all !== 'object') return null;
-
     const normCode = cleanCode.trim().toLowerCase();
     const cleanId = (programId || '').trim();
     const cleanName = (programName || '').trim().toLowerCase();
 
-    const datasets = Object.values(all) as Array<{
-      programId?: string;
-      programName?: string;
-      masterBudgetCodes?: Array<{ code: string; budgetCategory: string }>;
-    }>;
+    const all: Record<string, any> | null = serverBudgetMapRef;
+    if (all && typeof all === 'object') {
+      const datasets = Object.entries(all)
+        .filter(([key, ds]) => key !== MASTER_BUDGET_ITEMS_SERVER_KEY && Boolean(ds))
+        .map(([, ds]) => ds as {
+          programId?: string;
+          programName?: string;
+          masterBudgetCodes?: Array<{ code: string; budgetCategory: string }>;
+        });
 
-    // If programId or programName is specified, search EXCLUSIVELY within that Program's datasets
-    if (cleanId || cleanName) {
-      const programDatasets = datasets.filter((ds) => {
-        if (!ds) return false;
-        if (cleanId && ds.programId === cleanId) return true;
-        if (!cleanId && cleanName && ds.programName?.trim().toLowerCase() === cleanName) {
-          return true;
+      // 1. Utamakan pencarian di Master Budget milik Program terpilih
+      if (cleanId || cleanName) {
+        const programDatasets = datasets.filter((ds) => {
+          if (cleanId && ds.programId === cleanId) return true;
+          if (cleanName && ds.programName?.trim().toLowerCase() === cleanName) return true;
+          return false;
+        });
+
+        for (const ds of programDatasets) {
+          const found = (ds.masterBudgetCodes || []).find(
+            (mc: any) => String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
+          );
+          if (found) {
+            const resolvedCode = String((found as any).code || (found as any).budgetCode || cleanCode).trim();
+            return {
+              code: resolvedCode,
+              budgetCategory: found.budgetCategory,
+              programName: ds.programName,
+            };
+          }
         }
-        return false;
-      });
+      }
 
-      for (const ds of programDatasets) {
-        const found = (ds.masterBudgetCodes || []).find(
-          (mc) => mc.code.trim().toLowerCase() === normCode
+      // 2. Fallback ke dataset Master Budget program lain jika kode terdaftar di Master Budget
+      for (const ds of datasets) {
+        const found = (ds?.masterBudgetCodes || []).find(
+          (mc: any) => String(mc?.code || mc?.budgetCode || '').trim().toLowerCase() === normCode
         );
         if (found) {
+          const resolvedCode = String((found as any).code || (found as any).budgetCode || cleanCode).trim();
           return {
-            code: found.code,
+            code: resolvedCode,
             budgetCategory: found.budgetCategory,
             programName: ds.programName,
           };
         }
       }
-      return null;
     }
 
-    // If no program context was passed, check if any dataset has this code
-    for (const ds of datasets) {
-      const found = (ds?.masterBudgetCodes || []).find(
-        (mc) => mc.code.trim().toLowerCase() === normCode
-      );
-      if (found) {
-        return {
-          code: found.code,
-          budgetCategory: found.budgetCategory,
-          programName: ds.programName,
-        };
-      }
+    // 3. Periksa daftar Master Budget global (__MASTER_BUDGET_ITEMS__)
+    const globalMasterItem = masterBudgetMemoryCache.find(
+      (b) => b.code.trim().toLowerCase() === normCode
+    );
+    if (globalMasterItem) {
+      return {
+        code: globalMasterItem.code,
+        budgetCategory: globalMasterItem.name || globalMasterItem.activityDescription || '-',
+      };
     }
+
     return null;
   } catch {
     return null;
@@ -245,7 +257,7 @@ export function resolveMasterBudgetByCode(
     ? cleanCode.split('.').slice(0, 2).join('.')
     : cleanCode;
 
-  // 1. Exclusive lookup in the selected Program's Master Budget Codes
+  // Eksklusif mengambil nama dari Master Budget (tanpa mencampur Outcome / Output / Activity)
   const matchedProgCode = findProgramBudgetCategoryByCode(
     cleanCode,
     fallbackTor?.programId,
@@ -253,38 +265,25 @@ export function resolveMasterBudgetByCode(
   );
 
   if (matchedProgCode) {
-    const outcomeDesc =
-      fallbackTor?.outcomeName ||
-      fallbackTor?.programName ||
-      matchedProgCode.programName ||
-      matchedProgCode.budgetCategory;
     return {
       code: matchedProgCode.code,
       masterName: matchedProgCode.budgetCategory,
       activityCode: derivedParent,
-      outcomeName: fallbackTor?.outcomeName || '',
-      outputName: fallbackTor?.outputName || '',
+      outcomeName: '',
+      outputName: '',
       activityDescription: matchedProgCode.budgetCategory,
-      formattedMasterLabel: `${matchedProgCode.budgetCategory} — ${derivedParent}: ${outcomeDesc}`,
+      formattedMasterLabel: matchedProgCode.budgetCategory,
     };
   }
 
-  // 2. Consistent fallback from the ToR's own Program -> Outcome -> Output -> Activity hierarchy
-  const fallbackName =
-    fallbackTor?.activityName || fallbackTor?.title || `Kode Anggaran ${cleanCode}`;
-  const fallbackOutcome =
-    fallbackTor?.outcomeName ||
-    fallbackTor?.outputName ||
-    fallbackTor?.programName ||
-    fallbackName;
-
   return {
     code: cleanCode,
-    masterName: fallbackName,
+    masterName: '-',
     activityCode: derivedParent,
-    outcomeName: fallbackOutcome,
-    outputName: fallbackTor?.outputName || '',
-    activityDescription: fallbackTor?.activityName || fallbackTor?.title || fallbackName,
-    formattedMasterLabel: `${fallbackName} — ${derivedParent}: ${fallbackOutcome}`,
+    outcomeName: '',
+    outputName: '',
+    activityDescription: '',
+    formattedMasterLabel: '-',
   };
 }
+

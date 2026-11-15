@@ -258,6 +258,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   const [disburseBankSource, setDisburseBankSource] = useState(
     'Bank Mandiri Operasional Yayasan'
   );
+  const [disburseConfirmNotes, setDisburseConfirmNotes] = useState('');
   const [caActionBusyId, setCaActionBusyId] = useState<string | null>(null);
   const [txFilterStatus, setTxFilterStatus] = useState<string>('all');
   const [txSearch, setTxSearch] = useState<string>('');
@@ -1131,21 +1132,23 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       await api.disburseCashAdvance(
         disbursingCa.id,
         disburseRefNumber.trim() || undefined,
-        disburseBankSource.trim() || undefined
+        disburseBankSource.trim() || undefined,
+        disburseConfirmNotes.trim() || undefined
       );
       const targetNum = disbursingCa.advanceNumber;
       setDisbursingCa(null);
       setDisburseRefNumber('');
+      setDisburseConfirmNotes('');
       onRefreshData?.();
       await fetchAndSyncAllData(false);
       setStatusBanner({
         type: 'success',
-        message: `Dana Cash Advance ${targetNum} berhasil dicairkan (Disbursed) dan tercatat sebagai Outstanding Advance hingga LPJ diverifikasi.`,
+        message: `Cash Advance ${targetNum} berhasil dikonfirmasi & dicairkan oleh Finance Manager ke MySQL dan tercatat sebagai Outstanding Advance hingga LPJ diverifikasi.`,
       });
     } catch (err: any) {
       setStatusBanner({
         type: 'error',
-        message: err?.message || 'Gagal mencairkan Cash Advance.',
+        message: err?.message || 'Gagal mengonfirmasi & mencairkan Cash Advance.',
       });
     } finally {
       setCaActionBusyId(null);
@@ -3108,22 +3111,23 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                                 </button>
                               )}
 
-                              {/* Disbursement Action */}
+                              {/* Konfirmasi & Pencairan Finance Manager Action */}
                               {rawCa &&
                                 rawCa.status === 'Disetujui' &&
-                                (isFinance || isDirector || isAdmin || isSystemAdmin) && (
+                                (isFinance || isAdmin || isSystemAdmin) && (
                                   <button
                                     type="button"
                                     disabled={isBusy}
                                     onClick={() => {
                                       setDisbursingCa(rawCa);
                                       setDisburseRefNumber(
-                                        `TRF-WIJNA-${Date.now().toString().slice(-6)}`
+                                        `KONF-FM-${Date.now().toString().slice(-6)}`
                                       );
+                                      setDisburseConfirmNotes('');
                                     }}
-                                    className="px-2 py-1 rounded-xs text-[11px] font-semibold bg-[#252525] text-white hover:bg-[#37352F] cursor-pointer disabled:opacity-50"
+                                    className="px-2.5 py-1 rounded-xs text-[11px] font-semibold bg-[#2B6E3F] text-white hover:bg-[#1E522D] cursor-pointer disabled:opacity-50"
                                   >
-                                    Cairkan Dana
+                                    Konfirmasi Finance Manager
                                   </button>
                                 )}
 
@@ -3843,14 +3847,14 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         </div>
       )}
 
-      {/* 5. Disburse Cash Advance Modal */}
+      {/* 5. Konfirmasi & Pencairan Cash Advance Modal (Finance Manager) */}
       {disbursingCa && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
           <div className="bg-white border border-[#E5E5E3] rounded-md max-w-md w-full p-5 shadow-lg space-y-4">
             <div className="flex items-center justify-between border-b border-[#EAEAEA] pb-3">
               <div>
                 <h3 className="text-sm font-bold text-[#252525]">
-                  Pencairan Dana Cash Advance (Disbursement)
+                  Konfirmasi &amp; Pencairan Dana (Finance Manager)
                 </h3>
                 <p className="text-[11px] font-mono text-[#2851C5]">
                   {disbursingCa.advanceNumber} —{' '}
@@ -3868,7 +3872,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <form onSubmit={handleConfirmDisburseCa} className="space-y-3 text-xs">
               <div>
                 <label className="block font-bold text-[#252525] mb-1">
-                  Nomor Referensi Bukti Transfer Bank
+                  Nomor Referensi Bukti Transfer / Konfirmasi
                 </label>
                 <input
                   type="text"
@@ -3890,6 +3894,18 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   className="w-full px-3 py-2 border border-[#D4D4D0] rounded-sm"
                 />
               </div>
+              <div>
+                <label className="block font-bold text-[#252525] mb-1">
+                  Catatan Konfirmasi Finance Manager
+                </label>
+                <input
+                  type="text"
+                  value={disburseConfirmNotes}
+                  onChange={(e) => setDisburseConfirmNotes(e.target.value)}
+                  placeholder="Konfirmasi pencairan pasca ACC Direktur..."
+                  className="w-full px-3 py-2 border border-[#D4D4D0] rounded-sm"
+                />
+              </div>
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#EAEAEA]">
                 <button
                   type="button"
@@ -3902,7 +3918,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   type="submit"
                   className="px-4 py-1.5 rounded-sm font-semibold bg-[#2B6E3F] text-white hover:bg-[#1E522D] cursor-pointer"
                 >
-                  Konfirmasi Pencairan Dana
+                  Konfirmasi &amp; Cairkan (Finance Manager)
                 </button>
               </div>
             </form>

@@ -5167,10 +5167,15 @@ function syncApprovalHubData(draft) {
     const isDisbursed = Boolean(
       ca.status === "Dicairkan" || ca.signatures?.disbursedBy?.isDisbursed
     );
-    const disbursedByName = ca.signatures?.disbursedBy?.name || "Ratna Sari";
+    const activeFinanceManager = (draft.users || []).find(
+      (u) => u.isActive !== false && u.role === "finance"
+    );
+    const disbursedByName = ca.signatures?.disbursedBy?.name || (isDisbursed ? activeFinanceManager?.name || raci.accountableFinanceUserName || "-" : "");
+    const disbursedRoleTitle = ca.signatures?.disbursedBy?.roleTitle || activeFinanceManager?.roleTitle || "Finance Manager";
     const disbursedAt = ca.signatures?.disbursedBy?.date || ca.updatedAt;
     const transferRef = ca.signatures?.disbursedBy?.transferReference;
     const bankSource = ca.signatures?.disbursedBy?.bankSource;
+    const disbursedNotes = ca.signatures?.disbursedBy?.notes;
     const defaultTimeline = existing?.timeline?.length ? existing.timeline : [
       {
         id: `tl-${itemId}-1`,
@@ -5219,14 +5224,14 @@ function syncApprovalHubData(draft) {
         {
           id: `tl-${itemId}-4`,
           timestamp: disbursedAt || ca.updatedAt,
-          actorId: raci.accountableFinanceUserId,
-          actorName: disbursedByName,
+          actorId: activeFinanceManager?.id || raci.accountableFinanceUserId,
+          actorName: disbursedByName || activeFinanceManager?.name || "Finance Manager",
           actorRoleCode: "A2",
-          actorRoleTitle: "Kasir / Finance Officer",
+          actorRoleTitle: disbursedRoleTitle,
           responsibleName: raci.responsibleUserName,
-          actionLabel: "Mencairkan Dana Cash Advance ke Pengaju (Finance)",
+          actionLabel: "Konfirmasi & Pencairan Dana Cash Advance (Finance Manager)",
           resultingStatus: "Approved",
-          comment: `Dana sebesar Rp ${Number(ca.totalAmount || 0).toLocaleString("id-ID")} telah dicairkan ke rekening ${ca.bankName} (${ca.bankAccountNumber} a.n. ${ca.bankAccountHolder})${transferRef ? ` \u2014 Ref: ${transferRef}` : ""}.`,
+          comment: `Dikonfirmasi & dicairkan sebesar Rp ${Number(ca.totalAmount || 0).toLocaleString("id-ID")} ke rekening ${ca.bankName} (${ca.bankAccountNumber} a.n. ${ca.bankAccountHolder})${transferRef ? ` \u2014 Ref: ${transferRef}` : ""}${disbursedNotes ? ` | Catatan: ${disbursedNotes}` : ""}.`,
           version: 1
         }
       ] : []
@@ -5271,9 +5276,11 @@ function syncApprovalHubData(draft) {
         plannedSettlementDate: ca.reportingDeadlineDate || parentTor.reportingDeadline || "-",
         isDisbursed,
         disbursedByName: isDisbursed ? disbursedByName : void 0,
+        disbursedRoleTitle,
         disbursedAt: isDisbursed ? disbursedAt : void 0,
         transferReference: isDisbursed ? transferRef : void 0,
         bankSource: isDisbursed ? bankSource : void 0,
+        disbursedNotes: isDisbursed ? disbursedNotes : void 0,
         attachments: [
           {
             label: `Referensi Dokumen ToR (${caTorNumber})`,
@@ -6482,7 +6489,7 @@ function executeApprovalHubAction(params) {
       (u) => u.isActive !== false && (u.role === "finance" || (u.roleTitle || "").toLowerCase().includes("finance") || (u.roleTitle || "").toLowerCase().includes("kasir"))
     ).map((u) => u.id);
     if (item.categoryCode === "cash_advance") {
-      notifMessage = `"${cleanItemTitle}" telah disetujui oleh Direktur (${actor.name}). Selanjutnya Finance akan mencairkan dana ke rekening pengaju (${item.responsibleUserName}).`;
+      notifMessage = `"${cleanItemTitle}" telah disetujui oleh Direktur (${actor.name}). Selanjutnya menunggu Konfirmasi & Pencairan Dana oleh Finance Manager ke rekening pengaju (${item.responsibleUserName}).`;
       notifTargets = Array.from(
         new Set([item.responsibleUserId, item.accountableFinanceUserId, ...allFinanceIds].filter(Boolean))
       );
@@ -8325,24 +8332,34 @@ async function startServer() {
     if (envSecret.length >= 16 && envSecret !== "replace_with_random_64_char_hex_secret") {
       return envSecret;
     }
-    const secretFilePath = path3.join(__dirname, "data", ".session_secret");
-    try {
-      if (fs3.existsSync(secretFilePath)) {
-        const stored = fs3.readFileSync(secretFilePath, "utf-8").trim();
-        if (stored.length >= 32) {
-          return stored;
+    const candidates = [
+      path3.join(process.cwd(), "data", ".session_secret"),
+      "/tmp/.meal_session_secret"
+    ];
+    for (const secretFilePath of candidates) {
+      try {
+        if (fs3.existsSync(secretFilePath)) {
+          const stored = fs3.readFileSync(secretFilePath, "utf-8").trim();
+          if (stored.length >= 32) {
+            return stored;
+          }
         }
+      } catch {
       }
-      const generated = crypto2.randomBytes(32).toString("hex");
-      const dataDir = path3.dirname(secretFilePath);
-      if (!fs3.existsSync(dataDir)) {
-        fs3.mkdirSync(dataDir, { recursive: true });
-      }
-      fs3.writeFileSync(secretFilePath, generated, { encoding: "utf-8", mode: 384 });
-      return generated;
-    } catch {
-      return crypto2.randomBytes(32).toString("hex");
     }
+    const generated = crypto2.randomBytes(32).toString("hex");
+    for (const secretFilePath of candidates) {
+      try {
+        const dataDir = path3.dirname(secretFilePath);
+        if (!fs3.existsSync(dataDir)) {
+          fs3.mkdirSync(dataDir, { recursive: true });
+        }
+        fs3.writeFileSync(secretFilePath, generated, { encoding: "utf-8", mode: 384 });
+        return generated;
+      } catch {
+      }
+    }
+    return generated;
   }
   const SESSION_HMAC_SECRET = resolvePersistentSessionSecret();
   const SESSION_TTL_MS = 12 * 60 * 60 * 1e3;
@@ -12426,17 +12443,23 @@ async function startServer() {
         },
         verifiedBy: {
           name: "",
-          roleTitle: "Finance Specialist",
+          roleTitle: "Finance Manager",
           date: "",
           status: "Pending",
           notes: ""
         },
         approvedBy: {
           name: "",
-          roleTitle: "Director",
+          roleTitle: "Executive Director",
           date: "",
           status: "Pending",
           notes: ""
+        },
+        disbursedBy: {
+          name: "",
+          roleTitle: "Finance Manager",
+          date: "",
+          isDisbursed: false
         }
       },
       status: body.status || "Draft",
@@ -12884,12 +12907,12 @@ async function startServer() {
     if (!record) return res.status(404).json({ error: "Cash Advance tidak ditemukan" });
     res.json(record);
   });
-  app.post("/api/cash-advances/:id/verify", (req, res) => {
+  app.post("/api/cash-advances/:id/verify", async (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== "finance" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya Finance (A2) yang berwenang memverifikasi pengajuan Cash Advance."
+        error: "Akses ditolak: Hanya Finance Manager yang berwenang memverifikasi pengajuan Cash Advance."
       });
     }
     const { action, notes } = req.body;
@@ -12909,16 +12932,16 @@ async function startServer() {
         found.status = "Diverifikasi Finance";
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || "Finance Specialist",
+          roleTitle: currentUser.roleTitle || "Finance Manager",
           date: nowIso.slice(0, 10),
           status: "Terverifikasi",
-          notes: notes || "Pagu anggaran, rincian biaya, dan kelengkapan administrasi telah diverifikasi valid."
+          notes: notes || "Pagu anggaran, rincian biaya, dan kelengkapan administrasi telah diverifikasi valid oleh Finance Manager."
         };
       } else if (action === "revision") {
         found.status = "Perlu Perbaikan";
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || "Finance Specialist",
+          roleTitle: currentUser.roleTitle || "Finance Manager",
           date: nowIso.slice(0, 10),
           status: "Perlu Perbaikan",
           notes: notes || "Perlu penyesuaian rincian item kasbon."
@@ -12927,10 +12950,10 @@ async function startServer() {
         found.status = "Ditolak";
         found.signatures.verifiedBy = {
           name: currentUser.name,
-          roleTitle: currentUser.roleTitle || "Finance Specialist",
+          roleTitle: currentUser.roleTitle || "Finance Manager",
           date: nowIso.slice(0, 10),
           status: "Ditolak",
-          notes: notes || "Pengajuan ditolak oleh Finance."
+          notes: notes || "Pengajuan ditolak oleh Finance Manager."
         };
       }
       found.updatedAt = nowIso;
@@ -12992,9 +13015,10 @@ async function startServer() {
     });
     if (errMsg) return res.status(403).json({ error: errMsg });
     if (!record) return res.status(404).json({ error: "Cash Advance tidak ditemukan" });
+    await db.commitPendingWrites("POST /api/cash-advances/:id/verify");
     res.json(record);
   });
-  app.post("/api/cash-advances/:id/approve", (req, res) => {
+  app.post("/api/cash-advances/:id/approve", async (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== "director" && currentUser.role !== "system_admin") {
@@ -13055,9 +13079,9 @@ async function startServer() {
           actorRoleCode: "Direktur",
           actorRoleTitle: currentUser.roleTitle || "Executive Director",
           responsibleName: found.requesterName,
-          actionLabel: action === "approve" ? "Menyetujui Akhir Cash Advance (Direktur) \u2014 Siap Dicairkan Finance" : "Menolak Pengajuan Cash Advance (Direktur)",
+          actionLabel: action === "approve" ? "Menyetujui Akhir Cash Advance (Direktur) \u2014 Menunggu Konfirmasi Finance Manager" : "Menolak Pengajuan Cash Advance (Direktur)",
           resultingStatus: hubItem.status,
-          comment: found.signatures.approvedBy?.notes || (action === "approve" ? "Disetujui oleh Direktur. Menunggu pencairan dana oleh Finance ke rekening pengaju." : "Ditolak oleh Direktur."),
+          comment: found.signatures.approvedBy?.notes || (action === "approve" ? "Disetujui oleh Direktur. Menunggu konfirmasi & pencairan dana oleh Finance Manager ke rekening pengaju." : "Ditolak oleh Direktur."),
           version: hubItem.version || 1
         });
       }
@@ -13075,7 +13099,7 @@ async function startServer() {
         categoryCode: "cash_advance",
         categoryLabel: "Cash Advance Request",
         eventType: action === "approve" ? "FINAL_COMPLETED" : "REJECTED",
-        message: action === "approve" ? `[Disetujui Direktur \xB7 Siap Dicairkan Finance] Cash Advance "${found.activityTitle}" (${found.advanceNumber}) sebesar ${formattedAmt} telah disetujui oleh Direktur (${currentUser.name}). Selanjutnya Finance akan mencairkan dana ke rekening pengaju (${found.requesterName} \u2014 ${found.bankName} ${found.bankAccountNumber}).` : `[Cash Advance Request] "${found.activityTitle}" (${found.advanceNumber}) ditolak oleh Direktur (${currentUser.name}): "${found.signatures.approvedBy?.notes || ""}"`,
+        message: action === "approve" ? `[Disetujui Direktur \xB7 Menunggu Konfirmasi Finance Manager] Cash Advance "${found.activityTitle}" (${found.advanceNumber}) sebesar ${formattedAmt} telah disetujui oleh Direktur (${currentUser.name}). Selanjutnya Finance Manager melakukan konfirmasi & pencairan dana ke rekening pengaju (${found.requesterName} \u2014 ${found.bankName} ${found.bankAccountNumber}).` : `[Cash Advance Request] "${found.activityTitle}" (${found.advanceNumber}) ditolak oleh Direktur (${currentUser.name}): "${found.signatures.approvedBy?.notes || ""}"`,
         targetUserIds: action === "approve" ? Array.from(/* @__PURE__ */ new Set([...reqTargets, ...financeUserIds])) : reqTargets,
         targetRoleCodes: action === "approve" ? ["R", "A2"] : ["R"],
         createdAt: nowIso,
@@ -13094,17 +13118,18 @@ async function startServer() {
       });
     });
     if (!record) return res.status(404).json({ error: "Cash Advance tidak ditemukan" });
+    await db.commitPendingWrites("POST /api/cash-advances/:id/approve");
     res.json(record);
   });
-  app.post("/api/cash-advances/:id/disburse", (req, res) => {
+  app.post("/api/cash-advances/:id/disburse", async (req, res) => {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (currentUser.role !== "finance" && currentUser.role !== "system_admin" && currentUser.role !== "admin") {
       return res.status(403).json({
-        error: "Akses ditolak: Hanya Finance yang berwenang mencairkan dana Cash Advance."
+        error: "Akses ditolak: Hanya Finance Manager yang berwenang mengonfirmasi & mencairkan dana Cash Advance."
       });
     }
-    const { transferReference, bankSource } = req.body;
+    const { transferReference, bankSource, notes } = req.body || {};
     const now = /* @__PURE__ */ new Date();
     const nowIso = now.toISOString();
     let record = null;
@@ -13114,15 +13139,22 @@ async function startServer() {
       const found = draft.cashAdvances.find((c) => c.id === id);
       if (!found) return;
       if (found.status !== "Disetujui" && found.status !== "Dicairkan") {
-        errMsg = `Cash Advance harus berstatus 'Disetujui' oleh Direktur sebelum dapat dicairkan oleh Finance (status saat ini: ${found.status}).`;
+        errMsg = `Cash Advance harus berstatus 'Disetujui' oleh Direktur sebelum dapat dikonfirmasi & dicairkan oleh Finance Manager (status saat ini: ${found.status}).`;
         return;
       }
+      const resolvedRoleTitle = currentUser.roleTitle || "Finance Manager";
+      const resolvedRef = typeof transferReference === "string" && transferReference.trim() ? transferReference.trim() : `KONF-FM-${Date.now().toString().slice(-6)}`;
+      const resolvedBank = typeof bankSource === "string" && bankSource.trim() ? bankSource.trim() : "Bank Mandiri Operasional Yayasan";
+      const resolvedNotes = typeof notes === "string" && notes.trim() ? notes.trim() : "Telah dikonfirmasi & dicairkan oleh Finance Manager pasca persetujuan Direktur.";
       found.status = "Dicairkan";
       found.signatures.disbursedBy = {
         name: currentUser.name,
+        roleTitle: resolvedRoleTitle,
         date: nowIso.slice(0, 10),
-        transferReference: transferReference || `TRF-WIJNA-${Date.now().toString().slice(-6)}`,
-        bankSource: bankSource || "Bank Mandiri Operasional Yayasan",
+        confirmedAt: nowIso,
+        transferReference: resolvedRef,
+        bankSource: resolvedBank,
+        notes: resolvedNotes,
         isDisbursed: true
       };
       found.updatedAt = nowIso;
@@ -13151,9 +13183,11 @@ async function startServer() {
           ...hubItem.previewData,
           isDisbursed: true,
           disbursedByName: found.signatures.disbursedBy.name,
+          disbursedRoleTitle: resolvedRoleTitle,
           disbursedAt: found.signatures.disbursedBy.date,
           transferReference: found.signatures.disbursedBy.transferReference,
-          bankSource: found.signatures.disbursedBy.bankSource
+          bankSource: found.signatures.disbursedBy.bankSource,
+          disbursedNotes: resolvedNotes
         };
         hubItem.updatedAt = nowIso;
         hubItem.timeline = hubItem.timeline || [];
@@ -13163,11 +13197,11 @@ async function startServer() {
           actorId: currentUser.id,
           actorName: currentUser.name,
           actorRoleCode: "A2",
-          actorRoleTitle: currentUser.roleTitle || "Kasir / Finance Officer",
+          actorRoleTitle: resolvedRoleTitle,
           responsibleName: found.requesterName,
-          actionLabel: "Mencairkan Dana Cash Advance ke Pengaju (Finance)",
+          actionLabel: "Konfirmasi & Pencairan Dana Cash Advance (Finance Manager)",
           resultingStatus: "Approved",
-          comment: `Dana sebesar ${formattedAmt} telah dicairkan oleh ${currentUser.name} ke rekening pengaju ${found.bankName} (${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference} (${found.signatures.disbursedBy.bankSource}).`,
+          comment: `Dikonfirmasi & dicairkan sebesar ${formattedAmt} oleh ${currentUser.name} (${resolvedRoleTitle}) ke rekening pengaju ${found.bankName} (${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref: ${found.signatures.disbursedBy.transferReference} (${found.signatures.disbursedBy.bankSource}). Catatan: ${resolvedNotes}`,
           version: hubItem.version || 1
         });
       }
@@ -13180,7 +13214,7 @@ async function startServer() {
         categoryCode: "cash_advance",
         categoryLabel: "Cash Advance Request",
         eventType: "FINAL_COMPLETED",
-        message: `[Dana Telah Dicairkan \xB7 Cash Advance] Dana sebesar ${formattedAmt} untuk "${found.activityTitle}" (${found.advanceNumber}) telah dicairkan oleh Finance (${currentUser.name}) ke rekening pengaju (${found.bankName} \xB7 ${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference}.`,
+        message: `[Dikonfirmasi & Dicairkan \xB7 Finance Manager] Dana sebesar ${formattedAmt} untuk "${found.activityTitle}" (${found.advanceNumber}) telah dikonfirmasi dan dicairkan oleh Finance Manager (${currentUser.name}) ke rekening pengaju (${found.bankName} \xB7 ${found.bankAccountNumber} a.n. ${found.bankAccountHolder}). Ref Transfer: ${found.signatures.disbursedBy.transferReference}.`,
         targetUserIds: reqTargets,
         targetRoleCodes: ["R"],
         createdAt: nowIso,
@@ -13190,16 +13224,17 @@ async function startServer() {
         id: `log-${Date.now()}`,
         actorId: currentUser.id,
         actorName: currentUser.name,
-        actorRole: currentUser.roleTitle,
-        action: "Pencairan Kasbon (Disbursement)",
+        actorRole: resolvedRoleTitle,
+        action: "Konfirmasi & Pencairan Kasbon (Finance Manager)",
         entityType: "CASH_ADVANCE",
         entityId: found.id,
-        details: `Dana kasbon ${found.advanceNumber} sebesar ${formattedAmt} telah ditransfer kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}`,
+        details: `Finance Manager (${currentUser.name}) mengonfirmasi & mencairkan kasbon ${found.advanceNumber} sebesar ${formattedAmt} kepada pengaju (${found.requesterName}). Ref: ${found.signatures.disbursedBy.transferReference}. Catatan: ${resolvedNotes}`,
         timestamp: nowIso
       });
     });
     if (errMsg) return res.status(400).json({ error: errMsg });
     if (!record) return res.status(404).json({ error: "Cash Advance tidak ditemukan" });
+    await db.commitPendingWrites("POST /api/cash-advances/:id/disburse");
     res.json(record);
   });
   app.delete("/api/cash-advances/:id", (req, res) => {

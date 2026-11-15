@@ -473,10 +473,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ action, notes }),
     }),
-  disburseCashAdvance: (id: string, transferReference?: string, bankSource?: string) =>
+  disburseCashAdvance: (
+    id: string,
+    transferReference?: string,
+    bankSource?: string,
+    notes?: string
+  ) =>
     request<CashAdvanceRecord>(`/api/cash-advances/${id}/disburse`, {
       method: 'POST',
-      body: JSON.stringify({ transferReference, bankSource }),
+      body: JSON.stringify({ transferReference, bankSource, notes }),
     }),
   closeCashAdvanceReport: (
     id: string,

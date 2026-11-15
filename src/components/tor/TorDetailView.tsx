@@ -868,7 +868,13 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                               <span aria-hidden="true">·</span>
                               <span>{ca.requesterName}</span>
                               <span aria-hidden="true">·</span>
-                              <span>{ca.status}</span>
+                              <span>
+                                {ca.status === 'Disetujui'
+                                  ? 'Disetujui Direktur (Menunggu Konfirmasi Finance Manager)'
+                                  : ca.status === 'Dicairkan'
+                                  ? 'Dikonfirmasi & Dicairkan (Finance Manager)'
+                                  : ca.status}
+                              </span>
                               <span aria-hidden="true">·</span>
                               <span
                                 className={
@@ -901,6 +907,18 @@ export const TorDetailView: React.FC<TorDetailViewProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1.5">
+                            {ca.status === 'Disetujui' &&
+                              (currentUser?.role === 'finance' ||
+                                currentUser?.role === 'system_admin' ||
+                                currentUser?.role === 'admin') && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCaDetailOpen(ca)}
+                                  className="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors cursor-pointer"
+                                >
+                                  Konfirmasi Finance Manager
+                                </button>
+                              )}
                             <button
                               type="button"
                               onClick={() => setCaDetailOpen(ca)}

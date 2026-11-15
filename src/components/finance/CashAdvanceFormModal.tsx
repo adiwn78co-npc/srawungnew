@@ -468,6 +468,28 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
   const [reportingCommitmentConfirmed, setReportingCommitmentConfirmed] = useState<boolean>(true);
   const [showHierarchyInfo, setShowHierarchyInfo] = useState<boolean>(false);
   const [existingTorAdvances, setExistingTorAdvances] = useState<CashAdvanceRecord[]>([]);
+  const [systemUsers, setSystemUsers] = useState<User[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    api
+      .getUsers()
+      .then((list) => {
+        if (active && Array.isArray(list)) setSystemUsers(list);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  const financeManagerUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'finance'
+  );
+  const directorUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'director'
+  );
 
   // Nomor Kasbon otomatis: persis sama seperti nama TOR namun dengan awalan CA
   const [advanceNumber, setAdvanceNumber] = useState<string>(() => {
@@ -1363,9 +1385,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                   <thead>
                     <tr className="bg-[#EFEFEF] font-bold">
                       <th className="py-1.5 px-2 w-1/4 border border-black">1. Diajukan Oleh</th>
-                      <th className="py-1.5 px-2 w-1/4 border border-black">2. Diperiksa Oleh</th>
-                      <th className="py-1.5 px-2 w-1/4 border border-black">3. Disetujui Oleh</th>
-                      <th className="py-1.5 px-2 w-1/4 border border-black">4. Dicairkan Oleh</th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">
+                        2. Diperiksa Oleh (Finance Manager)
+                      </th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">
+                        3. Disetujui Oleh (Executive Director)
+                      </th>
+                      <th className="py-1.5 px-2 w-1/4 border border-black">
+                        4. Dikonfirmasi &amp; Dicairkan Oleh (Finance Manager)
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1396,7 +1424,9 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                             documentNumber={advanceNumber || 'CA'}
                             roleCode="FIN"
                             signerName={
-                              existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'
+                              existingRecord?.signatures?.verifiedBy?.name ||
+                              financeManagerUser?.name ||
+                              '-'
                             }
                             signDate={existingRecord?.signatures?.verifiedBy?.date || requestDate}
                             statusLabel={
@@ -1405,9 +1435,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                           />
                         </div>
                         <div className="font-bold underline">
-                          {existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'}
+                          {existingRecord?.signatures?.verifiedBy?.name ||
+                            financeManagerUser?.name ||
+                            '-'}
                         </div>
-                        <div className="text-[11.5px]">Finance Specialist</div>
+                        <div className="text-[11.5px]">
+                          {existingRecord?.signatures?.verifiedBy?.roleTitle ||
+                            financeManagerUser?.roleTitle ||
+                            'Finance Manager'}
+                        </div>
                       </td>
                       <td className="py-2.5 px-2 border border-black">
                         <div className="my-1.5 flex justify-center">
@@ -1421,7 +1457,9 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                             documentNumber={advanceNumber || 'CA'}
                             roleCode="DIR"
                             signerName={
-                              existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'
+                              existingRecord?.signatures?.approvedBy?.name ||
+                              directorUser?.name ||
+                              '-'
                             }
                             signDate={existingRecord?.signatures?.approvedBy?.date || requestDate}
                             statusLabel={
@@ -1430,9 +1468,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                           />
                         </div>
                         <div className="font-bold underline">
-                          {existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'}
+                          {existingRecord?.signatures?.approvedBy?.name ||
+                            directorUser?.name ||
+                            '-'}
                         </div>
-                        <div className="text-[11.5px]">Executive Director</div>
+                        <div className="text-[11.5px]">
+                          {existingRecord?.signatures?.approvedBy?.roleTitle ||
+                            directorUser?.roleTitle ||
+                            'Executive Director'}
+                        </div>
                       </td>
                       <td className="py-2.5 px-2 border border-black">
                         <div className="my-1.5 flex justify-center">
@@ -1444,20 +1488,30 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                                 : 'pending'
                             }
                             documentNumber={advanceNumber || 'CA'}
-                            roleCode="CSH"
-                            signerName={existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                            roleCode="FM"
+                            signerName={
+                              existingRecord?.signatures?.disbursedBy?.name ||
+                              financeManagerUser?.name ||
+                              '-'
+                            }
                             signDate={existingRecord?.signatures?.disbursedBy?.date || requestDate}
                             statusLabel={
                               existingRecord?.signatures?.disbursedBy?.isDisbursed
-                                ? 'TELAH DICAIRKAN'
-                                : 'BELUM DICAIRKAN'
+                                ? 'DIKONFIRMASI & DICAIRKAN'
+                                : 'MENUNGGU KONFIRMASI FM'
                             }
                           />
                         </div>
                         <div className="font-bold underline">
-                          {existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                          {existingRecord?.signatures?.disbursedBy?.name ||
+                            financeManagerUser?.name ||
+                            '-'}
                         </div>
-                        <div className="text-[11.5px]">Kasir / Finance Officer</div>
+                        <div className="text-[11.5px]">
+                          {existingRecord?.signatures?.disbursedBy?.roleTitle ||
+                            financeManagerUser?.roleTitle ||
+                            'Finance Manager'}
+                        </div>
                       </td>
                     </tr>
                   </tbody>
@@ -2217,9 +2271,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                     <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wide border-b border-slate-200 pb-1 mb-2">
                       2. Diperiksa Oleh:
                     </div>
-                    <div className="text-[11px] text-slate-500">Finance Specialist</div>
+                    <div className="text-[11px] text-slate-500">
+                      {existingRecord?.signatures?.verifiedBy?.roleTitle ||
+                        financeManagerUser?.roleTitle ||
+                        'Finance Manager'}
+                    </div>
                     <div className="font-bold text-slate-800 mt-1">
-                      {existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'}
+                      {existingRecord?.signatures?.verifiedBy?.name ||
+                        financeManagerUser?.name ||
+                        '-'}
                     </div>
                     <div className="text-[10px] text-slate-500">Verifikator Anggaran</div>
                   </div>
@@ -2231,7 +2291,9 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                           documentNumber={advanceNumber || 'CA'}
                           roleCode="FIN"
                           signerName={
-                            existingRecord?.signatures?.verifiedBy?.name || 'Budi Hartono, S.E.'
+                            existingRecord?.signatures?.verifiedBy?.name ||
+                            financeManagerUser?.name ||
+                            '-'
                           }
                           signDate={existingRecord?.signatures?.verifiedBy?.date || requestDate}
                           statusLabel="TERVERIFIKASI"
@@ -2239,7 +2301,8 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                       </div>
                     ) : (
                       <span className="inline-block mb-1.5 px-1.5 py-0.5 rounded text-[9.5px] font-medium bg-amber-100 text-amber-800">
-                        {existingRecord?.signatures?.verifiedBy?.status || 'Menunggu Verifikasi'}
+                        {existingRecord?.signatures?.verifiedBy?.status ||
+                          'Menunggu Verifikasi Finance Manager'}
                       </span>
                     )}
                     <div>
@@ -2254,9 +2317,15 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                     <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wide border-b border-slate-200 pb-1 mb-2">
                       3. Disetujui Oleh:
                     </div>
-                    <div className="text-[11px] text-slate-500">Executive Director</div>
+                    <div className="text-[11px] text-slate-500">
+                      {existingRecord?.signatures?.approvedBy?.roleTitle ||
+                        directorUser?.roleTitle ||
+                        'Executive Director'}
+                    </div>
                     <div className="font-bold text-slate-800 mt-1">
-                      {existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'}
+                      {existingRecord?.signatures?.approvedBy?.name ||
+                        directorUser?.name ||
+                        '-'}
                     </div>
                     <div className="text-[10px] text-slate-500">Otorisasi Pencairan</div>
                   </div>
@@ -2268,7 +2337,9 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                           documentNumber={advanceNumber || 'CA'}
                           roleCode="DIR"
                           signerName={
-                            existingRecord?.signatures?.approvedBy?.name || 'Dr. Hendra Wijaya'
+                            existingRecord?.signatures?.approvedBy?.name ||
+                            directorUser?.name ||
+                            '-'
                           }
                           signDate={existingRecord?.signatures?.approvedBy?.date || requestDate}
                           statusLabel="DISETUJUI"
@@ -2283,17 +2354,25 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                   </div>
                 </div>
 
-                {/* 4. Dicairkan Oleh */}
+                {/* 4. Dikonfirmasi & Dicairkan Oleh */}
                 <div className="border border-slate-300 rounded p-3 flex flex-col justify-between bg-slate-50/50">
                   <div>
                     <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wide border-b border-slate-200 pb-1 mb-2">
-                      4. Dicairkan Oleh:
+                      4. Dikonfirmasi &amp; Dicairkan:
                     </div>
-                    <div className="text-[11px] text-slate-500">Kasir / Finance Officer</div>
+                    <div className="text-[11px] text-slate-500">
+                      {existingRecord?.signatures?.disbursedBy?.roleTitle ||
+                        financeManagerUser?.roleTitle ||
+                        'Finance Manager'}
+                    </div>
                     <div className="font-bold text-slate-800 mt-1">
-                      {existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                      {existingRecord?.signatures?.disbursedBy?.name ||
+                        financeManagerUser?.name ||
+                        '-'}
                     </div>
-                    <div className="text-[10px] text-slate-500">Penyalur Dana</div>
+                    <div className="text-[10px] text-slate-500">
+                      Konfirmasi &amp; Pencairan Pasca-ACC Direktur
+                    </div>
                   </div>
                   <div className="pt-3 border-t border-dashed border-slate-200 mt-3 text-[10px] text-slate-500 flex flex-col items-center text-center">
                     {existingRecord?.signatures?.disbursedBy?.isDisbursed ? (
@@ -2301,15 +2380,19 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                         <ApprovalBarcodeStamp
                           compact
                           documentNumber={advanceNumber || 'CA'}
-                          roleCode="CSH"
-                          signerName={existingRecord?.signatures?.disbursedBy?.name || 'Ratna Sari'}
+                          roleCode="FM"
+                          signerName={
+                            existingRecord?.signatures?.disbursedBy?.name ||
+                            financeManagerUser?.name ||
+                            '-'
+                          }
                           signDate={existingRecord?.signatures?.disbursedBy?.date || requestDate}
-                          statusLabel="DICAIRKAN"
+                          statusLabel="DIKONFIRMASI & DICAIRKAN"
                         />
                       </div>
                     ) : (
                       <span className="inline-block mb-1.5 px-1.5 py-0.5 rounded text-[9.5px] font-medium bg-slate-100 text-slate-500">
-                        Belum Dicairkan
+                        Menunggu Konfirmasi Finance Manager
                       </span>
                     )}
                     <div>

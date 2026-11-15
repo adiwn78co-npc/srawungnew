@@ -478,6 +478,9 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
     ...tors.map((t) => `apv-tor-${t.id}`),
     ...cashAdvances.map((ca) => `apv-ca-${ca.id}`),
     ...cashAdvances.filter((ca) => ca.isReported).map((ca) => `apv-finrep-${ca.id}`),
+    ...tors
+      .filter((t) => Boolean(draft.cashAdvanceSummaries?.[t.id]?.summaryReportedAt))
+      .map((t) => `apv-finsum-${t.id}`),
     ...meetingMinutes.map((mm) => `apv-notulen-${mm.id}`),
     ...docList.filter(Boolean).map((d) => `apv-doc-${d.id}`),
     ...monReports.filter((m) => m.toolId === 'EXEC-SUMMARY').map((m) => `apv-exec-${m.id}`),
@@ -756,10 +759,22 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
     const isDisbursed = Boolean(
       ca.status === 'Dicairkan' || ca.signatures?.disbursedBy?.isDisbursed
     );
-    const disbursedByName = ca.signatures?.disbursedBy?.name || 'Ratna Sari';
+    const activeFinanceManager = (draft.users || []).find(
+      (u) => u.isActive !== false && u.role === 'finance'
+    );
+    const disbursedByName =
+      ca.signatures?.disbursedBy?.name ||
+      (isDisbursed
+        ? activeFinanceManager?.name || raci.accountableFinanceUserName || '-'
+        : '');
+    const disbursedRoleTitle =
+      ca.signatures?.disbursedBy?.roleTitle ||
+      activeFinanceManager?.roleTitle ||
+      'Finance Manager';
     const disbursedAt = ca.signatures?.disbursedBy?.date || ca.updatedAt;
     const transferRef = ca.signatures?.disbursedBy?.transferReference;
     const bankSource = ca.signatures?.disbursedBy?.bankSource;
+    const disbursedNotes = ca.signatures?.disbursedBy?.notes;
 
     const defaultTimeline: ApprovalTimelineEvent[] = existing?.timeline?.length
       ? existing.timeline
@@ -820,14 +835,15 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
                 {
                   id: `tl-${itemId}-4`,
                   timestamp: disbursedAt || ca.updatedAt,
-                  actorId: raci.accountableFinanceUserId,
-                  actorName: disbursedByName,
+                  actorId: activeFinanceManager?.id || raci.accountableFinanceUserId,
+                  actorName: disbursedByName || activeFinanceManager?.name || 'Finance Manager',
                   actorRoleCode: 'A2' as const,
-                  actorRoleTitle: 'Kasir / Finance Officer',
+                  actorRoleTitle: disbursedRoleTitle,
                   responsibleName: raci.responsibleUserName,
-                  actionLabel: 'Mencairkan Dana Cash Advance ke Pengaju (Finance)',
+                  actionLabel:
+                    'Konfirmasi & Pencairan Dana Cash Advance (Finance Manager)',
                   resultingStatus: 'Approved' as ApprovalHubStatus,
-                  comment: `Dana sebesar Rp ${Number(ca.totalAmount || 0).toLocaleString('id-ID')} telah dicairkan ke rekening ${ca.bankName} (${ca.bankAccountNumber} a.n. ${ca.bankAccountHolder})${transferRef ? ` — Ref: ${transferRef}` : ''}.`,
+                  comment: `Dikonfirmasi & dicairkan sebesar Rp ${Number(ca.totalAmount || 0).toLocaleString('id-ID')} ke rekening ${ca.bankName} (${ca.bankAccountNumber} a.n. ${ca.bankAccountHolder})${transferRef ? ` — Ref: ${transferRef}` : ''}${disbursedNotes ? ` | Catatan: ${disbursedNotes}` : ''}.`,
                   version: 1,
                 },
               ]
@@ -882,9 +898,11 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
           ca.reportingDeadlineDate || parentTor.reportingDeadline || '-',
         isDisbursed,
         disbursedByName: isDisbursed ? disbursedByName : undefined,
+        disbursedRoleTitle,
         disbursedAt: isDisbursed ? disbursedAt : undefined,
         transferReference: isDisbursed ? transferRef : undefined,
         bankSource: isDisbursed ? bankSource : undefined,
+        disbursedNotes: isDisbursed ? disbursedNotes : undefined,
         attachments: [
           {
             label: `Referensi Dokumen ToR (${caTorNumber})`,
@@ -1029,7 +1047,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         sourceTorId: parentTor.id,
         sourceCashAdvanceId: ca.id,
         referenceNumber: finRefNumber,
-        title: `Laporan Keuangan Akhir: ${ca.activityTitle}`,
+        title: `Laporan Cash Advance (${caAdvanceNumber}): ${ca.activityTitle}`,
         groupType: 'financial_documents',
         categoryCode: 'laporan_keuangan_akhir',
         categoryLabel: CATEGORY_META.laporan_keuangan_akhir.label,
@@ -1054,7 +1072,7 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         previewData: {
           summaryText:
             ca.reportNotes ||
-            `Laporan pertanggungjawaban keuangan akhir atas Cash Advance ${ca.advanceNumber}.`,
+            `Laporan pertanggungjawaban keuangan atas Cash Advance ${ca.advanceNumber}.`,
           location: ca.location,
           activityPeriod: `${ca.activityStartDate} s/d ${ca.activityEndDate}`,
           cashAdvanceReferenceNumber: ca.advanceNumber,
@@ -1069,17 +1087,17 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
               : diffAmt > 0
               ? `Terdapat efisiensi/sisa dana sebesar Rp ${diffAmt.toLocaleString('id-ID')} yang telah dikembalikan ke kas organisasi.`
               : `Terdapat selisih kurang (minus) sebesar Rp ${Math.abs(diffAmt).toLocaleString('id-ID')} karena penyesuaian kebutuhan riil di lapangan.`),
-          expensifyPdfLink:
-            ca.expensifyPdfLink ||
-            'https://drive.google.com/file/d/expensify-verified-receipts/view',
+          expensifyPdfLink: ca.expensifyPdfLink || '',
           attachments: [
-            {
-              label: `Bukti Transaksi & PDF Expensify (${finRefNumber})`,
-              url:
-                ca.expensifyPdfLink ||
-                'https://drive.google.com/file/d/expensify-verified-receipts/view',
-              refCode: ca.advanceNumber,
-            },
+            ...(ca.expensifyPdfLink
+              ? [
+                  {
+                    label: `Bukti Transaksi & PDF Expensify (${finRefNumber})`,
+                    url: ca.expensifyPdfLink,
+                    refCode: ca.advanceNumber,
+                  },
+                ]
+              : []),
             {
               label: `Referensi Cash Advance (${ca.advanceNumber})`,
               url: `#ca-ref-${ca.id}`,
@@ -1090,6 +1108,197 @@ export function syncApprovalHubData(draft: DatabaseSchema): {
         updatedAt: existingFin?.updatedAt || ca.updatedAt,
       };
     }
+  }
+
+  // 3b. Sync Final Financial Report Summary per ToR (Laporan Keuangan Akhir Tahap 08) -> R -> A2 -> Direktur
+  for (const parentTor of tors) {
+    const sumObj = draft.cashAdvanceSummaries?.[parentTor.id];
+    if (!sumObj || !sumObj.summaryReportedAt) continue;
+
+    const finSumId = `apv-finsum-${parentTor.id}`;
+    const existingSum = draft.approvalHubItems[finSumId];
+    const hier = resolveHierarchyAndMonitoring(draft, parentTor);
+    const raci = resolveDynamicRaciForOutput(
+      draft,
+      hier.outputId,
+      parentTor.picId || parentTor.createdById,
+      parentTor.picName || parentTor.createdByName
+    );
+
+    const torCas = cashAdvances.filter(
+      (c) =>
+        c.torId === parentTor.id &&
+        c.status !== 'Ditolak' &&
+        Boolean(c.isReported) &&
+        (c.reportApprovalStatus === 'Telah Disetujui' || Boolean(c.reportApprovedAt))
+    );
+    const approvedAmt =
+      typeof sumObj.totalAdvance === 'number'
+        ? sumObj.totalAdvance
+        : torCas.reduce((s, c) => s + (Number(c.totalAmount) || 0), 0);
+    const realizedAmt =
+      typeof sumObj.totalSpent === 'number'
+        ? sumObj.totalSpent
+        : torCas.reduce(
+            (s, c) => s + (typeof c.realizedAmount === 'number' ? c.realizedAmount : Number(c.totalAmount) || 0),
+            0
+          );
+    const diffAmt = approvedAmt - realizedAmt;
+    const remainingAmt = diffAmt > 0 ? diffAmt : 0;
+
+    let sumStatus: ApprovalHubStatus = existingSum?.status || 'Pending Verification';
+    if (existingSum?.status === 'Archived') {
+      sumStatus = 'Archived';
+    } else if (sumObj.summaryApprovalStatus === 'Menunggu Pemeriksaan Finance') {
+      sumStatus = 'Pending Verification';
+    } else if (sumObj.summaryApprovalStatus === 'Menunggu Persetujuan Director') {
+      sumStatus = 'Pending Approval';
+    } else if (sumObj.summaryApprovalStatus === 'Telah Disetujui') {
+      sumStatus = 'Approved';
+    } else if (sumObj.summaryApprovalStatus === 'Perlu Revisi') {
+      sumStatus = 'Revision Required';
+    } else if (sumObj.summaryApprovalStatus === 'Ditolak') {
+      sumStatus = 'Rejected';
+    }
+
+    const finWfConfig = configs['laporan_keuangan_akhir'];
+    const sumRefNumber = `LKA/${parentTor.torNumber || parentTor.id}`;
+    const sumStepInfo = buildStepsForStatus({
+      categoryCode: 'laporan_keuangan_akhir',
+      status: sumStatus,
+      ...raci,
+      submittedAt: sumObj.summaryReportedAt || sumObj.updatedAt || parentTor.updatedAt,
+      verifiedAt: sumObj.summaryVerifiedAt || sumObj.updatedAt,
+      verifiedNotes:
+        sumObj.summaryVerifiedNotes ||
+        existingSum?.steps?.[1]?.notes ||
+        (sumStatus === 'Pending Approval' || sumStatus === 'Approved'
+          ? 'Rekapitulasi akhir seluruh Cash Advance yang telah ditutup & di-ACC telah diverifikasi oleh Finance Manager.'
+          : undefined),
+      completedAt: sumObj.summaryApprovedAt || sumObj.updatedAt,
+      directorNotes:
+        sumObj.summaryApprovedNotes ||
+        existingSum?.steps?.[2]?.notes ||
+        (sumStatus === 'Approved'
+          ? 'Laporan Keuangan Akhir ToR disetujui akhir oleh Direktur.'
+          : undefined),
+      refPrefix: `LKA-${parentTor.id.toUpperCase()}`,
+    });
+
+    const sumTimeline: ApprovalTimelineEvent[] =
+      existingSum?.timeline?.length && existingSum.status === sumStatus
+        ? existingSum.timeline
+        : [
+            {
+              id: `tl-${finSumId}-1`,
+              timestamp: sumObj.summaryReportedAt || new Date().toISOString(),
+              actorId: raci.responsibleUserId,
+              actorName: sumObj.summaryReportedByName || raci.responsibleUserName,
+              actorRoleCode: 'R',
+              actorRoleTitle: 'Responsible (Pelaksana Kegiatan)',
+              responsibleName: raci.responsibleUserName,
+              actionLabel: 'Melaporkan Laporan Keuangan Akhir (Akumulasi ToR)',
+              resultingStatus: 'Pending Verification',
+              comment:
+                sumObj.summaryReportedNotes ||
+                `Pelaporan Laporan Keuangan Akhir atas ${torCas.length} Cash Advance yang telah ditutup & di-ACC dengan total realisasi Rp ${realizedAmt.toLocaleString('id-ID')}.`,
+              version: 1,
+            },
+            ...(sumStatus === 'Pending Approval' || sumStatus === 'Approved'
+              ? [
+                  {
+                    id: `tl-${finSumId}-2`,
+                    timestamp: sumObj.summaryVerifiedAt || sumObj.updatedAt || new Date().toISOString(),
+                    actorId: raci.accountableFinanceUserId,
+                    actorName: sumObj.summaryVerifiedByName || raci.accountableFinanceUserName,
+                    actorRoleCode: 'A2' as const,
+                    actorRoleTitle: 'Finance Manager (A2)',
+                    responsibleName: raci.responsibleUserName,
+                    actionLabel: 'Memverifikasi Laporan Keuangan Akhir (Finance Manager)',
+                    resultingStatus: 'Pending Approval' as ApprovalHubStatus,
+                    comment:
+                      sumObj.summaryVerifiedNotes ||
+                      'Rekonsiliasi akumulasi dana per Master Budget telah terverifikasi.',
+                    version: 1,
+                  },
+                ]
+              : []),
+            ...(sumStatus === 'Approved'
+              ? [
+                  {
+                    id: `tl-${finSumId}-3`,
+                    timestamp: sumObj.summaryApprovedAt || sumObj.updatedAt || new Date().toISOString(),
+                    actorId: raci.directorUserId,
+                    actorName: sumObj.summaryApprovedByName || raci.directorUserName,
+                    actorRoleCode: 'Direktur' as const,
+                    actorRoleTitle: 'Executive Director',
+                    responsibleName: raci.responsibleUserName,
+                    actionLabel: 'Menyetujui Akhir Laporan Keuangan Akhir (Direktur)',
+                    resultingStatus: 'Approved' as ApprovalHubStatus,
+                    comment:
+                      sumObj.summaryApprovedNotes ||
+                      'Laporan Keuangan Akhir ToR telah disahkan oleh Direktur.',
+                    version: 1,
+                  },
+                ]
+              : []),
+          ];
+
+    draft.approvalHubItems[finSumId] = {
+      id: finSumId,
+      sourceEntityId: parentTor.id,
+      sourceTorId: parentTor.id,
+      referenceNumber: sumRefNumber,
+      title: `Laporan Keuangan Akhir: ${parentTor.title}`,
+      groupType: 'financial_documents',
+      categoryCode: 'laporan_keuangan_akhir',
+      categoryLabel: CATEGORY_META.laporan_keuangan_akhir.label,
+      ...hier,
+      ...raci,
+      status: sumStatus,
+      currentStepNumber: sumStepInfo.currentStepNumber,
+      currentActiveRole: sumStepInfo.currentActiveRole,
+      workflowMechanism: existingSum?.workflowMechanism || finWfConfig.mechanism,
+      parallelRule: existingSum?.parallelRule || finWfConfig.parallelRule,
+      steps: sumStepInfo.steps,
+      timeline: sumTimeline,
+      version: existingSum?.version || 1,
+      isLocked: sumStatus === 'Approved' || sumStatus === 'Archived',
+      submittedAt: existingSum?.submittedAt || sumObj.summaryReportedAt,
+      dueDate: parentTor.reportingDeadline,
+      completedAt:
+        sumStatus === 'Approved'
+          ? sumObj.summaryApprovedAt || sumObj.updatedAt
+          : existingSum?.completedAt,
+      isArchived: sumStatus === 'Archived',
+      previewData: {
+        summaryText:
+          sumObj.summaryReportedNotes ||
+          `Laporan Keuangan Akhir (Rekapitulasi Akumulasi Dana per Master Budget) untuk ToR ${parentTor.torNumber}.`,
+        location: parentTor.location,
+        activityPeriod: `${parentTor.startDate} s/d ${parentTor.endDate}`,
+        cashAdvanceReferenceNumber: torCas.map((c) => c.advanceNumber).join(', ') || '-',
+        approvedAmount: approvedAmt,
+        realizedAmount: realizedAmt,
+        budgetVariance: diffAmt,
+        remainingFunds: remainingAmt,
+        varianceExplanation:
+          sumObj.summaryReportedNotes ||
+          (diffAmt === 0
+            ? 'Realisasi pengeluaran akhir 100% sesuai pagu Cash Advance.'
+            : diffAmt > 0
+            ? `Sisa dana efisiensi sebesar Rp ${diffAmt.toLocaleString('id-ID')}.`
+            : `Selisih kurang sebesar Rp ${Math.abs(diffAmt).toLocaleString('id-ID')}.`),
+        attachments: [
+          {
+            label: `Dokumen ToR Induk (${parentTor.torNumber || parentTor.id})`,
+            url: `#tor-ref-${parentTor.id}`,
+            refCode: parentTor.torNumber || parentTor.id,
+          },
+        ],
+      },
+      updatedAt: existingSum?.updatedAt || sumObj.updatedAt || sumObj.summaryReportedAt,
+    };
   }
 
   // 4. Sync Notulen Rapat (Meeting Minutes) -> R -> A1 -> Direktur (Pelaporan)
@@ -2506,7 +2715,7 @@ export function executeApprovalHubAction(params: {
       )
       .map((u) => u.id);
     if (item.categoryCode === 'cash_advance') {
-      notifMessage = `"${cleanItemTitle}" telah disetujui oleh Direktur (${actor.name}). Selanjutnya Finance akan mencairkan dana ke rekening pengaju (${item.responsibleUserName}).`;
+      notifMessage = `"${cleanItemTitle}" telah disetujui oleh Direktur (${actor.name}). Selanjutnya menunggu Konfirmasi & Pencairan Dana oleh Finance Manager ke rekening pengaju (${item.responsibleUserName}).`;
       notifTargets = Array.from(
         new Set([item.responsibleUserId, item.accountableFinanceUserId, ...allFinanceIds].filter(Boolean))
       );
@@ -2741,30 +2950,72 @@ export function executeApprovalHubAction(params: {
       ca.updatedAt = nowIso;
     }
   } else if (item.categoryCode === 'laporan_keuangan_akhir') {
-    const caIdx = (draft.cashAdvances || []).findIndex(
-      (c) => c.id === item.sourceCashAdvanceId
-    );
-    if (caIdx !== -1) {
-      const ca = draft.cashAdvances![caIdx];
-      ca.isReported = true;
-      if (nextStatus === 'Pending Verification') {
-        ca.reportApprovalStatus = 'Menunggu Pemeriksaan Finance';
-      } else if (nextStatus === 'Pending Approval') {
-        ca.reportApprovalStatus = 'Menunggu Persetujuan Director';
-        ca.reportVerifiedByName = actor.name;
-        ca.reportVerifiedAt = nowIso;
-        ca.reportVerifiedNotes = trimmedComment || 'Diverifikasi oleh A2.';
-      } else if (nextStatus === 'Approved') {
-        ca.reportApprovalStatus = 'Telah Disetujui';
-        ca.reportApprovedByName = actor.name;
-        ca.reportApprovedAt = nowIso;
-        ca.reportApprovedNotes = trimmedComment || 'Disetujui akhir oleh Direktur.';
-      } else if (nextStatus === 'Revision Required') {
-        ca.reportApprovalStatus = 'Perlu Revisi';
-      } else if (nextStatus === 'Rejected') {
-        ca.reportApprovalStatus = 'Ditolak';
+    if (item.sourceCashAdvanceId) {
+      const caIdx = (draft.cashAdvances || []).findIndex(
+        (c) => c.id === item.sourceCashAdvanceId
+      );
+      if (caIdx !== -1) {
+        const ca = draft.cashAdvances![caIdx];
+        ca.isReported = true;
+        if (nextStatus === 'Pending Verification') {
+          ca.reportApprovalStatus = 'Menunggu Pemeriksaan Finance';
+        } else if (nextStatus === 'Pending Approval') {
+          ca.reportApprovalStatus = 'Menunggu Persetujuan Director';
+          ca.reportVerifiedByName = actor.name;
+          ca.reportVerifiedAt = nowIso;
+          ca.reportVerifiedNotes = trimmedComment || 'Diverifikasi oleh A2.';
+        } else if (nextStatus === 'Approved') {
+          ca.reportApprovalStatus = 'Telah Disetujui';
+          ca.reportApprovedByName = actor.name;
+          ca.reportApprovedAt = nowIso;
+          ca.reportApprovedNotes = trimmedComment || 'Disetujui akhir oleh Direktur.';
+        } else if (nextStatus === 'Revision Required') {
+          ca.reportApprovalStatus = 'Perlu Revisi';
+        } else if (nextStatus === 'Rejected') {
+          ca.reportApprovalStatus = 'Ditolak';
+        }
+        ca.updatedAt = nowIso;
+
+        // Recompute realized expenditure on parent ToR
+        const tIdx = (draft.tors || []).findIndex((t) => t.id === ca.torId);
+        if (tIdx !== -1) {
+          const torCas = (draft.cashAdvances || []).filter(
+            (c) =>
+              c.torId === ca.torId &&
+              c.status !== 'Ditolak' &&
+              Boolean(c.isReported) &&
+              c.reportApprovalStatus === 'Telah Disetujui'
+          );
+          draft.tors[tIdx].budgetActualSpent = torCas.reduce(
+            (sum, c) =>
+              sum +
+              (typeof c.realizedAmount === 'number'
+                ? c.realizedAmount
+                : Number(c.totalAmount) || 0),
+            0
+          );
+        }
       }
-      ca.updatedAt = nowIso;
+    } else if (item.sourceTorId && draft.cashAdvanceSummaries?.[item.sourceTorId]) {
+      const sumObj = draft.cashAdvanceSummaries[item.sourceTorId];
+      if (nextStatus === 'Pending Verification') {
+        sumObj.summaryApprovalStatus = 'Menunggu Pemeriksaan Finance';
+      } else if (nextStatus === 'Pending Approval') {
+        sumObj.summaryApprovalStatus = 'Menunggu Persetujuan Director';
+        sumObj.summaryVerifiedByName = actor.name;
+        sumObj.summaryVerifiedAt = nowIso;
+        sumObj.summaryVerifiedNotes = trimmedComment || 'Diverifikasi oleh Finance Manager.';
+      } else if (nextStatus === 'Approved') {
+        sumObj.summaryApprovalStatus = 'Telah Disetujui';
+        sumObj.summaryApprovedByName = actor.name;
+        sumObj.summaryApprovedAt = nowIso;
+        sumObj.summaryApprovedNotes = trimmedComment || 'Disetujui akhir oleh Direktur.';
+      } else if (nextStatus === 'Revision Required') {
+        sumObj.summaryApprovalStatus = 'Perlu Revisi';
+      } else if (nextStatus === 'Rejected') {
+        sumObj.summaryApprovalStatus = 'Ditolak';
+      }
+      sumObj.updatedAt = nowIso;
     }
   } else if (item.categoryCode === 'notulen') {
     const mmIdx = (draft.meetingMinutes || []).findIndex((m) => m.id === item.sourceEntityId);

@@ -7,6 +7,7 @@ import {
   CashAdvanceRecord,
   BestPhotoSlot,
   ApprovalHubItem,
+  User,
 } from '../../types/index.js';
 import { api } from '../../lib/api.js';
 import { formatIndonesianDate } from '../../lib/dateUtils.js';
@@ -16,6 +17,11 @@ import { ApprovalBarcodeStamp } from '../common/ApprovalBarcodeStamp.js';
 import { useOrganizationSettings } from '../../lib/organizationSettings.js';
 import { Download, ExternalLink, FileText, Edit3 } from 'lucide-react';
 import { formatTorTeamSummary } from '../tor/torTeamFormatter.js';
+import {
+  resolveMasterBudgetByCode,
+  syncMasterBudgetLookupWithServerMap,
+} from '../../lib/masterBudgetStorage.js';
+import { hydrateProgramBudgetDatasetsFromServer } from '../../lib/programBudgetStorage.js';
 
 interface OfficialDocumentPreviewPaneProps {
   item: ApprovalHubItem;
@@ -76,6 +82,35 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
   const [cashAdvanceRecord, setCashAdvanceRecord] = useState<CashAdvanceRecord | null>(null);
   const [allTorCashAdvances, setAllTorCashAdvances] = useState<CashAdvanceRecord[]>([]);
   const [caSummaryData, setCaSummaryData] = useState<any>(null);
+  const [systemUsers, setSystemUsers] = useState<User[]>([]);
+
+  const [, setBudgetHydrationTick] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getUsers()
+      .then((list) => {
+        if (active && Array.isArray(list)) setSystemUsers(list);
+      })
+      .catch(() => {});
+    api
+      .getFinanceProgramBudgets()
+      .then((map) => {
+        if (!active || !map) return;
+        hydrateProgramBudgetDatasetsFromServer(map);
+        syncMasterBudgetLookupWithServerMap(map);
+        setBudgetHydrationTick((t) => t + 1);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const financeManagerUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'finance'
+  );
 
   useEffect(() => {
     let active = true;
@@ -1631,9 +1666,16 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
               </div>
               <div>
                 <div className="font-bold underline">
-                  {rec?.signatures?.verifiedBy?.name || item.accountableFinanceUserName}
+                  {rec?.signatures?.verifiedBy?.name ||
+                    financeManagerUser?.name ||
+                    item.accountableFinanceUserName ||
+                    '-'}
                 </div>
-                <div className="text-[11px]">Finance Specialist</div>
+                <div className="text-[11px]">
+                  {rec?.signatures?.verifiedBy?.roleTitle ||
+                    financeManagerUser?.roleTitle ||
+                    'Finance Manager'}
+                </div>
                 <div className="text-[10.5px] mt-0.5">
                   Tanggal:{' '}
                   {rec?.signatures?.verifiedBy?.date
@@ -1682,31 +1724,35 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
             </div>
 
             <div className="border border-black p-2.5 flex flex-col justify-between">
-              <div className="font-bold">4. Dicairkan Oleh (Kasir / Finance)</div>
+              <div className="font-bold">
+                4. Dikonfirmasi &amp; Dicairkan Oleh (Finance Manager)
+              </div>
               <div className="my-2 min-h-[56px] flex items-center justify-center">
                 {rec?.signatures?.disbursedBy?.isDisbursed ||
                 rec?.status === 'Dicairkan' ||
                 preview.isDisbursed ? (
                   <ApprovalBarcodeStamp
                     documentNumber={advNum}
-                    roleCode="CSH"
+                    roleCode="FM"
                     signerName={
                       rec?.signatures?.disbursedBy?.name ||
                       preview.disbursedByName ||
-                      'Ratna Sari'
+                      financeManagerUser?.name ||
+                      item.accountableFinanceUserName ||
+                      '-'
                     }
                     signDate={
                       rec?.signatures?.disbursedBy?.date ||
                       preview.disbursedAt ||
                       reqDate
                     }
-                    statusLabel="DICAIRKAN"
+                    statusLabel="DIKONFIRMASI & DICAIRKAN"
                   />
                 ) : (
                   <span className="py-4 text-[11px] italic text-stone-600">
                     {rec?.status === 'Disetujui' || item.status === 'Approved'
-                      ? '[Siap Dicairkan Finance]'
-                      : '[Belum Dicairkan]'}
+                      ? '[Menunggu Konfirmasi Finance Manager]'
+                      : '[Menunggu ACC Direktur]'}
                   </span>
                 )}
               </div>
@@ -1714,9 +1760,16 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <div className="font-bold underline">
                   {rec?.signatures?.disbursedBy?.name ||
                     preview.disbursedByName ||
-                    'Ratna Sari'}
+                    financeManagerUser?.name ||
+                    item.accountableFinanceUserName ||
+                    '-'}
                 </div>
-                <div className="text-[11px]">Kasir / Finance Officer</div>
+                <div className="text-[11px]">
+                  {rec?.signatures?.disbursedBy?.roleTitle ||
+                    preview.disbursedRoleTitle ||
+                    financeManagerUser?.roleTitle ||
+                    'Finance Manager'}
+                </div>
                 <div className="text-[10.5px] mt-0.5">
                   Tanggal:{' '}
                   {rec?.signatures?.disbursedBy?.date || preview.disbursedAt
@@ -1745,14 +1798,20 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
   // 6. RENDER OFFICIAL FINAL FINANCIAL REPORT (STAGE 08) PREVIEW SHEET
   // ==========================================================================
   const renderFinalFinancialReportPreview = () => {
-    const closedCas = allTorCashAdvances.filter(
-      (c) => c.status !== 'Ditolak' && Boolean(c.isReported)
-    );
+    const isPerCaReport = Boolean(item.sourceCashAdvanceId);
+    const closedCas = isPerCaReport
+      ? allTorCashAdvances.filter((c) => c.id === item.sourceCashAdvanceId)
+      : allTorCashAdvances.filter(
+          (c) =>
+            c.status !== 'Ditolak' &&
+            Boolean(c.isReported) &&
+            (c.reportApprovalStatus === 'Telah Disetujui' || Boolean(c.reportApprovedAt))
+        );
     const summaryRows: any[] = Array.isArray(caSummaryData?.summaryRows)
       ? caSummaryData.summaryRows
       : [];
 
-    const rows =
+    const rawRows =
       closedCas.length > 0
         ? closedCas.flatMap((ca) => {
             if (ca.items && ca.items.length > 0) {
@@ -1768,54 +1827,77 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                     : ca.realizedAmount !== undefined && ca.items.length === 1
                     ? Number(ca.realizedAmount)
                     : adv;
+                const rawCode = matched?.budgetCode || it.budgetCode || '-';
+                const resolved = resolveMasterBudgetByCode(rawCode, tor || undefined);
                 return {
-                  code: matched?.budgetCode || it.budgetCode || item.activityCode || '1.1.1',
-                  description: `${it.description} (${ca.advanceNumber})`,
+                  code: resolved.code,
+                  masterName: resolved.masterName,
                   advanceAmount: adv,
                   actualSpent: spent,
-                  remaining: Math.max(0, adv - spent),
-                  shortage: Math.max(0, spent - adv),
-                  percentUsed: adv > 0 ? Math.round((spent / adv) * 100) : 0,
                 };
               });
             }
             const adv = Number(ca.totalAmount) || 0;
             const spent =
               ca.realizedAmount !== undefined ? Number(ca.realizedAmount) : adv;
+            const resolved = resolveMasterBudgetByCode('-', tor || undefined);
             return [
               {
-                code: item.activityCode || '1.1.1',
-                description: `${ca.activityTitle || item.activityName} (${ca.advanceNumber})`,
+                code: resolved.code,
+                masterName: resolved.masterName,
                 advanceAmount: adv,
                 actualSpent: spent,
-                remaining: Math.max(0, adv - spent),
-                shortage: Math.max(0, spent - adv),
-                percentUsed: adv > 0 ? Math.round((spent / adv) * 100) : 0,
               },
             ];
           })
         : [
-            {
-              code: item.activityCode || '1.1.1',
-              description: item.activityName,
-              advanceAmount: preview.approvedAmount ?? preview.requestedAmount ?? 0,
-              actualSpent: preview.realizedAmount ?? preview.approvedAmount ?? 0,
-              remaining: Math.max(
-                0,
-                (preview.approvedAmount ?? 0) - (preview.realizedAmount ?? 0)
-              ),
-              shortage: Math.max(
-                0,
-                (preview.realizedAmount ?? 0) - (preview.approvedAmount ?? 0)
-              ),
-              percentUsed:
-                (preview.approvedAmount ?? 0) > 0
-                  ? Math.round(
-                      ((preview.realizedAmount ?? 0) / (preview.approvedAmount ?? 1)) * 100
-                    )
-                  : 100,
-            },
+            (() => {
+              const resolved = resolveMasterBudgetByCode('-', tor || undefined);
+              return {
+                code: resolved.code,
+                masterName: resolved.masterName,
+                advanceAmount: preview.approvedAmount ?? preview.requestedAmount ?? 0,
+                actualSpent: preview.realizedAmount ?? preview.approvedAmount ?? 0,
+              };
+            })(),
           ];
+
+    // Group by Master Budget code for clean accumulation
+    const groupedMap = new Map<
+      string,
+      {
+        code: string;
+        masterName: string;
+        advanceAmount: number;
+        actualSpent: number;
+        remaining: number;
+        shortage: number;
+        percentUsed: number;
+      }
+    >();
+    for (const r of rawRows) {
+      const existing = groupedMap.get(r.code);
+      if (existing) {
+        existing.advanceAmount += r.advanceAmount;
+        existing.actualSpent += r.actualSpent;
+      } else {
+        groupedMap.set(r.code, {
+          code: r.code,
+          masterName: r.masterName,
+          advanceAmount: r.advanceAmount,
+          actualSpent: r.actualSpent,
+          remaining: 0,
+          shortage: 0,
+          percentUsed: 0,
+        });
+      }
+    }
+    const rows = Array.from(groupedMap.values()).map((g) => ({
+      ...g,
+      remaining: Math.max(0, g.advanceAmount - g.actualSpent),
+      shortage: Math.max(0, g.actualSpent - g.advanceAmount),
+      percentUsed: g.advanceAmount > 0 ? Math.round((g.actualSpent / g.advanceAmount) * 100) : 0,
+    }));
 
     const totalAdv = rows.reduce((s, r) => s + r.advanceAmount, 0);
     const totalSpent = rows.reduce((s, r) => s + r.actualSpent, 0);
@@ -1830,7 +1912,9 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
       >
         <div className="text-center pb-1">
           <h1 className="text-[16px] font-bold text-black tracking-normal leading-snug uppercase">
-            LAPORAN KEUANGAN AKHIR &amp; REKAPITULASI AKUMULASI DANA PER KODE BUDGET
+            {isPerCaReport
+              ? 'LAPORAN PERTANGGUNGJAWABAN KEUANGAN CASH ADVANCE'
+              : 'LAPORAN KEUANGAN AKHIR & REKAPITULASI AKUMULASI DANA PER KODE BUDGET'}
           </h1>
           <div className="text-[13.5px] font-bold text-black mt-0.5 leading-snug">
             {item.activityName} ({item.referenceNumber})
@@ -1842,7 +1926,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
             className="bg-[#CCCCCC] text-black font-bold px-2.5 py-1 mb-2 text-[13px]"
             style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}
           >
-            1. Rincian Realisasi &amp; Rekonsiliasi Dana (Akumulasi Cash Advance yang Telah Ditutup)
+            1. Rincian Realisasi &amp; Rekonsiliasi Dana (Akumulasi Cash Advance yang Telah Ditutup &amp; Di-ACC)
           </div>
           <table className="w-full text-left border-collapse border border-black text-[12px]">
             <thead>
@@ -1850,7 +1934,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <th className="py-1.5 px-1.5 w-[5%] text-center border border-black">No</th>
                 <th className="py-1.5 px-2 w-[12%] text-left border border-black">Kode Budget</th>
                 <th className="py-1.5 px-2.5 w-[31%] border border-black">
-                  Jenis Kegiatan / Rincian Pos
+                  Jenis Kegiatan (berdasarkan Budget / Outcome)
                 </th>
                 <th className="py-1.5 px-2 w-[15%] text-right border border-black">
                   Uang Muka (Rp)
@@ -1869,7 +1953,7 @@ export const OfficialDocumentPreviewPane: React.FC<OfficialDocumentPreviewPanePr
                 <tr key={idx} className="align-top">
                   <td className="py-1.5 px-1.5 text-center border border-black">{idx + 1}</td>
                   <td className="py-1.5 px-2 text-left font-bold border border-black">{r.code}</td>
-                  <td className="py-1.5 px-2.5 border border-black">{r.description}</td>
+                  <td className="py-1.5 px-2.5 border border-black">{r.masterName}</td>
                   <td className="py-1.5 px-2 text-right border border-black">
                     {formatRupiah(r.advanceAmount)}
                   </td>

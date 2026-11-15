@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Printer,
@@ -12,6 +12,9 @@ import {
   AlertCircle,
   FileCheck,
   Download,
+  Wallet,
+  XCircle,
+  RotateCcw,
 } from 'lucide-react';
 import {
   CashAdvanceRecord,
@@ -37,25 +40,191 @@ interface CashAdvanceDetailModalProps {
 export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
   isOpen,
   onClose,
-  record,
+  record: propRecord,
   currentUser,
   onRefresh,
   onEdit,
   inline = false,
 }) => {
+  const [liveRecord, setLiveRecord] = useState<CashAdvanceRecord | null>(propRecord);
+  const [systemUsers, setSystemUsers] = useState<User[]>([]);
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [transferReference, setTransferReference] = useState('');
+  const [bankSource, setBankSource] = useState('Bank Mandiri Operasional Yayasan');
+  const [confirmNotes, setConfirmNotes] = useState('');
+  const confirmPanelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setLiveRecord(propRecord);
+    if (propRecord) {
+      setTransferReference(
+        propRecord.signatures?.disbursedBy?.transferReference ||
+          `KONF-FM-${propRecord.id.slice(-6).toUpperCase()}`
+      );
+      setBankSource(
+        propRecord.signatures?.disbursedBy?.bankSource ||
+          'Bank Mandiri Operasional Yayasan'
+      );
+      setConfirmNotes(propRecord.signatures?.disbursedBy?.notes || '');
+    }
+  }, [propRecord]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    api
+      .getUsers()
+      .then((list) => {
+        if (active && Array.isArray(list)) {
+          setSystemUsers(list);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  const record = liveRecord || propRecord;
   if (!isOpen || !record) return null;
+
+  const financeManagerUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'finance'
+  );
+  const directorUser = systemUsers.find(
+    (u) => u.isActive !== false && u.role === 'director'
+  );
+
+  const resolvedVerifiedName =
+    record.signatures.verifiedBy?.name || financeManagerUser?.name || '-';
+  const resolvedVerifiedRole =
+    record.signatures.verifiedBy?.roleTitle ||
+    financeManagerUser?.roleTitle ||
+    'Finance Manager';
+  const resolvedApprovedName =
+    record.signatures.approvedBy?.name || directorUser?.name || '-';
+  const resolvedApprovedRole =
+    record.signatures.approvedBy?.roleTitle ||
+    directorUser?.roleTitle ||
+    'Executive Director';
+  const resolvedDisbursedName =
+    record.signatures.disbursedBy?.name || financeManagerUser?.name || '-';
+  const resolvedDisbursedRole =
+    record.signatures.disbursedBy?.roleTitle ||
+    financeManagerUser?.roleTitle ||
+    'Finance Manager';
+
+  const canActAsFinanceManager = Boolean(
+    currentUser &&
+      (currentUser.role === 'finance' ||
+        currentUser.role === 'system_admin' ||
+        currentUser.role === 'admin')
+  );
+  const canActAsDirector = Boolean(
+    currentUser &&
+      (currentUser.role === 'director' || currentUser.role === 'system_admin')
+  );
+  const canVerifySubmitted = Boolean(
+    record.status === 'Diajukan' &&
+      canActAsFinanceManager &&
+      (record.requesterId !== currentUser?.id ||
+        currentUser?.role === 'system_admin')
+  );
+  const canDirectorApprove = Boolean(
+    record.status === 'Diverifikasi Finance' && canActAsDirector
+  );
+  const canConfirmDisbursement = Boolean(
+    record.status === 'Disetujui' && canActAsFinanceManager
+  );
 
   const handleSubmitDraft = async () => {
     setActionLoading(true);
     setErrorMsg(null);
     try {
-      await api.submitCashAdvance(record.id);
+      const updated = await api.submitCashAdvance(record.id);
+      setLiveRecord(updated);
+      setSuccessMsg('Pengajuan Cash Advance berhasil dikirim ke Finance Manager dan tersimpan di MySQL.');
       onRefresh();
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal mengajukan kasbon');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleVerifyAction = async (action: 'verify' | 'revision' | 'reject') => {
+    setActionLoading(true);
+    setErrorMsg(null);
+    try {
+      const updated = await api.verifyCashAdvance(
+        record.id,
+        action,
+        reviewNotes.trim() || undefined
+      );
+      setLiveRecord(updated);
+      setReviewNotes('');
+      setSuccessMsg(
+        action === 'verify'
+          ? 'Cash Advance berhasil diverifikasi oleh Finance Manager dan diteruskan ke Direktur.'
+          : action === 'revision'
+          ? 'Cash Advance dikembalikan ke pengaju untuk perbaikan.'
+          : 'Cash Advance telah ditolak oleh Finance Manager.'
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal memproses verifikasi Finance Manager');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDirectorAction = async (action: 'approve' | 'reject') => {
+    setActionLoading(true);
+    setErrorMsg(null);
+    try {
+      const updated = await api.approveCashAdvance(
+        record.id,
+        action,
+        reviewNotes.trim() || undefined
+      );
+      setLiveRecord(updated);
+      setReviewNotes('');
+      setSuccessMsg(
+        action === 'approve'
+          ? 'Cash Advance telah di-ACC oleh Direktur. Selanjutnya menunggu Konfirmasi & Pencairan oleh Finance Manager.'
+          : 'Cash Advance telah ditolak oleh Direktur.'
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal memproses keputusan Direktur');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleFinanceManagerConfirm = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setActionLoading(true);
+    setErrorMsg(null);
+    try {
+      const updated = await api.disburseCashAdvance(
+        record.id,
+        transferReference.trim() || undefined,
+        bankSource.trim() || undefined,
+        confirmNotes.trim() || undefined
+      );
+      setLiveRecord(updated);
+      setSuccessMsg(
+        `Konfirmasi & Pencairan Dana berhasil disimpan ke MySQL oleh ${updated.signatures.disbursedBy?.name || currentUser?.name || 'Finance Manager'} (Ref: ${updated.signatures.disbursedBy?.transferReference || '-'}).`
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMsg(
+        err.message || 'Gagal menyimpan konfirmasi & pencairan Finance Manager'
+      );
     } finally {
       setActionLoading(false);
     }
@@ -133,6 +302,42 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
             </tr>
           </tfoot>
         </table>
+        <div class="section-bar">4. Otorisasi &amp; Persetujuan Dokumen (Signatures &amp; Verification)</div>
+        <table>
+          <thead>
+            <tr style="background:#F2F2F2; font-weight:bold; text-align:center;">
+              <th style="width:25%;">1. Diajukan Oleh (Pemohon / PIC)</th>
+              <th style="width:25%;">2. Diperiksa Oleh (Finance Manager)</th>
+              <th style="width:25%;">3. Disetujui Oleh (Executive Director)</th>
+              <th style="width:25%;">4. Dikonfirmasi &amp; Dicairkan Oleh (Finance Manager)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="text-align:center;">
+              <td>
+                <strong><u>${record.signatures.requestedBy.name}</u></strong><br/>
+                ${record.signatures.requestedBy.roleTitle}<br/>
+                Tanggal: ${formatIndonesianDate(record.signatures.requestedBy.date)}
+              </td>
+              <td>
+                <strong><u>${resolvedVerifiedName}</u></strong><br/>
+                ${resolvedVerifiedRole}<br/>
+                Tanggal: ${record.signatures.verifiedBy?.date ? formatIndonesianDate(record.signatures.verifiedBy.date) : '-'}
+              </td>
+              <td>
+                <strong><u>${resolvedApprovedName}</u></strong><br/>
+                ${resolvedApprovedRole}<br/>
+                Tanggal: ${record.signatures.approvedBy?.date ? formatIndonesianDate(record.signatures.approvedBy.date) : '-'}
+              </td>
+              <td>
+                <strong><u>${resolvedDisbursedName}</u></strong><br/>
+                ${resolvedDisbursedRole}<br/>
+                Tanggal: ${record.signatures.disbursedBy?.date ? formatIndonesianDate(record.signatures.disbursedBy.date) : '-'}
+                ${record.signatures.disbursedBy?.transferReference ? `<br/>Ref: ${record.signatures.disbursedBy.transferReference}` : ''}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </body>
       </html>
     `;
@@ -156,14 +361,14 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium text-xs border border-emerald-200">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Dana Telah Dicairkan</span>
+            <span>Dikonfirmasi &amp; Dicairkan (Finance Manager)</span>
           </span>
         );
       case 'Disetujui':
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-blue-50 text-blue-800 font-medium text-xs border border-blue-200">
             <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
-            <span>Disetujui (Siap Dicairkan)</span>
+            <span>Disetujui Direktur (Menunggu Konfirmasi Finance Manager)</span>
           </span>
         );
       case 'Diverifikasi Finance':
@@ -289,41 +494,223 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
         </div>
       )}
 
-      {/* Banner Status: Setelah Disetujui Direktur -> Menunggu Pencairan Finance ke Pengaju */}
-      {record.status === 'Disetujui' && (
-        <div className="px-4 py-3 bg-blue-50/90 border border-blue-200 rounded-md text-xs flex flex-wrap items-center justify-between gap-3 print:hidden">
-          <div className="flex items-start gap-2.5 text-blue-950">
-            <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-bold">
-                Telah Disetujui oleh Direktur ({record.signatures.approvedBy?.name || 'Direktur'}) — Menunggu Pencairan Dana oleh Finance
-              </div>
-              <div className="text-[11px] text-blue-800 mt-0.5">
-                Selanjutnya Finance mencairkan dana sebesar <strong>{formatRupiah(record.totalAmount)}</strong> ke rekening pengaju (<strong>{record.requesterName}</strong> · {record.bankName} {record.bankAccountNumber} a.n. {record.bankAccountHolder}) melalui menu <strong>Approval</strong>.
-              </div>
+      {/* Panel Verifikasi Finance Manager (Tahap 2: Saat Status Diajukan) */}
+      {canVerifySubmitted && (
+        <div className="px-4 py-3.5 bg-indigo-50/90 border border-indigo-200 rounded-md text-xs space-y-2.5 print:hidden">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-bold text-indigo-950 flex items-center gap-1.5">
+              <FileCheck className="w-4 h-4 text-indigo-700" />
+              <span>Verifikasi Pengajuan oleh Finance Manager</span>
+            </div>
+            <span className="text-[11px] text-indigo-800 font-mono">
+              Nominal: {formatRupiah(record.totalAmount)}
+            </span>
+          </div>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <input
+              type="text"
+              value={reviewNotes}
+              onChange={(e) => setReviewNotes(e.target.value)}
+              placeholder="Catatan pemeriksaan Finance Manager (opsional)..."
+              className="flex-1 px-3 py-1.5 rounded border border-indigo-200 bg-white text-stone-900 focus:outline-none focus:border-indigo-500"
+            />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() => handleVerifyAction('verify')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-800 text-white font-semibold cursor-pointer disabled:opacity-50"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Verifikasi (Finance Manager)</span>
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() => handleVerifyAction('revision')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 font-medium cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Minta Revisi</span>
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() => handleVerifyAction('reject')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 font-medium cursor-pointer disabled:opacity-50"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                <span>Tolak</span>
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Banner Status: Dana Telah Dicairkan oleh Finance ke Pengaju */}
+      {/* Panel Persetujuan Akhir Direktur (Tahap 3: Saat Status Diverifikasi Finance) */}
+      {canDirectorApprove && (
+        <div className="px-4 py-3.5 bg-amber-50/90 border border-amber-200 rounded-md text-xs space-y-2.5 print:hidden">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-bold text-amber-950 flex items-center gap-1.5">
+              <UserCheck className="w-4 h-4 text-amber-700" />
+              <span>Persetujuan Akhir (ACC) oleh Executive Director</span>
+            </div>
+            <span className="text-[11px] text-amber-800">
+              Terverifikasi oleh: <strong>{resolvedVerifiedName}</strong>
+            </span>
+          </div>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <input
+              type="text"
+              value={reviewNotes}
+              onChange={(e) => setReviewNotes(e.target.value)}
+              placeholder="Catatan otorisasi Direktur (opsional)..."
+              className="flex-1 px-3 py-1.5 rounded border border-amber-200 bg-white text-stone-900 focus:outline-none focus:border-amber-500"
+            />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() => handleDirectorAction('approve')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-semibold cursor-pointer disabled:opacity-50"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>ACC / Setujui (Direktur)</span>
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() => handleDirectorAction('reject')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 font-medium cursor-pointer disabled:opacity-50"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                <span>Tolak</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tahap 4: Setelah Di-ACC Direktur -> Fitur Konfirmasi & Pencairan oleh Finance Manager */}
+      {record.status === 'Disetujui' && (
+        <div
+          ref={confirmPanelRef}
+          className="px-4 py-3.5 bg-blue-50/90 border border-blue-200 rounded-md text-xs space-y-3 print:hidden"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2.5 text-blue-950">
+            <div className="flex items-start gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">
+                  Telah Di-ACC oleh Direktur ({resolvedApprovedName}) — Menunggu Konfirmasi &amp; Pencairan oleh Finance Manager
+                </div>
+                <div className="text-[11px] text-blue-800 mt-0.5">
+                  Nominal disetujui: <strong>{formatRupiah(record.totalAmount)}</strong> · Rekening Pengaju:{' '}
+                  <strong>{record.requesterName}</strong> ({record.bankName} · {record.bankAccountNumber} a.n.{' '}
+                  {record.bankAccountHolder}).
+                </div>
+              </div>
+            </div>
+            <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-semibold text-[11px] border border-blue-200">
+              Tahap 4: Konfirmasi Finance Manager
+            </span>
+          </div>
+
+          {canConfirmDisbursement && (
+            <form
+              onSubmit={handleFinanceManagerConfirm}
+              className="bg-white border border-blue-200 rounded p-3.5 space-y-3 text-stone-800"
+            >
+              <div className="font-bold text-stone-900 flex items-center gap-1.5">
+                <Wallet className="w-3.5 h-3.5 text-emerald-700" />
+                <span>
+                  Form Konfirmasi &amp; Pencairan Dana oleh Finance Manager ({currentUser?.name})
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                    No. Referensi Transfer / Konfirmasi
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={transferReference}
+                    onChange={(e) => setTransferReference(e.target.value)}
+                    placeholder="Contoh: KONF-FM-001234"
+                    className="w-full px-2.5 py-1.5 rounded border border-stone-300 font-mono text-xs focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                    Rekening Sumber Pencairan
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={bankSource}
+                    onChange={(e) => setBankSource(e.target.value)}
+                    placeholder="Bank Mandiri Operasional Yayasan"
+                    className="w-full px-2.5 py-1.5 rounded border border-stone-300 text-xs focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                    Catatan Konfirmasi Finance Manager
+                  </label>
+                  <input
+                    type="text"
+                    value={confirmNotes}
+                    onChange={(e) => setConfirmNotes(e.target.value)}
+                    placeholder="Konfirmasi pencairan pasca ACC Direktur..."
+                    className="w-full px-2.5 py-1.5 rounded border border-stone-300 text-xs focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className="text-[11px] text-stone-500">
+                  Konfirmasi ini langsung tersimpan permanen ke database MySQL dan mengesahkan tanda tangan Kolom 4 (Finance Manager).
+                </span>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>
+                    {actionLoading
+                      ? 'Menyimpan ke MySQL...'
+                      : 'Konfirmasi & Cairkan Dana (Finance Manager)'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+
+      {/* Banner Status: Dana Telah Dikonfirmasi & Dicairkan oleh Finance Manager */}
       {record.status === 'Dicairkan' && (
         <div className="px-4 py-3 bg-emerald-50/90 border border-emerald-200 rounded-md text-xs flex flex-wrap items-center justify-between gap-3 print:hidden">
           <div className="flex items-start gap-2.5 text-emerald-950">
             <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
             <div>
               <div className="font-bold">
-                Dana Telah Dicairkan oleh Finance ({record.signatures.disbursedBy?.name || 'Ratna Sari'}) &amp; Notifikasi Telah Dikirim ke Pengaju ({record.requesterName})
+                Telah Dikonfirmasi &amp; Dicairkan oleh Finance Manager ({resolvedDisbursedName}) · Notifikasi Dikirim ke Pengaju ({record.requesterName})
               </div>
               <div className="text-[11px] text-emerald-800 mt-0.5">
-                Transfer ke <strong>{record.bankName}</strong> ({record.bankAccountNumber} a.n. {record.bankAccountHolder}) · Tanggal:{' '}
+                Transfer ke <strong>{record.bankName}</strong> ({record.bankAccountNumber} a.n. {record.bankAccountHolder}) · Sumber:{' '}
+                <strong>{record.signatures.disbursedBy?.bankSource || '-'}</strong> · Tanggal:{' '}
                 <strong>
                   {record.signatures.disbursedBy?.date
                     ? formatIndonesianDate(record.signatures.disbursedBy.date)
                     : '-'}
                 </strong>
                 {record.signatures.disbursedBy?.transferReference
-                  ? ` · Ref Transfer: ${record.signatures.disbursedBy.transferReference}`
+                  ? ` · Ref Konfirmasi: ${record.signatures.disbursedBy.transferReference}`
+                  : ''}
+                {record.signatures.disbursedBy?.notes
+                  ? ` · Catatan: "${record.signatures.disbursedBy.notes}"`
                   : ''}
               </div>
             </div>
@@ -585,13 +972,13 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
                   1. Diajukan Oleh (Pemohon / PIC)
                 </th>
                 <th className="w-1/4 border border-black px-2.5 py-1.5 font-bold text-center">
-                  2. Diperiksa Oleh (Finance)
+                  2. Diperiksa Oleh (Finance Manager)
                 </th>
                 <th className="w-1/4 border border-black px-2.5 py-1.5 font-bold text-center">
                   3. Disetujui Oleh (Executive Director)
                 </th>
                 <th className="w-1/4 border border-black px-2.5 py-1.5 font-bold text-center">
-                  4. Dicairkan Oleh (Kasir / Finance)
+                  4. Dikonfirmasi &amp; Dicairkan Oleh (Finance Manager)
                 </th>
               </tr>
             </thead>
@@ -631,23 +1018,19 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
                       <ApprovalBarcodeStamp
                         documentNumber={record.advanceNumber}
                         roleCode="FIN"
-                        signerName={
-                          record.signatures.verifiedBy?.name || 'Budi Hartono, S.E.'
-                        }
+                        signerName={resolvedVerifiedName}
                         signDate={record.signatures.verifiedBy?.date || record.requestDate}
                         statusLabel="TERVERIFIKASI"
                       />
                     ) : (
                       `[${
                         record.signatures.verifiedBy?.status ||
-                        'Menunggu Verifikasi Finance'
+                        'Menunggu Verifikasi Finance Manager'
                       }]`
                     )}
                   </div>
-                  <div className="font-bold underline">
-                    {record.signatures.verifiedBy?.name || 'Budi Hartono, S.E.'}
-                  </div>
-                  <div className="text-[12.5px]">Finance Specialist</div>
+                  <div className="font-bold underline">{resolvedVerifiedName}</div>
+                  <div className="text-[12.5px]">{resolvedVerifiedRole}</div>
                   <div className="text-[12px] mt-1">
                     Tanggal:{' '}
                     {record.signatures.verifiedBy?.date
@@ -669,23 +1052,19 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
                       <ApprovalBarcodeStamp
                         documentNumber={record.advanceNumber}
                         roleCode="DIR"
-                        signerName={
-                          record.signatures.approvedBy?.name || 'Dr. Hendra Wijaya'
-                        }
+                        signerName={resolvedApprovedName}
                         signDate={record.signatures.approvedBy?.date || record.requestDate}
                         statusLabel="DISETUJUI"
                       />
                     ) : (
                       `[${
                         record.signatures.approvedBy?.status ||
-                        'Pending'
+                        'Menunggu Otorisasi Direktur'
                       }]`
                     )}
                   </div>
-                  <div className="font-bold underline">
-                    {record.signatures.approvedBy?.name || 'Dr. Hendra Wijaya'}
-                  </div>
-                  <div className="text-[12.5px]">Executive Director</div>
+                  <div className="font-bold underline">{resolvedApprovedName}</div>
+                  <div className="text-[12.5px]">{resolvedApprovedRole}</div>
                   <div className="text-[12px] mt-1">
                     Tanggal:{' '}
                     {record.signatures.approvedBy?.date
@@ -705,23 +1084,37 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
                     record.status === 'Dicairkan' ? (
                       <ApprovalBarcodeStamp
                         documentNumber={record.advanceNumber}
-                        roleCode="CSH"
-                        signerName={record.signatures.disbursedBy?.name || 'Ratna Sari'}
+                        roleCode="FM"
+                        signerName={resolvedDisbursedName}
                         signDate={record.signatures.disbursedBy?.date || record.requestDate}
-                        statusLabel="DICAIRKAN"
+                        statusLabel="DIKONFIRMASI & DICAIRKAN"
                       />
                     ) : (
-                      <span>
-                        {record.status === 'Disetujui'
-                          ? '[Siap Dicairkan Finance]'
-                          : '[Belum Dicairkan]'}
-                      </span>
+                      <>
+                        <span>
+                          {record.status === 'Disetujui'
+                            ? '[Menunggu Konfirmasi Finance Manager]'
+                            : '[Menunggu ACC Direktur]'}
+                        </span>
+                        {canConfirmDisbursement && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              confirmPanelRef.current?.scrollIntoView({
+                                behavior: 'smooth',
+                                block: 'center',
+                              })
+                            }
+                            className="not-italic px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[10.5px] font-sans font-semibold cursor-pointer print:hidden"
+                          >
+                            Konfirmasi Finance Manager ↑
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
-                  <div className="font-bold underline">
-                    {record.signatures.disbursedBy?.name || 'Ratna Sari'}
-                  </div>
-                  <div className="text-[12.5px]">Kasir / Finance Officer</div>
+                  <div className="font-bold underline">{resolvedDisbursedName}</div>
+                  <div className="text-[12.5px]">{resolvedDisbursedRole}</div>
                   <div className="text-[12px] mt-1">
                     Tanggal:{' '}
                     {record.signatures.disbursedBy?.date
@@ -731,6 +1124,11 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
                   {record.signatures.disbursedBy?.transferReference && (
                     <div className="text-[12px] mt-0.5">
                       Ref: {record.signatures.disbursedBy.transferReference}
+                    </div>
+                  )}
+                  {record.signatures.disbursedBy?.notes && (
+                    <div className="text-[11.5px] italic mt-0.5">
+                      "{record.signatures.disbursedBy.notes}"
                     </div>
                   )}
                 </td>
@@ -756,7 +1154,19 @@ export const CashAdvanceDetailModal: React.FC<CashAdvanceDetailModalProps> = ({
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded text-xs font-medium text-white bg-stone-900 hover:bg-stone-800 transition-colors cursor-pointer"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Ajukan ke Finance</span>
+              <span>Ajukan ke Finance Manager</span>
+            </button>
+          )}
+
+          {canConfirmDisbursement && (
+            <button
+              type="button"
+              onClick={() => handleFinanceManagerConfirm()}
+              disabled={actionLoading}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Konfirmasi &amp; Cairkan (Finance Manager)</span>
             </button>
           )}
 

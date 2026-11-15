@@ -551,9 +551,12 @@ export interface CashAdvanceSignatureBlock {
   };
   disbursedBy?: {
     name: string;
+    roleTitle?: string;
     date: string;
+    confirmedAt?: string;
     transferReference?: string;
     bankSource?: string;
+    notes?: string;
     isDisbursed: boolean;
   };
 }
@@ -989,9 +992,11 @@ export interface ApprovalHubItem {
     plannedSettlementDate?: string;
     isDisbursed?: boolean;
     disbursedByName?: string;
+    disbursedRoleTitle?: string;
     disbursedAt?: string;
     transferReference?: string;
     bankSource?: string;
+    disbursedNotes?: string;
     // Khusus Final Financial Report / Laporan Keuangan Akhir (Kategori 6)
     cashAdvanceReferenceNumber?: string;
     approvedAmount?: number;
