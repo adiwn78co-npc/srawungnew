@@ -178,8 +178,6 @@ export interface ExcelImportPreviewRow {
   statusMessage: string;
 }
 
-const STORAGE_KEY = 'wijna_finance_program_budgets_v3';
-
 export function buildDefaultQuarterlyPeriods(
   fiscalYear: number,
   annualBudget: number = 0
@@ -631,7 +629,39 @@ export function setFinanceActiveCustomPeriod(params: {
   const all = loadAllProgramBudgetDatasets();
   all[updatedDs.id] = updatedDs;
   saveAllProgramBudgetDatasets(all);
-  api.saveFinanceProgramBudget(updatedDs.id, updatedDs).catch(() => {});
+  api.saveFinanceProgramBudget(updatedDs.id, updatedDs).catch((err) => {
+    console.error('[FinanceProgramBudget] Failed syncing active custom period to MySQL:', err);
+  });
+  return updatedPeriods;
+}
+
+export async function setFinanceActiveCustomPeriodAsync(params: {
+  programId: string;
+  programName?: string;
+  programStartDate?: string;
+  periodId: string;
+}): Promise<ProgramBudgetPeriod[]> {
+  const { programId, programName = 'Program WIJNA', programStartDate = '', periodId } = params;
+  const resolvedYear =
+    programStartDate && Number(programStartDate.slice(0, 4)) >= 2020
+      ? Number(programStartDate.slice(0, 4))
+      : new Date().getFullYear();
+
+  const ds = getOrCreateProgramBudgetDataset(programId, programName, resolvedYear);
+  const periods = getActivePeriods(ds);
+  const updatedPeriods = periods.map((p) => ({
+    ...p,
+    isActiveForTor: p.id === periodId,
+  }));
+
+  const updatedDs: ProgramBudgetDataset = {
+    ...ds,
+    periodStructureType: 'custom',
+    customPeriods: updatedPeriods,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveProgramBudgetDatasetAsync(updatedDs);
   return updatedPeriods;
 }
 
@@ -1015,12 +1045,9 @@ export function syncProgramFinancialDataFromMealConnect(params: {
       .map((t) => t.id)
   );
 
-  // Filter Cash Advances that traceably belong to this Program & Fiscal Year
+  // Filter Cash Advances that traceably belong to this Program (following Finance-configured periods without Fiscal Year lock)
   const programCashAdvances = cashAdvances.filter((ca) => {
     if (ca.status === 'Ditolak' || ca.status === 'Draft') return false;
-    const dateRef = ca.requestDate || ca.activityStartDate || ca.createdAt || '';
-    const reqYear = Number(dateRef.slice(0, 4));
-    if (reqYear && reqYear !== dataset.fiscalYear) return false;
 
     const belongsByTor = Boolean(ca.torId && programTorIds.has(ca.torId));
     const belongsByProgramName = Boolean(

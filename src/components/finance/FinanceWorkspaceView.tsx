@@ -63,15 +63,13 @@ import {
   saveProgramBudgetDataset,
   saveProgramBudgetDatasetAsync,
   hydrateProgramBudgetDatasetsFromServer,
+  resolveAuthoritativeFiscalYearForProgram,
   getActivePeriods,
   matchPeriodForDate,
   calculateProgramBudgetMetrics,
   syncProgramFinancialDataFromMealConnect,
   downloadMasterBudgetExcelTemplate,
   parseMasterBudgetExcelFile,
-  buildDefaultQuarterlyPeriods,
-  buildDefaultSemesterPeriods,
-  buildDefaultCustomPeriods,
 } from '../../lib/programBudgetStorage.js';
 
 export type FinanceTab =
@@ -129,26 +127,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     isSystemAdmin ||
     currentUser?.role === 'program_manager';
 
-  // Derive available fiscal years strictly from actual database records (Programs, ToRs, Cash Advances)
-  const availableFiscalYears = useMemo<number[]>(() => {
-    const years = new Set<number>();
-    for (const p of programs) {
-      const sy = Number((p.startDate || '').slice(0, 4));
-      const ey = Number((p.endDate || '').slice(0, 4));
-      if (sy >= 2020 && sy <= 2035) years.add(sy);
-      if (ey >= 2020 && ey <= 2035) years.add(ey);
-    }
-    for (const t of tors) {
-      const ty = Number((t.startDate || t.createdAt || '').slice(0, 4));
-      if (ty >= 2020 && ty <= 2035) years.add(ty);
-    }
-    if (years.size === 0) {
-      years.add(new Date().getFullYear());
-    }
-    return Array.from(years).sort((a, b) => a - b);
-  }, [programs, tors]);
-
-  // 1. Select an existing program & 2. Select the fiscal year
+  // 1. Select an existing program & 2. Select Finance-configured period
   const [selectedProgramId, setSelectedProgramId] = useState<string>(() => {
     if (contextTor?.programId) return contextTor.programId;
     return programs[0]?.id || '';
@@ -160,11 +139,8 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     }
   }, [programs, selectedProgramId, contextTor]);
 
-  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(() => {
-    const torYr = Number((contextTor?.startDate || '').slice(0, 4));
-    if (torYr >= 2020) return torYr;
-    return availableFiscalYears[0] || 2026;
-  });
+  const [selectedPeriodId, setSelectedPeriodId] = useState<string>('all');
+  const [budgetSyncTick, setBudgetSyncTick] = useState<number>(0);
 
   const [activeTab, setActiveTab] = useState<FinanceTab>(
     initialTab === 'cash-advance-tambahan' ? 'cash-advance' : initialTab
@@ -173,6 +149,12 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   const selectedProgram = useMemo(
     () => programs.find((p) => p.id === selectedProgramId) || programs[0] || null,
     [programs, selectedProgramId]
+  );
+
+  // Internal authoritative dataset key resolved from Finance's saved configuration (no Fiscal Year UI lock)
+  const selectedFiscalYear = useMemo(
+    () => resolveAuthoritativeFiscalYearForProgram(selectedProgram),
+    [selectedProgram, budgetSyncTick]
   );
 
   // Connected Database Records (Cash Advances & Approval Hub)
@@ -292,6 +274,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         // Hydrate directly from authoritative MySQL server budgets
         if (serverBudgets && typeof serverBudgets === 'object') {
           hydrateProgramBudgetDatasetsFromServer(serverBudgets);
+          setBudgetSyncTick((v) => v + 1);
         }
 
         if (selectedProgram) {
@@ -350,25 +333,67 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     fetchAndSyncAllData(false);
   }, [fetchAndSyncAllData]);
 
-  // Actual ToR records in database belonging to the selected Program & Fiscal Year
-  const programTors = useMemo<Tor[]>(() => {
+  // Live metrics & Finance-configured periods from authoritative dataset
+  const metrics = useMemo(
+    () => calculateProgramBudgetMetrics(dataset),
+    [dataset]
+  );
+
+  const activeSavedPeriods = useMemo(
+    () => getActivePeriods(dataset),
+    [dataset]
+  );
+
+  // Reset selected Finance period if program changes or period is no longer configured
+  useEffect(() => {
+    setSelectedPeriodId('all');
+  }, [selectedProgramId]);
+
+  useEffect(() => {
+    if (
+      selectedPeriodId !== 'all' &&
+      !activeSavedPeriods.some((p) => p.id === selectedPeriodId)
+    ) {
+      setSelectedPeriodId('all');
+    }
+  }, [selectedPeriodId, activeSavedPeriods]);
+
+  const selectedPeriod = useMemo(
+    () =>
+      selectedPeriodId === 'all'
+        ? null
+        : activeSavedPeriods.find((p) => p.id === selectedPeriodId) || null,
+    [selectedPeriodId, activeSavedPeriods]
+  );
+
+  // Actual ToR records in database belonging to the selected Program (and selected Finance period if filtered)
+  const allProgramTors = useMemo<Tor[]>(() => {
     if (!selectedProgram) return [];
     return tors.filter((t) => {
-      const matchProg =
+      return (
         t.programId === selectedProgram.id ||
         (t.programName &&
           t.programName.trim().toLowerCase() ===
-            selectedProgram.name.trim().toLowerCase());
-      if (!matchProg) return false;
-      const torYear = Number((t.startDate || t.createdAt || '').slice(0, 4));
-      return !torYear || torYear === selectedFiscalYear;
+            selectedProgram.name.trim().toLowerCase())
+      );
     });
-  }, [tors, selectedProgram, selectedFiscalYear]);
+  }, [tors, selectedProgram]);
 
-  // Actual CashAdvanceRecords in database belonging to the selected Program & Fiscal Year
-  const programCashAdvances = useMemo<CashAdvanceRecord[]>(() => {
+  const programTors = useMemo<Tor[]>(() => {
+    if (!selectedPeriod) return allProgramTors;
+    return allProgramTors.filter((t) => {
+      const matched = matchPeriodForDate(
+        activeSavedPeriods,
+        t.startDate || t.createdAt
+      );
+      return matched.id === selectedPeriod.id;
+    });
+  }, [allProgramTors, selectedPeriod, activeSavedPeriods]);
+
+  // Actual CashAdvanceRecords in database belonging to the selected Program (and selected Finance period if filtered)
+  const allProgramCashAdvances = useMemo<CashAdvanceRecord[]>(() => {
     if (!selectedProgram) return [];
-    const torIdSet = new Set(programTors.map((t) => t.id));
+    const torIdSet = new Set(allProgramTors.map((t) => t.id));
     return cashAdvances.filter((ca) => {
       const matchByTor = Boolean(ca.torId && torIdSet.has(ca.torId));
       const matchByProgName = Boolean(
@@ -376,13 +401,75 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           ca.programName.trim().toLowerCase() ===
             selectedProgram.name.trim().toLowerCase()
       );
-      if (!matchByTor && !matchByProgName) return false;
-      const caYear = Number(
-        (ca.requestDate || ca.activityStartDate || ca.createdAt || '').slice(0, 4)
-      );
-      return !caYear || caYear === selectedFiscalYear;
+      return matchByTor || matchByProgName;
     });
-  }, [cashAdvances, selectedProgram, programTors, selectedFiscalYear]);
+  }, [cashAdvances, selectedProgram, allProgramTors]);
+
+  const programCashAdvances = useMemo<CashAdvanceRecord[]>(() => {
+    if (!selectedPeriod) return allProgramCashAdvances;
+    return allProgramCashAdvances.filter((ca) => {
+      const matched = matchPeriodForDate(
+        activeSavedPeriods,
+        ca.activityStartDate || ca.requestDate || ca.createdAt
+      );
+      return matched.id === selectedPeriod.id;
+    });
+  }, [allProgramCashAdvances, selectedPeriod, activeSavedPeriods]);
+
+  const periodFilteredTransactions = useMemo(() => {
+    const txs = dataset.transactions || [];
+    if (!selectedPeriod) return txs;
+    return txs.filter(
+      (t) =>
+        t.periodId === selectedPeriod.id ||
+        (t.transactionDate >= selectedPeriod.startDate &&
+          t.transactionDate <= selectedPeriod.endDate)
+    );
+  }, [dataset.transactions, selectedPeriod]);
+
+  // KPI metrics scoped to selected Finance period (or all configured Finance periods when 'all')
+  const displayMetrics = useMemo(() => {
+    if (!selectedPeriod) return metrics;
+    const allocated = Number(selectedPeriod.allocatedAmount) || 0;
+    const totalDisbursedAdvances = periodFilteredTransactions.reduce(
+      (s, t) => s + (Number(t.disbursedAmount) || 0),
+      0
+    );
+    const verifiedActualExpenditure = periodFilteredTransactions.reduce(
+      (s, t) => s + (Number(t.verifiedActualExpenditure) || 0),
+      0
+    );
+    const outstandingCommitments = periodFilteredTransactions.reduce(
+      (s, t) => s + (Number(t.outstandingCommitment) || 0),
+      0
+    );
+    const outstandingDisbursedAdvances = periodFilteredTransactions
+      .filter((t) => t.reconciliationStatus === 'Outstanding Advance')
+      .reduce((s, t) => s + (Number(t.outstandingCommitment) || 0), 0);
+    const pendingApprovalCommitments = periodFilteredTransactions
+      .filter((t) => t.reconciliationStatus === 'Pending Verification')
+      .reduce((s, t) => s + (Number(t.outstandingCommitment) || 0), 0);
+    const totalReturnedFunds = periodFilteredTransactions.reduce(
+      (s, t) => s + (Number(t.returnedFunds) || 0),
+      0
+    );
+    const isConfigured = allocated > 0;
+    const availableBudget = isConfigured
+      ? allocated - verifiedActualExpenditure - outstandingCommitments
+      : null;
+    return {
+      ...metrics,
+      isBudgetConfigured: isConfigured,
+      annualApprovedBudget: allocated,
+      totalDisbursedAdvances,
+      outstandingDisbursedAdvances,
+      pendingApprovalCommitments,
+      outstandingCommitments,
+      verifiedActualExpenditure,
+      totalReturnedFunds,
+      availableBudget,
+    };
+  }, [selectedPeriod, metrics, periodFilteredTransactions]);
 
   // Active draft periods for the currently selected period structure in Master Budget
   const activeDraftPeriods = useMemo(() => {
@@ -400,7 +487,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     [activeDraftPeriods]
   );
 
-  // Annual budget automatically reflects the sum of all budget periods entered for that year
+  // Total configured budget automatically reflects the sum of all Finance budget periods
   useEffect(() => {
     setDraftAnnualBudget(draftTotalPeriodAllocated);
   }, [draftTotalPeriodAllocated]);
@@ -408,30 +495,23 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   const draftAllocationVariance = 0;
   const isDraftAllocationBalanced = draftTotalPeriodAllocated > 0;
 
-  // Live metrics from authoritative dataset
-  const metrics = useMemo(
-    () => calculateProgramBudgetMetrics(dataset),
-    [dataset]
-  );
-
-  const activeSavedPeriods = useMemo(
-    () => getActivePeriods(dataset),
-    [dataset]
-  );
-
   // Per-period financial performance breakdown (including connected ToRs, Cash Advances, and Verified LPJs)
   const periodPerformanceRows = useMemo(() => {
-    return activeSavedPeriods.map((period) => {
-      const periodTors = programTors.filter((t) => {
-        const d = (t.startDate || t.createdAt || '').slice(0, 10);
-        return d >= period.startDate && d <= period.endDate;
+    const visiblePeriods = selectedPeriod ? [selectedPeriod] : activeSavedPeriods;
+    return visiblePeriods.map((period) => {
+      const periodTors = allProgramTors.filter((t) => {
+        const matched = matchPeriodForDate(
+          activeSavedPeriods,
+          t.startDate || t.createdAt
+        );
+        return matched.id === period.id;
       });
       const torApprovedSum = periodTors.reduce(
         (s, t) => s + (Number(t.budgetApproved ?? t.budgetRequested) || 0),
         0
       );
 
-      const periodTxs = dataset.transactions.filter(
+      const periodTxs = (dataset.transactions || []).filter(
         (t) =>
           t.periodId === period.id ||
           (t.transactionDate >= period.startDate &&
@@ -477,7 +557,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         txCount: periodTxs.length,
       };
     });
-  }, [activeSavedPeriods, programTors, dataset.transactions]);
+  }, [selectedPeriod, activeSavedPeriods, allProgramTors, dataset.transactions]);
 
   // Per-Master Budget Code financial performance breakdown
   const codePerformanceRows = useMemo(() => {
@@ -489,7 +569,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         (s, t) => s + (Number(t.budgetApproved ?? t.budgetRequested) || 0),
         0
       );
-      const codeTxs = dataset.transactions.filter(
+      const codeTxs = periodFilteredTransactions.filter(
         (t) => t.budgetCode === mc.code
       );
       const disbursed = codeTxs.reduce(
@@ -510,9 +590,9 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       );
       const totalCommittedOrSpent = verifiedSpent + outstanding;
       const shareOfAnnualPct =
-        metrics.isBudgetConfigured && dataset.annualApprovedBudget > 0
+        displayMetrics.isBudgetConfigured && displayMetrics.annualApprovedBudget > 0
           ? Math.round(
-              (totalCommittedOrSpent / dataset.annualApprovedBudget) * 1000
+              (totalCommittedOrSpent / displayMetrics.annualApprovedBudget) * 1000
             ) / 10
           : null;
       return {
@@ -530,22 +610,23 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     });
   }, [
     dataset.masterBudgetCodes,
-    dataset.transactions,
-    dataset.annualApprovedBudget,
-    metrics.isBudgetConfigured,
+    periodFilteredTransactions,
+    displayMetrics.annualApprovedBudget,
+    displayMetrics.isBudgetConfigured,
     programTors,
   ]);
 
-  // Cross-program comparison (strictly from real database records)
+  // Cross-program comparison (strictly from real database records, following each program's Finance period config)
   const crossProgramComparison = useMemo(() => {
     return programs.map((prog) => {
+      const progDatasetKeyYear = resolveAuthoritativeFiscalYearForProgram(prog);
       const baseDs =
         prog.id === dataset.programId
           ? dataset
           : getOrCreateProgramBudgetDataset(
               prog.id,
               prog.name,
-              selectedFiscalYear,
+              progDatasetKeyYear,
               { outcomes, outputs, activities, tors, cashAdvances }
             );
       const syncedDs =
@@ -585,7 +666,6 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   }, [
     programs,
     dataset,
-    selectedFiscalYear,
     outcomes,
     outputs,
     activities,
@@ -630,12 +710,15 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
 
   const handleAddCustomPeriod = () => {
     const nextIdx = draftCustom.length + 1;
+    const refYear =
+      (draftCustom[draftCustom.length - 1]?.endDate || '').slice(0, 4) ||
+      String(selectedFiscalYear || new Date().getFullYear());
     const newPeriod: ProgramBudgetPeriod = {
       id: `cust-${Date.now()}`,
       code: `P${nextIdx}`,
-      label: `Custom Period ${nextIdx} (${selectedFiscalYear})`,
-      startDate: `${selectedFiscalYear}-01-01`,
-      endDate: `${selectedFiscalYear}-12-31`,
+      label: `Custom Period ${nextIdx}`,
+      startDate: `${refYear}-01-01`,
+      endDate: `${refYear}-12-31`,
       allocatedAmount: 0,
     };
     setDraftCustom((prev) => [...prev, newPeriod]);
@@ -669,15 +752,15 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       quarterlyPeriods:
         draftStructureType === 'quarterly'
           ? draftQuarterly
-          : buildDefaultQuarterlyPeriods(selectedFiscalYear, 0),
+          : dataset.quarterlyPeriods,
       semesterPeriods:
         draftStructureType === 'semester'
           ? draftSemester
-          : buildDefaultSemesterPeriods(selectedFiscalYear, 0),
+          : dataset.semesterPeriods,
       customPeriods:
         draftStructureType === 'custom'
           ? draftCustom
-          : buildDefaultCustomPeriods(selectedFiscalYear, 0),
+          : dataset.customPeriods,
       revisions: [
         {
           id: `rev-${Date.now()}`,
@@ -693,7 +776,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           periodStructureType: draftStructureType,
           summary: `Updated Total Program Budget (${formatRupiah(
             safeTotalProgramBudget
-          )}), FY ${selectedFiscalYear} Annual Budget (${formatRupiah(
+          )}), Total Anggaran Periode Finance (${formatRupiah(
             computedAnnualBudget
           )}) calculated automatically from ${draftStructureType.toUpperCase()} periods (${
             activeDraftPeriods.length
@@ -712,9 +795,9 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         type: 'success',
         message: `Finance Program (${dataset.programName}) berhasil disimpan: Total Program Budget ${formatRupiah(
           safeTotalProgramBudget
-        )} dan Annual Budget FY ${selectedFiscalYear} ${formatRupiah(
+        )} dan Total Anggaran Periode Finance ${formatRupiah(
           computedAnnualBudget
-        )} (${draftStructureType.toUpperCase()}).`,
+        )} (${activeDraftPeriods.length} Periode ${draftStructureType.toUpperCase()}).`,
       });
       onRefreshData?.();
     } catch (err: any) {
@@ -730,8 +813,14 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
     setEditingProgram(null);
     setProgName('');
     setProgLocation('');
-    setProgStartDate(`${selectedFiscalYear}-01-01`);
-    setProgEndDate(`${selectedFiscalYear}-12-31`);
+    const defaultStart =
+      activeSavedPeriods[0]?.startDate ||
+      `${new Date().getFullYear()}-01-01`;
+    const defaultEnd =
+      activeSavedPeriods[activeSavedPeriods.length - 1]?.endDate ||
+      `${new Date().getFullYear()}-12-31`;
+    setProgStartDate(defaultStart);
+    setProgEndDate(defaultEnd);
     setProgDescription('');
     setProgStatus('Aktif');
     setShowProgramModal(true);
@@ -1263,7 +1352,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
   };
 
   const filteredTransactions = useMemo(() => {
-    return dataset.transactions.filter((tx) => {
+    return periodFilteredTransactions.filter((tx) => {
       const matchesStatus =
         txFilterStatus === 'all' ||
         (txFilterStatus === 'outstanding' &&
@@ -1283,7 +1372,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         tx.torNumber.toLowerCase().includes(q);
       return matchesStatus && matchesSearch;
     });
-  }, [dataset.transactions, txFilterStatus, txSearch]);
+  }, [periodFilteredTransactions, txFilterStatus, txSearch]);
 
   const workspaceTabs: Array<{
     id: FinanceTab;
@@ -1434,7 +1523,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             </p>
           </div>
 
-          {/* Global Program & Fiscal Year Selector Bar */}
+          {/* Global Program & Finance Period Selector Bar */}
           <div className="flex flex-wrap items-end gap-2.5 bg-[#F7F7F5] p-2.5 rounded-md border border-[#E5E5E3]">
             <div className="min-w-[260px] flex-1">
               <label className="block text-[10px] font-bold uppercase tracking-wider text-[#787774] mb-1">
@@ -1453,18 +1542,22 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
               </select>
             </div>
 
-            <div className="w-28">
+            <div className="min-w-[230px]">
               <label className="block text-[10px] font-bold uppercase tracking-wider text-[#787774] mb-1">
-                2. Fiscal Year
+                2. Periode (Pengaturan Finance)
               </label>
               <select
-                value={selectedFiscalYear}
-                onChange={(e) => setSelectedFiscalYear(Number(e.target.value))}
+                value={selectedPeriodId}
+                onChange={(e) => setSelectedPeriodId(e.target.value)}
                 className="w-full px-2.5 py-1.5 text-xs font-semibold text-[#252525] bg-white border border-[#D4D4D0] rounded-sm focus:outline-none focus:border-[#3867F5]"
               >
-                {availableFiscalYears.map((fy) => (
-                  <option key={fy} value={fy}>
-                    FY {fy}
+                <option value="all">
+                  Semua Periode ({activeSavedPeriods.length} Periode Finance)
+                </option>
+                {activeSavedPeriods.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.code} — {p.label} ({p.startDate} s/d {p.endDate})
+                    {p.isActiveForTor ? ' ★ Aktif' : ''}
                   </option>
                 ))}
               </select>
@@ -1578,23 +1671,33 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
 
       {/* Top Financial KPI Summary Strip (Strictly Traceable to Real Records) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5">
-        {/* Card 1: Annual Approved Budget */}
+        {/* Card 1: Total / Period Approved Budget (Following Finance Periods) */}
         <div className="bg-white border border-[#E5E5E3] rounded-md p-3">
           <div className="flex items-center justify-between text-[11px] font-semibold text-[#787774]">
-            <span>ANNUAL APPROVED BUDGET</span>
+            <span>
+              {selectedPeriod
+                ? `ANGGARAN PERIODE (${selectedPeriod.code})`
+                : 'TOTAL ANGGARAN PERIODE'}
+            </span>
             <Wallet className="w-3.5 h-3.5 text-[#3867F5]" />
           </div>
-          {metrics.isBudgetConfigured ? (
+          {displayMetrics.isBudgetConfigured ? (
             <>
               <div className="text-sm font-bold text-[#252525] mt-1 font-mono">
-                {formatRupiah(metrics.annualApprovedBudget)}
+                {formatRupiah(displayMetrics.annualApprovedBudget)}
               </div>
               <div className="text-[10px] text-[#787774] mt-1 flex items-center gap-1">
                 <span className="font-semibold text-[#252525] uppercase">
-                  {dataset.periodStructureType}
+                  {selectedPeriod
+                    ? selectedPeriod.label
+                    : dataset.periodStructureType}
                 </span>
                 <span>•</span>
-                <span>{activeSavedPeriods.length} Periode</span>
+                <span>
+                  {selectedPeriod
+                    ? `${selectedPeriod.startDate} s/d ${selectedPeriod.endDate}`
+                    : `${activeSavedPeriods.length} Periode Finance`}
+                </span>
               </div>
             </>
           ) : (
@@ -1639,10 +1742,10 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <Banknote className="w-3.5 h-3.5 text-[#37352F]" />
           </div>
           <div className="text-sm font-bold text-[#252525] mt-1 font-mono">
-            {formatRupiah(metrics.totalDisbursedAdvances)}
+            {formatRupiah(displayMetrics.totalDisbursedAdvances)}
           </div>
           <div className="text-[10px] text-[#787774] mt-1">
-            Pending/Review CA: {formatRupiah(metrics.pendingApprovalCommitments)}
+            Pending/Review CA: {formatRupiah(displayMetrics.pendingApprovalCommitments)}
           </div>
         </div>
 
@@ -1653,10 +1756,10 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <Clock className="w-3.5 h-3.5 text-[#D97706]" />
           </div>
           <div className="text-sm font-bold text-[#B26B00] mt-1 font-mono">
-            {formatRupiah(metrics.outstandingDisbursedAdvances)}
+            {formatRupiah(displayMetrics.outstandingDisbursedAdvances)}
           </div>
           <div className="text-[10px] text-[#787774] mt-1">
-            Total Komitmen Aktif: {formatRupiah(metrics.outstandingCommitments)}
+            Total Komitmen Aktif: {formatRupiah(displayMetrics.outstandingCommitments)}
           </div>
         </div>
 
@@ -1667,19 +1770,19 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <CheckCircle2 className="w-3.5 h-3.5 text-[#2B6E3F]" />
           </div>
           <div className="text-sm font-bold text-[#2B6E3F] mt-1 font-mono">
-            {formatRupiah(metrics.verifiedActualExpenditure)}
+            {formatRupiah(displayMetrics.verifiedActualExpenditure)}
           </div>
           <div className="text-[10px] text-[#787774] mt-1">
-            Returned Funds: {formatRupiah(metrics.totalReturnedFunds)}
+            Returned Funds: {formatRupiah(displayMetrics.totalReturnedFunds)}
           </div>
         </div>
 
         {/* Card 6: Available / Remaining Budget */}
         <div
           className={`border rounded-md p-3 ${
-            !metrics.isBudgetConfigured
+            !displayMetrics.isBudgetConfigured
               ? 'bg-[#FAFAF9] border-[#E5E5E3]'
-              : (metrics.availableBudget ?? 0) < 0
+              : (displayMetrics.availableBudget ?? 0) < 0
               ? 'bg-[#FDECEC] border-[#F5C2C2]'
               : 'bg-[#F2F6FF] border-[#C7D7FE]'
           }`}
@@ -1688,28 +1791,30 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <span>REMAINING BUDGET</span>
             <PieChart className="w-3.5 h-3.5 text-[#2851C5]" />
           </div>
-          {metrics.isBudgetConfigured && metrics.availableBudget !== null ? (
+          {displayMetrics.isBudgetConfigured && displayMetrics.availableBudget !== null ? (
             <>
               <div
                 className={`text-sm font-bold mt-1 font-mono ${
-                  metrics.availableBudget < 0
+                  displayMetrics.availableBudget < 0
                     ? 'text-[#C93B3B]'
                     : 'text-[#1E3A8A]'
                 }`}
               >
-                {formatRupiah(metrics.availableBudget)}
+                {formatRupiah(displayMetrics.availableBudget)}
               </div>
               <div className="text-[10px] text-[#475569] mt-1 font-mono">
-                Annual − Verified − Commitments
+                {selectedPeriod
+                  ? `Periode ${selectedPeriod.code} − Verified − Commitments`
+                  : 'Periode Finance − Verified − Commitments'}
               </div>
             </>
           ) : (
             <>
               <div className="text-xs font-semibold text-[#787774] mt-1">
-                Menunggu Pagu Tahunan
+                Menunggu Pagu Periode
               </div>
               <div className="text-[10px] text-[#787774] mt-1">
-                Set Annual Budget di Modul 2
+                Atur Periode Budget di Modul 2
               </div>
             </>
           )}
@@ -1721,17 +1826,18 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
       {/* ===================================================================== */}
       {activeTab === 'dashboard' && (
         <div className="space-y-4">
-          {/* Prompt to configure Annual Budget if not yet configured */}
-          {!metrics.isBudgetConfigured && (
+          {/* Prompt to configure Period Budget if not yet configured */}
+          {!displayMetrics.isBudgetConfigured && (
             <div className="bg-[#FFFBEB] border border-[#FDE68A] rounded-md p-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-[#B26B00] shrink-0 mt-0.5" />
                 <div>
                   <h4 className="text-xs font-bold text-[#92400E]">
-                    Annual Approved Budget Belum Ditetapkan untuk {selectedProgram?.name} (FY {selectedFiscalYear})
+                    Anggaran Periode Finance Belum Ditetapkan untuk {selectedProgram?.name}
+                    {selectedPeriod ? ` (${selectedPeriod.code}: ${selectedPeriod.label})` : ''}
                   </h4>
                   <p className="text-[11px] text-[#B45309] mt-0.5">
-                    Sesuai prinsip integritas data (tanpa angka fiktif), sistem tidak menampilkan saldo anggaran simulasi sebelum Anda menetapkan Annual Budget dan alokasi periode di modul <strong>Master Budget</strong>. Seluruh data ToR ({programTors.length}) dan Cash Advance ({programCashAdvances.length}) dari database tetap ditampilkan secara utuh di bawah ini.
+                    Sesuai prinsip integritas data (tanpa angka fiktif), sistem tidak menampilkan saldo anggaran simulasi sebelum Anda menetapkan alokasi periode di modul <strong>Master Budget</strong>. Seluruh data ToR ({programTors.length}) dan Cash Advance ({programCashAdvances.length}) dari database tetap ditampilkan secara utuh di bawah ini.
                   </p>
                 </div>
               </div>
@@ -1793,7 +1899,8 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   {programTors.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="py-8 text-center text-xs text-[#787774]">
-                        Belum ada dokumen ToR atau transaksi keuangan pada program ini untuk FY {selectedFiscalYear}.
+                        Belum ada dokumen ToR atau transaksi keuangan pada program ini
+                        {selectedPeriod ? ` untuk periode ${selectedPeriod.code} (${selectedPeriod.label})` : ''}.
                       </td>
                     </tr>
                   ) : (
@@ -2125,7 +2232,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <div className="px-4 py-3 border-b border-[#EAEAEA] bg-[#FAFAF9] flex items-center justify-between">
               <div>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[#252525]">
-                  Ringkasan Lintas Program (FY {selectedFiscalYear})
+                  Ringkasan Lintas Program (Sesuai Periode Finance)
                 </h3>
                 <p className="text-[11px] text-[#787774]">
                   Klik program mana pun untuk beralih fokus pengelolaan anggaran
@@ -2138,7 +2245,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   <tr className="border-b border-[#E5E5E3] bg-[#F7F7F5] text-[10px] font-bold uppercase text-[#787774]">
                     <th className="py-2 px-3">Program</th>
                     <th className="py-2 px-3">Status</th>
-                    <th className="py-2 px-3 text-right">Annual Budget</th>
+                    <th className="py-2 px-3 text-right">Anggaran Periode</th>
                     <th className="py-2 px-3 text-right">Master ToR ({tors.length})</th>
                     <th className="py-2 px-3 text-right">Outstanding CA</th>
                     <th className="py-2 px-3 text-right">Verified Spent</th>
@@ -2232,13 +2339,12 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           externalSelectedProgramId={selectedProgram?.id}
           onExternalSelectProgramId={(progId) => setSelectedProgramId(progId)}
           externalFiscalYear={selectedFiscalYear}
-          onExternalChangeFiscalYear={(fy) => setSelectedFiscalYear(fy)}
           onNavigateToFinanceTab={(tab) => setActiveTab(tab)}
         />
       )}
 
       {/* ===================================================================== */}
-      {/* MODULE 2: MASTER BUDGET (ANNUAL BUDGET & EXCLUSIVE PERIOD STRUCTURE)  */}
+      {/* MODULE 2: MASTER BUDGET (FINANCE PERIODS & ALLOCATION STRUCTURE)      */}
       {/* ===================================================================== */}
       {activeTab === 'budget-planning' && (
         <div className="bg-white border border-[#E5E5E3] rounded-md p-4 space-y-5">
@@ -2249,14 +2355,14 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   MODUL 2 • MASTER BUDGET
                 </span>
                 <span className="text-xs text-[#787774]">
-                  {dataset.programName} (FY {selectedFiscalYear})
+                  {dataset.programName}
                 </span>
               </div>
               <h3 className="text-sm font-bold text-[#252525] mt-1">
-                Konfigurasi Annual Program Budget & Struktur Periode Anggaran
+                Konfigurasi Anggaran Program &amp; Struktur Periode Finance
               </h3>
               <p className="text-xs text-[#787774]">
-                Pilih tepat satu struktur periode (Quarterly, Semester, atau Custom Period) dan alokasikan anggaran tahunan secara proporsional.
+                Pilih struktur periode (Quarterly, Semester, atau Custom Period) yang diatur oleh Finance dan alokasikan anggaran secara proporsional.
               </p>
             </div>
             {canEditFinance && (
@@ -2313,14 +2419,14 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
             <div className="p-3.5 rounded-md bg-[#F7F7F5] border border-[#E5E5E3]">
               <div className="flex items-center justify-between gap-1 mb-1">
                 <label className="block text-xs font-bold text-[#252525]">
-                  Annual Budget (FY {selectedFiscalYear})
+                  Total Anggaran Periode (Finance)
                 </label>
                 <span className="px-1.5 py-0.5 rounded-xs text-[9.5px] font-bold bg-[#E8F0FE] text-[#2851C5] uppercase">
                   Otomatis dari Periode
                 </span>
               </div>
               <p className="text-[11px] text-[#787774] mb-2">
-                Dihitung otomatis dari jumlah seluruh periode pada FY {selectedFiscalYear}.
+                Dihitung otomatis dari jumlah seluruh periode anggaran yang diatur Finance.
               </p>
               <div className="px-3 py-2 text-sm font-mono font-bold text-[#2851C5] bg-white border border-[#D4D4D0] rounded-sm">
                 {draftTotalPeriodAllocated > 0
@@ -2403,10 +2509,10 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
               )}
               <span>
                 {draftTotalPeriodAllocated === 0 ? (
-                  `Belum ada nominal anggaran periode untuk FY ${selectedFiscalYear}. Silakan isi nominal anggaran pada setiap periode di bawah ini.`
+                  'Belum ada nominal anggaran periode. Silakan isi nominal anggaran pada setiap periode Finance di bawah ini.'
                 ) : (
                   <>
-                    <strong>Annual Budget FY {selectedFiscalYear}:</strong> Otomatis merefleksikan jumlah seluruh periode{' '}
+                    <strong>Total Anggaran Periode Finance:</strong> Otomatis merefleksikan jumlah seluruh periode{' '}
                     <span className="uppercase font-bold">
                       ({draftStructureType === 'quarterly' ? 'Quarter' : draftStructureType === 'semester' ? 'Semester' : 'Custom Period'})
                     </span>{' '}
@@ -2416,7 +2522,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
               </span>
             </div>
             <div className="font-mono font-bold">
-              Annual Budget FY {selectedFiscalYear}: {formatRupiah(draftTotalPeriodAllocated)}
+              Total Periode Finance: {formatRupiah(draftTotalPeriodAllocated)}
             </div>
           </div>
 
@@ -2589,7 +2695,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   MODUL 3 • MASTER BUDGET CODE
                 </span>
                 <span className="text-xs text-[#787774]">
-                  {dataset.programName} (FY {selectedFiscalYear})
+                  {dataset.programName}
                 </span>
               </div>
               <h3 className="text-sm font-bold text-[#252525] mt-1">
@@ -2736,7 +2842,8 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   MODUL 4 • MASTER ToR
                 </span>
                 <span className="text-xs text-[#787774]">
-                  {dataset.programName} (FY {selectedFiscalYear})
+                  {dataset.programName}
+                  {selectedPeriod ? ` • ${selectedPeriod.code} (${selectedPeriod.label})` : ''}
                 </span>
               </div>
               <h3 className="text-sm font-bold text-[#252525] mt-1">
@@ -2779,8 +2886,8 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                       colSpan={8}
                       className="py-8 text-center text-xs text-[#787774]"
                     >
-                      Belum ada dokumen ToR untuk {dataset.programName} pada FY{' '}
-                      {selectedFiscalYear}.
+                      Belum ada dokumen ToR untuk {dataset.programName}
+                      {selectedPeriod ? ` pada periode ${selectedPeriod.code} (${selectedPeriod.label})` : ''}.
                     </td>
                   </tr>
                 ) : (
@@ -2930,7 +3037,8 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   MODUL 5 • CASH ADVANCE
                 </span>
                 <span className="text-xs text-[#787774]">
-                  {dataset.programName} (FY {selectedFiscalYear})
+                  {dataset.programName}
+                  {selectedPeriod ? ` • ${selectedPeriod.code} (${selectedPeriod.label})` : ''}
                 </span>
               </div>
               <h3 className="text-sm font-bold text-[#252525] mt-1">
@@ -2961,11 +3069,11 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5">
               {[
-                { id: 'all', label: `Semua (${(dataset.transactions || []).length})` },
+                { id: 'all', label: `Semua (${periodFilteredTransactions.length})` },
                 {
                   id: 'pending',
                   label: `Menunggu Verifikasi/Approve (${
-                    (dataset.transactions || []).filter(
+                    periodFilteredTransactions.filter(
                       (t) => t.reconciliationStatus === 'Pending Verification'
                     ).length
                   })`,
@@ -2973,7 +3081,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                 {
                   id: 'outstanding',
                   label: `Dicairkan / Outstanding (${
-                    (dataset.transactions || []).filter(
+                    periodFilteredTransactions.filter(
                       (t) => t.reconciliationStatus === 'Outstanding Advance'
                     ).length
                   })`,
@@ -2981,7 +3089,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                 {
                   id: 'reconciled',
                   label: `LPJ Selesai (${
-                    dataset.transactions.filter(
+                    periodFilteredTransactions.filter(
                       (t) => t.reconciliationStatus === 'Verified & Reconciled'
                     ).length
                   })`,
@@ -3446,16 +3554,16 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
         <div className="bg-white border border-[#E5E5E3] rounded-md overflow-hidden">
           <div className="px-4 py-3 border-b border-[#EAEAEA] bg-[#FAFAF9]">
             <h3 className="text-sm font-bold text-[#252525]">
-              Revision History — {dataset.programName} (FY {selectedFiscalYear})
+              Revision History — {dataset.programName}
             </h3>
             <p className="text-xs text-[#787774]">
-              Jejak audit perubahan konfigurasi anggaran tahunan, periode anggaran, dan Master Budget Code pada program ini.
+              Jejak audit perubahan konfigurasi anggaran, periode anggaran Finance, dan Master Budget Code pada program ini.
             </p>
           </div>
           <div className="divide-y divide-[#EAEAEA]">
             {(dataset.revisions || []).length === 0 ? (
               <div className="p-8 text-center text-xs text-[#787774]">
-                Belum ada riwayat revisi konfigurasi anggaran untuk program ini pada FY {selectedFiscalYear}.
+                Belum ada riwayat revisi konfigurasi anggaran untuk program ini.
               </div>
             ) : (
               (dataset.revisions || []).map((rev) => (
@@ -3478,7 +3586,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                   <div className="text-right font-mono text-[11px] text-[#787774] shrink-0">
                     <div>{new Date(rev.timestamp).toLocaleString('id-ID')}</div>
                     <div className="font-semibold text-[#252525]">
-                      Annual Budget: {formatRupiah(rev.newAnnualBudget)}
+                      Total Periode: {formatRupiah(rev.newAnnualBudget)}
                     </div>
                   </div>
                 </div>
@@ -3620,7 +3728,7 @@ export const FinanceWorkspaceView: React.FC<FinanceWorkspaceViewProps> = ({
                     : 'Add Master Budget Code'}
                 </h3>
                 <p className="text-[11px] text-[#787774]">
-                  {dataset.programName} (FY {selectedFiscalYear})
+                  {dataset.programName}
                 </p>
               </div>
               <button

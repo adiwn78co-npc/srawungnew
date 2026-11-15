@@ -40,6 +40,7 @@ import {
   getOrCreateProgramBudgetDataset,
   getRegisteredProgramBudgetCodes,
   hydrateProgramBudgetDatasetsFromServer,
+  resolveAuthoritativeFiscalYearForProgram,
   getActivePeriods,
   ProgramBudgetDataset,
   ProgramMasterBudgetCode,
@@ -613,9 +614,10 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
       setImplementationMode('all');
       setSelectedTimelineIds(tlList.map((t) => t.id));
 
-      const targetFy =
-        Number((requestDate || targetTor.startDate || new Date().toISOString()).slice(0, 4)) ||
-        new Date().getFullYear();
+      const targetFy = resolveAuthoritativeFiscalYearForProgram({
+        id: targetTor.programId,
+        startDate: targetTor.startDate,
+      });
       const targetProgramCodes = getRegisteredProgramBudgetCodes({
         programId: targetTor.programId,
         programName: targetTor.programName,
@@ -748,9 +750,10 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
   const amountInWords = angkaKeTerbilangRupiah(grandTotal);
 
   // Program-scoped Finance Dataset (Program -> Outcome -> Output -> Activity -> ToR -> Finance Code / Cash Advance Code)
-  const caFiscalYear = Number(
-    (requestDate || selectedTor?.startDate || new Date().toISOString()).slice(0, 4)
-  ) || new Date().getFullYear();
+  const caFiscalYear = resolveAuthoritativeFiscalYearForProgram({
+    id: selectedTor?.programId,
+    startDate: selectedTor?.startDate,
+  });
 
   const [programBudgetDataset, setProgramBudgetDataset] = useState<ProgramBudgetDataset | null>(
     () => {
@@ -1664,9 +1667,12 @@ export const CashAdvanceFormModal: React.FC<CashAdvanceFormModalProps> = ({
                                 </strong>
                               </div>
                               <div>
-                                <span className="text-slate-500">Budget Period &amp; Pagu FY {caFiscalYear}:</span>{' '}
+                                <span className="text-slate-500">Periode Anggaran &amp; Pagu (Finance):</span>{' '}
                                 <strong className="font-mono text-slate-900">
-                                  {matchedBudgetPeriod ? matchedBudgetPeriod.code : '-'} •{' '}
+                                  {matchedBudgetPeriod
+                                    ? `${matchedBudgetPeriod.code} (${matchedBudgetPeriod.startDate} s/d ${matchedBudgetPeriod.endDate})`
+                                    : '-'}{' '}
+                                  •{' '}
                                   {programBudgetDataset && programBudgetDataset.annualApprovedBudget > 0
                                     ? formatRupiah(programBudgetDataset.annualApprovedBudget)
                                     : 'Belum Diisi'}

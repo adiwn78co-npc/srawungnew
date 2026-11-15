@@ -3930,6 +3930,7 @@ async function startServer() {
   app.post('/api/programs/:id/import-hierarchy', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'finance' &&
@@ -5463,6 +5464,7 @@ async function startServer() {
       targetTor.picName === currentUser.name;
     const canWriteContributionReport =
       isPicOrCreator ||
+      currentUser.role === 'system_admin' ||
       currentUser.role === 'director' ||
       currentUser.role === 'program_manager' ||
       currentUser.role === 'meal' ||
@@ -5712,6 +5714,21 @@ async function startServer() {
           error: `Nomor Cash Advance "${String(body.advanceNumber).trim()}" sudah terdaftar di database.`,
         });
       }
+    }
+
+    const reqTotalAmount = Number(body.totalAmount || 0);
+    const reqTimelineSig = String(body.implementationTimelineSummary || '').trim().toLowerCase();
+    const recentDupCa = existingForTor.find((c) => {
+      if (c.requesterId !== currentUser.id) return false;
+      if (Number(c.totalAmount || 0) !== reqTotalAmount) return false;
+      if (String(c.implementationTimelineSummary || '').trim().toLowerCase() !== reqTimelineSig) return false;
+      const createdMs = new Date(c.createdAt || c.requestDate || 0).getTime();
+      return !isNaN(createdMs) && Date.now() - createdMs < 15000;
+    });
+    if (recentDupCa) {
+      return res.status(409).json({
+        error: 'Pengajuan Cash Advance identik baru saja dikirim. Mohon tunggu beberapa detik untuk mencegah duplikasi data.',
+      });
     }
 
     const now = new Date();
@@ -6996,6 +7013,8 @@ async function startServer() {
     const data = db.getData();
     const canViewGlobalAudit =
       currentUser.role === 'admin' ||
+      currentUser.role === 'system_admin' ||
+      currentUser.role === 'hr' ||
       currentUser.role === 'director' ||
       currentUser.role === 'finance' ||
       currentUser.role === 'program_manager' ||
@@ -7318,6 +7337,37 @@ async function startServer() {
     const currentUser = getCurrentUser(req);
     const now = new Date();
     const body = req.body || {};
+
+    const rawTitle = String(body.title || '').trim();
+    if (!rawTitle && !body.torId) {
+      return res.status(400).json({
+        error: 'Judul Notulen atau rujukan Dokumen ToR wajib diisi.',
+      });
+    }
+
+    const existingList = db.getData().meetingMinutes || [];
+    if (body.documentNumber) {
+      const normDocNum = String(body.documentNumber).trim().toLowerCase();
+      if (existingList.some((m) => String(m.documentNumber || '').trim().toLowerCase() === normDocNum)) {
+        return res.status(409).json({
+          error: `Nomor Dokumen Notulen "${String(body.documentNumber).trim()}" sudah terdaftar di database.`,
+        });
+      }
+    }
+    const reqDateSig = String(body.meetingDate || now.toISOString().slice(0, 10)).trim();
+    const recentDupMom = existingList.find((m) => {
+      if (m.createdById !== currentUser.id) return false;
+      if (String(m.torId || '') !== String(body.torId || '')) return false;
+      if (String(m.title || '').trim().toLowerCase() !== rawTitle.toLowerCase() && rawTitle) return false;
+      if (String(m.meetingDate || '').trim() !== reqDateSig) return false;
+      const createdMs = new Date(m.createdAt || 0).getTime();
+      return !isNaN(createdMs) && Date.now() - createdMs < 15000;
+    });
+    if (recentDupMom) {
+      return res.status(409).json({
+        error: 'Notulen rapat identik baru saja disimpan. Mohon tunggu beberapa detik untuk mencegah duplikasi data.',
+      });
+    }
 
     let createdRecord: MeetingMinutesRecord | null = null;
 
@@ -9404,6 +9454,21 @@ async function startServer() {
       if (!groupName) {
         return res.status(400).json({ error: 'Nama Kelompok/Organisasi wajib diisi.' });
       }
+      const normGroupName = groupName.toLowerCase();
+      const normRegion = String(body.regionCommunity || '').trim().toLowerCase();
+      const existingParticipants = db.getData().participantDatabase || [];
+      const recentDupGroup = existingParticipants.find((r) => {
+        if (r.participantType !== 'KELOMPOK/ORGANISASI') return false;
+        if (String(r.groupName || '').trim().toLowerCase() !== normGroupName) return false;
+        if (String(r.regionCommunity || '').trim().toLowerCase() !== normRegion) return false;
+        const createdMs = new Date(r.createdAt || 0).getTime();
+        return !isNaN(createdMs) && Date.now() - createdMs < 30000;
+      });
+      if (recentDupGroup) {
+        return res.status(409).json({
+          error: `Data Kelompok/Organisasi "${groupName}" baru saja didaftarkan. Pengiriman ganda dicegah.`,
+        });
+      }
       const { matrix, totalMembers } = normalizeGroupComposition(body.memberComposition);
       db.update((draft) => {
         if (!Array.isArray(draft.participantDatabase)) {
@@ -9774,6 +9839,7 @@ async function startServer() {
     const { id } = req.params;
     const currentUser = getCurrentUser(req);
     if (
+      currentUser.role !== 'system_admin' &&
       currentUser.role !== 'director' &&
       currentUser.role !== 'program_manager' &&
       currentUser.role !== 'meal' &&
@@ -9781,7 +9847,7 @@ async function startServer() {
       !currentUser.permissions?.canManagePrograms
     ) {
       return res.status(403).json({
-        error: 'Akses ditolak: Hanya Direktur, Program Manager, atau MEAL yang berwenang menghapus profil master peserta.',
+        error: 'Akses ditolak: Hanya Direktur, Program Manager, System Admin, atau MEAL yang berwenang menghapus profil master peserta.',
       });
     }
     const nowIso = new Date().toISOString();
@@ -11101,6 +11167,29 @@ async function startServer() {
     if (!categoryId || !startDate || !endDate) {
       return res.status(400).json({ error: 'Pilih jenis cuti/izin dan rentang tanggal.' });
     }
+    if (String(endDate) < String(startDate)) {
+      return res.status(400).json({ error: 'Tanggal selesai cuti/izin tidak boleh lebih awal dari tanggal mulai.' });
+    }
+    const attSysSnapshot = db.getData().attendanceSystem;
+    const resolvedPol =
+      attSysSnapshot?.leavePolicies?.find((p) => p.id === categoryId) ||
+      attSysSnapshot?.leavePolicies?.[0];
+    const resolvedCategoryId = resolvedPol?.id || categoryId;
+    const existingLeaves = attSysSnapshot?.leaveRequests || [];
+    const dupLeave = existingLeaves.find(
+      (lv) =>
+        lv.userId === currentUser.id &&
+        (lv.categoryId === resolvedCategoryId || lv.categoryId === categoryId) &&
+        lv.startDate === startDate &&
+        lv.endDate === endDate &&
+        lv.status !== 'Returned' &&
+        Date.now() - new Date(lv.createdAt || 0).getTime() < 30000
+    );
+    if (dupLeave) {
+      return res.status(409).json({
+        error: 'Pengajuan cuti/izin dengan rentang tanggal yang sama baru saja dikirim.',
+      });
+    }
 
     const nowIso = new Date().toISOString();
     db.update((draft) => {
@@ -11394,12 +11483,33 @@ async function startServer() {
     const resolvedStart = String(startDate || date || '').trim();
     const resolvedEnd = String(endDate || resolvedStart || '').trim();
 
-    if (!resolvedStart || !reasonAndPlan) {
+    if (!resolvedStart || !reasonAndPlan || !String(reasonAndPlan).trim()) {
       return res.status(400).json({ error: 'Tanggal WFA dan rencana pekerjaan harian wajib diisi.' });
+    }
+    if (resolvedEnd < resolvedStart) {
+      return res.status(400).json({ error: 'Tanggal selesai WFA tidak boleh lebih awal dari tanggal mulai.' });
     }
 
     if (mode === 'hr_manual' && !isHrAuthorized(currentUser)) {
       return res.status(403).json({ error: 'Hanya Finance/HR yang dapat memasukkan status WFA secara manual untuk staf.' });
+    }
+
+    const targetUidForCheck = mode === 'hr_manual' && userId ? userId : currentUser.id;
+    const existingWfas = db.getData().attendanceSystem?.wfaRequests || [];
+    const recentDupWfa = existingWfas.find(
+      (w) =>
+        w.userId === targetUidForCheck &&
+        (w.startDate || w.date) === resolvedStart &&
+        (w.endDate || w.date) === resolvedEnd &&
+        String(w.reasonAndPlan || '').trim().toLowerCase() === String(reasonAndPlan).trim().toLowerCase() &&
+        w.status !== 'Returned' &&
+        w.status !== 'Ditolak HR' &&
+        Date.now() - new Date(w.createdAt || 0).getTime() < 15000
+    );
+    if (recentDupWfa) {
+      return res.status(409).json({
+        error: 'Pengajuan WFA identik baru saja dikirim. Mohon tunggu beberapa detik untuk mencegah duplikasi data.',
+      });
     }
 
     const nowIso = new Date().toISOString();

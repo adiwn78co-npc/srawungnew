@@ -901,12 +901,15 @@ export const ProgramStructureView: React.FC<ProgramStructureViewProps> = ({
 
   const handleAddCustomPeriod = () => {
     const nextIdx = draftCustom.length + 1;
+    const refYear =
+      (draftCustom[draftCustom.length - 1]?.endDate || '').slice(0, 4) ||
+      String(selectedFiscalYear || new Date().getFullYear());
     const newPeriod: ProgramBudgetPeriod = {
       id: `cust-${Date.now()}`,
       code: `P${nextIdx}`,
-      label: `Custom Period ${nextIdx} (${selectedFiscalYear})`,
-      startDate: `${selectedFiscalYear}-01-01`,
-      endDate: `${selectedFiscalYear}-12-31`,
+      label: `Custom Period ${nextIdx}`,
+      startDate: `${refYear}-01-01`,
+      endDate: `${refYear}-12-31`,
       allocatedAmount: 0,
     };
     setDraftCustom((prev) => [...prev, newPeriod]);
