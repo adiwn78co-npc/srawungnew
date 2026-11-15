@@ -331,7 +331,7 @@ async function startServer() {
     const normalizedPath = rawUrl.replace(/\\/g, '/');
     if (
       normalizedPath.includes('..') ||
-      /^\/(?:\.env|\.git|data\/|database\/|scripts\/|server\.ts$|server\.js$|package\.json$|package-lock\.json$|bun\.lock$|tsconfig\.json$)/i.test(
+      /^\/(?:\.env|\.git|data\/|database\/|scripts\/|server\.ts$|server\.js$|package\.json$|package-lock\.json$|bun\.lock$|bunfig\.toml$|tsconfig\.json$)/i.test(
         normalizedPath
       )
     ) {
@@ -12440,6 +12440,9 @@ async function startServer() {
     Boolean(process.env.PASSENGER_APP_ENV) ||
     (isRunningCompiledServerJs && fs.existsSync(distIndexHtml));
 
+  let viteMiddleware: any = null;
+  let viteInitPromise: Promise<any> | null = null;
+
   if (isProductionRuntime && fs.existsSync(distIndexHtml)) {
     app.use(
       '/assets',
@@ -12472,15 +12475,31 @@ async function startServer() {
       res.sendFile(distIndexHtml);
     });
   } else {
-    const vite = await createViteServer({
+    viteInitPromise = createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
         watch: null,
       },
       appType: 'spa',
+    }).then((vite) => {
+      viteMiddleware = vite.middlewares;
+      return vite;
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      try {
+        if (!viteMiddleware && viteInitPromise) {
+          await viteInitPromise;
+        }
+        if (viteMiddleware) {
+          return viteMiddleware(req, res, next);
+        }
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
   }
 
   const startListening = (retriesLeft = 5) => {

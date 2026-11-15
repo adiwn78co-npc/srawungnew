@@ -1,9 +1,12 @@
-import { execFileSync, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import type { DatabaseSchema } from './db.ts';
+
+const execFileAsync = promisify(execFile);
 
 const __poolFile = fileURLToPath(import.meta.url);
 const __poolDir = path.dirname(__poolFile);
@@ -109,7 +112,10 @@ async function ensureLocalMariaDbReady(): Promise<void> {
   };
 
   localMariaDbReadyPromise = (async () => {
-    // 1. Jika container preview baru bangun dari sleep dan binary mariadbd belum terpasang, pasang otomatis
+    // Yield immediately so startServer() binds port 3000 without waiting on any child process
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // 1. Jika container preview baru bangun dari sleep dan binary mariadbd belum terpasang, pasang secara non-blocking
     if (
       (!fs.existsSync(LOCAL_MARIADB_BIN) || !fs.existsSync(LOCAL_MYSQL_CLI)) &&
       canAutoProvisionPreviewMariaDb()
@@ -119,17 +125,15 @@ async function ensureLocalMariaDbReady(): Promise<void> {
           break;
         }
         try {
-          execFileSync(LOCAL_APT_GET, ['update', '-qq'], {
+          await execFileAsync(LOCAL_APT_GET, ['update', '-qq'], {
             env: cleanCliEnv,
-            stdio: 'ignore',
             timeout: 45_000,
           });
-          execFileSync(
+          await execFileAsync(
             LOCAL_APT_GET,
             ['install', '-y', '-qq', 'mariadb-server', 'mariadb-client'],
             {
               env: cleanCliEnv,
-              stdio: 'ignore',
               timeout: 90_000,
             }
           );
@@ -146,7 +150,7 @@ async function ensureLocalMariaDbReady(): Promise<void> {
     }
 
     try {
-      execFileSync(
+      await execFileAsync(
         LOCAL_MYSQL_CLI,
         [
           '--protocol=socket',
@@ -157,7 +161,7 @@ async function ensureLocalMariaDbReady(): Promise<void> {
           '-e',
           'SELECT 1;',
         ],
-        { env: cleanCliEnv, stdio: 'ignore', timeout: 3000 }
+        { env: cleanCliEnv, timeout: 3000 }
       );
       return;
     } catch {
@@ -166,15 +170,13 @@ async function ensureLocalMariaDbReady(): Promise<void> {
 
     const persistentDataDir = getPersistentLocalMariaDbDataDir();
     try {
-      fs.mkdirSync(persistentDataDir, { recursive: true });
-      execFileSync('/bin/mkdir', ['-p', '/run/mysqld'], {
+      await fs.promises.mkdir(persistentDataDir, { recursive: true });
+      await execFileAsync('/bin/mkdir', ['-p', '/run/mysqld'], {
         env: cleanCliEnv,
-        stdio: 'ignore',
         timeout: 3000,
       });
-      execFileSync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
+      await execFileAsync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
         env: cleanCliEnv,
-        stdio: 'ignore',
         timeout: 5000,
       });
     } catch {
@@ -188,22 +190,22 @@ async function ensureLocalMariaDbReady(): Promise<void> {
       const installDbBin = fs.existsSync(LOCAL_MARIADB_INSTALL_DB)
         ? LOCAL_MARIADB_INSTALL_DB
         : LOCAL_MYSQL_INSTALL_DB;
-      execFileSync(
+      await execFileAsync(
         installDbBin,
         [
           '--user=mysql',
           `--datadir=${persistentDataDir}`,
           '--auth-root-authentication-method=normal',
         ],
-        { env: cleanCliEnv, stdio: 'ignore', timeout: 30_000 }
+        { env: cleanCliEnv, timeout: 30_000 }
       );
-      fs.writeFileSync(markerFile, new Date().toISOString(), 'utf-8');
+      await fs.promises.writeFile(markerFile, new Date().toISOString(), 'utf-8');
       needRestartForPersistentDir = true;
     }
 
     // Cek apakah daemon yang aktif saat ini sudah menggunakan persistentDataDir
     try {
-      const activeDataDirOut = execFileSync(
+      const { stdout: activeDataDirOut } = await execFileAsync(
         LOCAL_MYSQL_CLI,
         [
           '--protocol=socket',
@@ -216,8 +218,8 @@ async function ensureLocalMariaDbReady(): Promise<void> {
           'SELECT @@datadir;',
         ],
         { env: cleanCliEnv, encoding: 'utf-8', timeout: 2500 }
-      ).trim();
-      const normalizedActive = activeDataDirOut.replace(/\/+$/, '');
+      );
+      const normalizedActive = activeDataDirOut.trim().replace(/\/+$/, '');
       const normalizedTarget = persistentDataDir.replace(/\/+$/, '');
       if (normalizedActive && normalizedActive !== normalizedTarget) {
         needRestartForPersistentDir = true;
@@ -228,10 +230,10 @@ async function ensureLocalMariaDbReady(): Promise<void> {
 
     if (needRestartForPersistentDir) {
       try {
-        execFileSync(
+        await execFileAsync(
           LOCAL_MYSQLADMIN_CLI,
           ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', 'shutdown'],
-          { env: cleanCliEnv, stdio: 'ignore', timeout: 5000 }
+          { env: cleanCliEnv, timeout: 5000 }
         );
         await new Promise((resolve) => setTimeout(resolve, 600));
       } catch {
@@ -241,10 +243,10 @@ async function ensureLocalMariaDbReady(): Promise<void> {
 
     let sqlReady = false;
     try {
-      execFileSync(
+      await execFileAsync(
         LOCAL_MYSQL_CLI,
         ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', '-e', 'SELECT 1;'],
-        { env: cleanCliEnv, stdio: 'ignore', timeout: 2500 }
+        { env: cleanCliEnv, timeout: 2500 }
       );
       sqlReady = true;
     } catch {
@@ -252,11 +254,10 @@ async function ensureLocalMariaDbReady(): Promise<void> {
     }
 
     if (!sqlReady) {
-      execFileSync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
+      await execFileAsync('/bin/chown', ['-R', 'mysql:mysql', '/run/mysqld', persistentDataDir], {
         env: cleanCliEnv,
-        stdio: 'ignore',
         timeout: 5000,
-      });
+      }).catch(() => {});
 
       const child = spawn(
         LOCAL_MARIADB_BIN,
@@ -279,7 +280,7 @@ async function ensureLocalMariaDbReady(): Promise<void> {
       for (let i = 0; i < 45; i++) {
         await new Promise((resolve) => setTimeout(resolve, 300));
         try {
-          execFileSync(
+          await execFileAsync(
             LOCAL_MYSQL_CLI,
             [
               '--protocol=socket',
@@ -289,7 +290,7 @@ async function ensureLocalMariaDbReady(): Promise<void> {
               '-e',
               'SELECT 1;',
             ],
-            { env: cleanCliEnv, stdio: 'ignore', timeout: 2500 }
+            { env: cleanCliEnv, timeout: 2500 }
           );
           sqlReady = true;
           break;
@@ -314,10 +315,10 @@ async function ensureLocalMariaDbReady(): Promise<void> {
     ].join(' ');
 
     try {
-      execFileSync(
+      await execFileAsync(
         LOCAL_MYSQL_CLI,
         ['--protocol=socket', `--socket=${LOCAL_MARIADB_SOCKET}`, '-u', 'root', '-e', bootstrapSql],
-        { env: cleanCliEnv, stdio: 'ignore', timeout: 6000 }
+        { env: cleanCliEnv, timeout: 6000 }
       );
     } catch (err) {
       localMariaDbReadyPromise = null;
