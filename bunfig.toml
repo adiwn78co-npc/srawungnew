@@ -1,3 +1,4 @@
 [install]
-networkConcurrency = 8
+backend = "copyfile"
 concurrentScripts = 4
+

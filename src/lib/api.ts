@@ -929,6 +929,14 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
+  deleteLeaveRequest: (id: string, payload?: { reason?: string }) =>
+    request<{ bundle: AttendanceSystemBundle; message?: string }>(
+      `/api/attendance-system/leave-requests/${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify(payload || {}),
+      }
+    ),
   submitOrAssignWfa: (payload: {
     mode: 'staff_request' | 'hr_manual';
     userId?: string;

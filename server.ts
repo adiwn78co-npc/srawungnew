@@ -1,5 +1,4 @@
 import express, { type Request, type Response } from 'express';
-import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -11447,6 +11446,101 @@ async function startServer() {
     res.json({ bundle: db.getData().attendanceSystem });
   });
 
+  // 6B. PEMBATALAN / PENGHAPUSAN CUTI OLEH DIREKTUR (SELURUH STAF TERMASUK DIREKTUR & YANG SUDAH DI-ACC / REVIEW)
+  app.delete('/api/attendance-system/leave-requests/:id', (req: Request, res: Response) => {
+    const currentUser = getCurrentUser(req);
+    if (currentUser.role !== 'director' && currentUser.role !== 'system_admin') {
+      return res.status(403).json({
+        error:
+          'Akses ditolak: Hanya Direktur yang berwenang menghapus atau membatalkan data cuti/izin staf maupun Direktur.',
+      });
+    }
+
+    const { id } = req.params;
+    const cancelReason = String(
+      req.body?.reason ?? req.query?.reason ?? ''
+    ).trim();
+    const nowIso = new Date().toISOString();
+
+    let removedLeave: LeaveRequestRecord | null = null;
+
+    db.update((draft) => {
+      const sys = ensureAttendanceSystemInitialized(draft);
+      const idx = sys.leaveRequests.findIndex((l) => l.id === id);
+      if (idx === -1) return;
+
+      const target = sys.leaveRequests[idx];
+      removedLeave = target;
+      sys.leaveRequests.splice(idx, 1);
+
+      // Hitung tanggal-tanggal yang masih dicakup oleh cuti aktif LAIN milik pengguna yang sama (jika ada)
+      const otherActiveDates = new Set<string>();
+      for (const other of sys.leaveRequests) {
+        if (other.userId !== target.userId) continue;
+        const otherWf =
+          other.workflowType ||
+          resolveAttendanceWorkflowType(other.userId, undefined, other.userRoleTitle);
+        if (isAttendanceArrangementActiveOnCalendar(other.status, otherWf)) {
+          for (const d of enumerateDatesBetween(other.startDate, other.endDate, true)) {
+            otherActiveDates.add(d);
+          }
+        }
+      }
+
+      const targetDatesSet = new Set<string>(
+        enumerateDatesBetween(target.startDate, target.endDate, true)
+      );
+
+      // Bersihkan sinkronisasi catatan kehadiran harian (attendance_records) & kalender tim
+      const nextRecords: DailyAttendanceTimesheetRecord[] = [];
+      for (const rec of sys.records || []) {
+        const isDirectMatch = rec.leaveRequestId === target.id;
+        const isLegacyDateMatch =
+          rec.userId === target.userId &&
+          rec.recordType === 'LEAVE' &&
+          !rec.leaveRequestId &&
+          targetDatesSet.has(rec.date) &&
+          !otherActiveDates.has(rec.date);
+
+        if (isDirectMatch || isLegacyDateMatch) {
+          if (rec.clockInTime) {
+            nextRecords.push({
+              ...rec,
+              recordType: 'ATTENDANCE',
+              leaveRequestId: undefined,
+              leaveCategoryName: undefined,
+              updatedAt: nowIso,
+            });
+          }
+          // Jika tidak ada clockInTime (murni entri kalender cuti otomatis), hapus dari sys.records -> terhapus dari MySQL attendance_records
+          continue;
+        }
+        nextRecords.push(rec);
+      }
+      sys.records = nextRecords;
+
+      appendAttendanceAudit(
+        draft,
+        currentUser,
+        'LEAVE',
+        'Pembatalan / Penghapusan Cuti oleh Direktur',
+        `Direktur (${currentUser.name}) membatalkan & menghapus ${target.categoryName} milik ${target.userName} (${target.startDate} s/d ${target.endDate}, ${target.totalDays} hari kerja, status sebelumnya: ${target.status}).${
+          cancelReason ? ` Catatan: ${cancelReason}` : ''
+        }`,
+        target.userName
+      );
+    });
+
+    if (!removedLeave) {
+      return res.status(404).json({ error: 'Data pengajuan cuti/izin tidak ditemukan.' });
+    }
+
+    res.json({
+      bundle: buildAttendanceBundleForUser(currentUser),
+      message: `Cuti/izin ${(removedLeave as LeaveRequestRecord).userName} berhasil dibatalkan & dihapus dari database serta kalender.`,
+    });
+  });
+
   // 7. WORK FROM ANYWHERE (WFA) — WORKFLOW BERDASARKAN PERAN (EMPLOYEE->FINANCE, FINANCE->DIRECTOR, DIRECTOR->FINANCE)
   app.post('/api/attendance-system/wfa', (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
@@ -12688,22 +12782,35 @@ async function startServer() {
       res.sendFile(distIndexHtml);
     });
   } else {
-    viteInitPromise = createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-        watch: null,
-      },
-      appType: 'spa',
-    }).then((vite) => {
-      viteMiddleware = vite.middlewares;
-      return vite;
-    });
+    const ensureViteMiddleware = () => {
+      if (!viteInitPromise) {
+        viteInitPromise = import('vite')
+          .then(({ createServer: createViteServer }) =>
+            createViteServer({
+              server: {
+                middlewareMode: true,
+                hmr: false,
+                watch: null,
+              },
+              appType: 'spa',
+            })
+          )
+          .then((vite) => {
+            viteMiddleware = vite.middlewares;
+            return vite;
+          })
+          .catch((err) => {
+            viteInitPromise = null;
+            throw err;
+          });
+      }
+      return viteInitPromise;
+    };
 
     app.use(async (req, res, next) => {
       try {
-        if (!viteMiddleware && viteInitPromise) {
-          await viteInitPromise;
+        if (!viteMiddleware) {
+          await ensureViteMiddleware();
         }
         if (viteMiddleware) {
           return viteMiddleware(req, res, next);
@@ -12712,6 +12819,13 @@ async function startServer() {
       } catch (err) {
         next(err);
       }
+    });
+
+    // Warm up Vite asynchronously after event loop yields so port 3000 binds immediately
+    setImmediate(() => {
+      void ensureViteMiddleware().catch((err) => {
+        console.error('[Vite Init] Warmup error:', err);
+      });
     });
   }
 

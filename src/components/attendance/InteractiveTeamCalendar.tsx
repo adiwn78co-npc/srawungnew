@@ -22,6 +22,7 @@ import {
   MapPin,
   Search,
   SlidersHorizontal,
+  Trash2,
 } from 'lucide-react';
 import {
   User,
@@ -355,13 +356,17 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
   const [reqTargetUserId, setReqTargetUserId] = useState<string>(currentUser?.id || '');
   const [submittingRequest, setSubmittingRequest] = useState<boolean>(false);
 
-  // State di dalam Modal Detail Event (Approval & Update Timesheet)
+  // State di dalam Modal Detail Event (Approval, Pembatalan Cuti Direktur, & Update Timesheet)
   const [decisionNotes, setDecisionNotes] = useState<string>('');
   const [processingDecision, setProcessingDecision] = useState<boolean>(false);
+  const [confirmDeleteLeaveInModal, setConfirmDeleteLeaveInModal] = useState<boolean>(false);
+  const [deleteLeaveModalNotes, setDeleteLeaveModalNotes] = useState<string>('');
   const [editingTimesheetDate, setEditingTimesheetDate] = useState<string>('');
   const [editingTimesheetItems, setEditingTimesheetItems] = useState<
     { id?: string; category: WijnaWorkCategory; shortDescription: string }[]
   >([]);
+  const canDirectorDeleteLeave =
+    currentUser?.role === 'director' || currentUser?.role === 'system_admin';
 
   const activeStaffList = useMemo(
     () => allUsers.filter((u) => u.isActive && u.role !== 'admin'),
@@ -1124,8 +1129,32 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
         onShowToast('Tindak lanjut kehadiran luar lokasi berhasil disimpan.');
       }
       setSelectedEventModal(null);
+      setConfirmDeleteLeaveInModal(false);
+      setDeleteLeaveModalNotes('');
     } catch (err: any) {
       onShowError(err.message || 'Gagal memproses tindakan.');
+    } finally {
+      setProcessingDecision(false);
+    }
+  };
+
+  const handleDirectorDeleteLeaveFromCalendar = async (ev: UnifiedCalendarEvent) => {
+    if (!ev.leaveRecord || processingDecision) return;
+    setProcessingDecision(true);
+    try {
+      const res = await api.deleteLeaveRequest(ev.leaveRecord.id, {
+        reason: deleteLeaveModalNotes.trim() || undefined,
+      });
+      onBundleChange(res.bundle);
+      onShowToast(
+        res.message ||
+          `Cuti/izin ${ev.userName} (${ev.startDate} s/d ${ev.endDate}) berhasil dibatalkan & dihapus.`
+      );
+      setConfirmDeleteLeaveInModal(false);
+      setDeleteLeaveModalNotes('');
+      setSelectedEventModal(null);
+    } catch (err: any) {
+      onShowError(err.message || 'Gagal membatalkan/menghapus cuti.');
     } finally {
       setProcessingDecision(false);
     }
@@ -1820,7 +1849,11 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
                     </div>
                     <button
                       type="button"
-                      onClick={() => setSelectedEventModal(null)}
+                      onClick={() => {
+                        setSelectedEventModal(null);
+                        setConfirmDeleteLeaveInModal(false);
+                        setDeleteLeaveModalNotes('');
+                      }}
                       className="p-1 text-[#6B6B68] hover:text-[#171717] cursor-pointer"
                     >
                       <X className="w-4 h-4" />
@@ -2044,6 +2077,69 @@ export const InteractiveTeamCalendar: React.FC<InteractiveTeamCalendarProps> = (
                             </>
                           )}
                         </div>
+                      </div>
+                    )}
+
+                    {/* Panel Otoritas Direktur: Batalkan / Hapus Cuti Semua Staf & Direktur (Termasuk yang Sudah Di-ACC / Review) */}
+                    {canDirectorDeleteLeave && ev.category === 'LEAVE' && ev.leaveRecord && (
+                      <div className="p-3 rounded-lg bg-rose-50/70 border border-rose-200 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-bold text-rose-950 flex items-center gap-1.5">
+                            <Trash2 className="w-3.5 h-3.5 text-rose-700" />
+                            <span>Otoritas Direktur: Batalkan / Hapus Jadwal Cuti</span>
+                          </div>
+                          {!confirmDeleteLeaveInModal && (
+                            <button
+                              type="button"
+                              disabled={processingDecision}
+                              onClick={() => setConfirmDeleteLeaveInModal(true)}
+                              className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Batalkan / Hapus Cuti</span>
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-rose-900">
+                          Berlaku untuk seluruh staf maupun Direktur, termasuk cuti yang telah berstatus Approved / Reviewed / Tercatat Finance. Kuota cuti dan jadwal kalender akan dipulihkan otomatis.
+                        </p>
+                        {confirmDeleteLeaveInModal && (
+                          <div className="pt-1.5 border-t border-rose-200/80 space-y-2">
+                            <input
+                              type="text"
+                              value={deleteLeaveModalNotes}
+                              onChange={(e) => setDeleteLeaveModalNotes(e.target.value)}
+                              placeholder="Catatan / alasan pembatalan Direktur (opsional)..."
+                              className="w-full px-2.5 py-1.5 text-xs border border-rose-300 rounded bg-white"
+                            />
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                disabled={processingDecision}
+                                onClick={() => {
+                                  setConfirmDeleteLeaveInModal(false);
+                                  setDeleteLeaveModalNotes('');
+                                }}
+                                className="px-2.5 py-1 rounded border border-rose-300 bg-white text-rose-800 text-[11px] font-semibold cursor-pointer"
+                              >
+                                Urungkan
+                              </button>
+                              <button
+                                type="button"
+                                disabled={processingDecision}
+                                onClick={() => handleDirectorDeleteLeaveFromCalendar(ev)}
+                                className="px-3 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>
+                                  {processingDecision
+                                    ? 'Menghapus...'
+                                    : 'Konfirmasi Hapus Cuti'}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

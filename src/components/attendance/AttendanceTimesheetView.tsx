@@ -39,6 +39,7 @@ import {
   AttendanceSystemBundle,
   WijnaWorkCategory,
   LeaveCategoryGroup,
+  LeaveRequestRecord,
 } from '../../types/index.js';
 import {
   getFinanceReportingPeriods,
@@ -389,6 +390,7 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
     currentUser?.role === 'system_admin';
   const isStrictDirector =
     currentUser?.role === 'director' || currentUser?.role === 'system_admin';
+  const canDirectorDeleteLeave = isStrictDirector;
   // Detail lintas staf hanya dapat dilihat oleh Finance (HR), Director, dan System Administrator
   const canViewDetails = isHR || isDirector;
   // Rekap Kerja dapat dilihat oleh HR/Finance, Director, dan System Administrator
@@ -510,6 +512,9 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
   );
   const [leaveReason, setLeaveReason] = useState<string>('');
   const [leaveDecisionNotesMap, setLeaveDecisionNotesMap] = useState<Record<string, string>>({});
+  const [leaveToDeleteModal, setLeaveToDeleteModal] = useState<LeaveRequestRecord | null>(null);
+  const [deleteLeaveReason, setDeleteLeaveReason] = useState<string>('');
+  const [deletingLeaveRequest, setDeletingLeaveRequest] = useState<boolean>(false);
   const [wfaDecisionNotesMap, setWfaDecisionNotesMap] = useState<Record<string, string>>({});
   const [flexDecisionNotesMap, setFlexDecisionNotesMap] = useState<Record<string, string>>({});
   const [holidayDecisionNotesMap, setHolidayDecisionNotesMap] = useState<Record<string, string>>({});
@@ -1431,6 +1436,30 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
       );
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal memproses tindak lanjut cuti/izin.');
+    }
+  };
+
+  const handleConfirmDeleteLeaveRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!leaveToDeleteModal || deletingLeaveRequest) return;
+    setErrorMsg(null);
+    setDeletingLeaveRequest(true);
+    try {
+      const target = leaveToDeleteModal;
+      const res = await api.deleteLeaveRequest(target.id, {
+        reason: deleteLeaveReason.trim() || undefined,
+      });
+      setBundle(res.bundle);
+      setLeaveToDeleteModal(null);
+      setDeleteLeaveReason('');
+      showToast(
+        res.message ||
+          `Cuti/izin ${target.userName} (${target.startDate} s/d ${target.endDate}) berhasil dibatalkan & dihapus.`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal membatalkan/menghapus pengajuan cuti.');
+    } finally {
+      setDeletingLeaveRequest(false);
     }
   };
 
@@ -4207,118 +4236,142 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                           </td>
                           {canViewDetails && (
                             <td className="py-3 px-4 text-right">
-                              {/* 1. Employee -> Finance: Finance Approves or Returns with mandatory reason */}
-                              {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isHR && (
-                                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                                  <input
-                                    type="text"
-                                    value={leaveDecisionNotesMap[lv.id] || ''}
-                                    onChange={(e) =>
-                                      setLeaveDecisionNotesMap((prev) => ({
-                                        ...prev,
-                                        [lv.id]: e.target.value,
-                                      }))
-                                    }
-                                    placeholder="Catatan / alasan return..."
-                                    className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
-                                  />
-                                  {lv.status !== 'Approved' && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleLeaveDecision(lv.id, 'hr', 'approve')}
-                                      className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
-                                    >
-                                      Approve
-                                    </button>
+                              <div className="flex flex-col items-end gap-1.5">
+                                {/* 1. Employee -> Finance: Finance Approves or Returns with mandatory reason */}
+                                {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isHR && (
+                                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={leaveDecisionNotesMap[lv.id] || ''}
+                                      onChange={(e) =>
+                                        setLeaveDecisionNotesMap((prev) => ({
+                                          ...prev,
+                                          [lv.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Catatan / alasan return..."
+                                      className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                    />
+                                    {lv.status !== 'Approved' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleLeaveDecision(lv.id, 'hr', 'approve')}
+                                        className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        Approve
+                                      </button>
+                                    )}
+                                    {lv.status !== 'Returned' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleLeaveDecision(lv.id, 'hr', 'return')}
+                                        className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        Return
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' &&
+                                  isDirector &&
+                                  !isHR && (
+                                    <span className="text-[11px] text-[#787774]">
+                                      Wewenang Persetujuan Finance
+                                    </span>
                                   )}
-                                  {lv.status !== 'Returned' && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleLeaveDecision(lv.id, 'hr', 'return')}
-                                      className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
-                                    >
-                                      Return
-                                    </button>
-                                  )}
-                                </div>
-                              )}
-                              {wfType === 'EMPLOYEE_TO_FINANCE_APPROVAL' && isDirector && (
-                                <span className="text-[11px] text-[#787774]">
-                                  Wewenang Persetujuan Finance
-                                </span>
-                              )}
 
-                              {/* 2. Finance -> Director: Director reviews & gives strategic input only (No Approve/Return) */}
-                              {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isDirector && (
-                                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                                  <input
-                                    type="text"
-                                    value={leaveDecisionNotesMap[lv.id] || ''}
-                                    onChange={(e) =>
-                                      setLeaveDecisionNotesMap((prev) => ({
-                                        ...prev,
-                                        [lv.id]: e.target.value,
-                                      }))
-                                    }
-                                    placeholder="Masukan / catatan review..."
-                                    className="w-40 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleLeaveDecision(lv.id, 'director', 'review')
-                                    }
-                                    className="px-2.5 py-1 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
-                                  >
-                                    Simpan Catatan Review
-                                  </button>
-                                </div>
-                              )}
-                              {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isHR && (
-                                <span className="text-[11px] text-[#787774]">
-                                  {lv.directorReviewNotes || lv.directorDecisionNotes
-                                    ? 'Telah Direview Direktur'
-                                    : 'Menunggu Masukan Review Direktur'}
-                                </span>
-                              )}
-
-                              {/* 3. Director -> Finance: Finance acknowledges for information/record-keeping only */}
-                              {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isHR && (
-                                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                                  <input
-                                    type="text"
-                                    value={leaveDecisionNotesMap[lv.id] || ''}
-                                    onChange={(e) =>
-                                      setLeaveDecisionNotesMap((prev) => ({
-                                        ...prev,
-                                        [lv.id]: e.target.value,
-                                      }))
-                                    }
-                                    placeholder="Catatan pencatatan HR..."
-                                    className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
-                                  />
-                                  {lv.status !== 'Acknowledged by Finance' ? (
+                                {/* 2. Finance -> Director: Director reviews & gives strategic input only */}
+                                {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' && isDirector && (
+                                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={leaveDecisionNotesMap[lv.id] || ''}
+                                      onChange={(e) =>
+                                        setLeaveDecisionNotesMap((prev) => ({
+                                          ...prev,
+                                          [lv.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Masukan / catatan review..."
+                                      className="w-40 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                    />
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        handleLeaveDecision(lv.id, 'hr', 'acknowledge')
+                                        handleLeaveDecision(lv.id, 'director', 'review')
                                       }
-                                      className="px-2.5 py-1 rounded bg-purple-700 hover:bg-purple-800 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
+                                      className="px-2.5 py-1 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
                                     >
-                                      Catat / Acknowledge
+                                      Simpan Catatan Review
                                     </button>
-                                  ) : (
-                                    <span className="text-[11px] text-purple-800 font-semibold">
-                                      Tercatat di Finance
+                                  </div>
+                                )}
+                                {wfType === 'FINANCE_TO_DIRECTOR_REVIEW' &&
+                                  isHR &&
+                                  !isDirector && (
+                                    <span className="text-[11px] text-[#787774]">
+                                      {lv.directorReviewNotes || lv.directorDecisionNotes
+                                        ? 'Telah Direview Direktur'
+                                        : 'Menunggu Masukan Review Direktur'}
                                     </span>
                                   )}
-                                </div>
-                              )}
-                              {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isDirector && (
-                                <span className="text-[11px] text-[#787774]">
-                                  Informasi ke Finance (Tanpa Approval)
-                                </span>
-                              )}
+
+                                {/* 3. Director -> Finance: Finance acknowledges for information/record-keeping only */}
+                                {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' && isHR && (
+                                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={leaveDecisionNotesMap[lv.id] || ''}
+                                      onChange={(e) =>
+                                        setLeaveDecisionNotesMap((prev) => ({
+                                          ...prev,
+                                          [lv.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Catatan pencatatan HR..."
+                                      className="w-36 px-2 py-1 text-[11px] border border-[#D9D9D6] rounded bg-white"
+                                    />
+                                    {lv.status !== 'Acknowledged by Finance' ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleLeaveDecision(lv.id, 'hr', 'acknowledge')
+                                        }
+                                        className="px-2.5 py-1 rounded bg-purple-700 hover:bg-purple-800 text-white text-[10.5px] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        Catat / Acknowledge
+                                      </button>
+                                    ) : (
+                                      <span className="text-[11px] text-purple-800 font-semibold">
+                                        Tercatat di Finance
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                {wfType === 'DIRECTOR_TO_FINANCE_NOTIFY' &&
+                                  isDirector &&
+                                  !isHR && (
+                                    <span className="text-[11px] text-[#787774]">
+                                      Informasi ke Finance (Tanpa Approval)
+                                    </span>
+                                  )}
+
+                                {/* Otoritas Direktur: Batalkan / Hapus Cuti Semua Staf & Direktur (Termasuk yang Sudah Di-ACC / Review) */}
+                                {canDirectorDeleteLeave && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setLeaveToDeleteModal(lv);
+                                      setDeleteLeaveReason('');
+                                    }}
+                                    title="Batalkan & hapus data cuti/izin ini (termasuk memulihkan kuota & membersihkan jadwal kalender)"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-rose-200 bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white text-[10.5px] font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>Batalkan / Hapus Cuti</span>
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           )}
                         </tr>
@@ -6081,6 +6134,103 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                   className="px-3.5 py-1.5 rounded bg-[#2563EB] text-white font-semibold cursor-pointer"
                 >
                   Simpan Kategori Cuti
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL KONFIRMASI PEMBATALAN / PENGHAPUSAN CUTI OLEH DIREKTUR          */}
+      {/* ===================================================================== */}
+      {leaveToDeleteModal && canDirectorDeleteLeave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="bg-white rounded-xl border border-[#E5E5E3] shadow-xl max-w-md w-full overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#E5E5E3] flex items-center justify-between bg-rose-50/70">
+              <div className="flex items-center gap-2">
+                <Trash2 className="w-4 h-4 text-rose-700" />
+                <h3 className="text-xs font-bold text-rose-950">
+                  Batalkan & Hapus Data Cuti / Izin (Otoritas Direktur)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deletingLeaveRequest) {
+                    setLeaveToDeleteModal(null);
+                    setDeleteLeaveReason('');
+                  }
+                }}
+                className="p-1 rounded text-[#787774] hover:text-[#252525] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleConfirmDeleteLeaveRequest} className="p-4 space-y-3 text-xs">
+              <div className="p-3 rounded-lg bg-[#F7F7F5] border border-[#E5E5E3] space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-bold text-[#171717] text-sm">
+                      {leaveToDeleteModal.userName}
+                    </div>
+                    <div className="text-[11px] text-[#6B6B68]">
+                      {leaveToDeleteModal.userRoleTitle} • {leaveToDeleteModal.department}
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-white border border-[#DCDCD8] text-[10.5px] font-semibold text-[#37352F]">
+                    {leaveToDeleteModal.status}
+                  </span>
+                </div>
+                <div className="pt-1.5 border-t border-[#E6E5E0] text-[11px] text-[#37352F] space-y-0.5">
+                  <div>
+                    <strong>Kategori:</strong> {leaveToDeleteModal.categoryName}
+                  </div>
+                  <div>
+                    <strong>Tanggal:</strong> {leaveToDeleteModal.startDate} s/d{' '}
+                    {leaveToDeleteModal.endDate} ({leaveToDeleteModal.totalDays} hari kerja)
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                Tindakan ini akan menghapus data cuti/izin dari database MySQL, menghapus blok jadwal cuti terkait pada <strong>Kalender Tim & Absensi</strong>, serta memulihkan kembali <strong>kuota sisa cuti</strong> pengguna secara otomatis.
+              </div>
+
+              <div>
+                <label className="block font-semibold text-[#37352F] mb-1">
+                  Catatan / Alasan Pembatalan Direktur (Opsional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={deleteLeaveReason}
+                  onChange={(e) => setDeleteLeaveReason(e.target.value)}
+                  placeholder="Contoh: Perubahan jadwal kegiatan prioritas / pembatalan rencana cuti..."
+                  className="w-full px-2.5 py-1.5 border border-[#D9D9D6] rounded bg-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#EFEFED]">
+                <button
+                  type="button"
+                  disabled={deletingLeaveRequest}
+                  onClick={() => {
+                    setLeaveToDeleteModal(null);
+                    setDeleteLeaveReason('');
+                  }}
+                  className="px-3 py-1.5 rounded border border-[#D9D9D6] font-semibold text-[#5A5A58] hover:bg-[#F4F4F2] cursor-pointer"
+                >
+                  Kembali
+                </button>
+                <button
+                  type="submit"
+                  disabled={deletingLeaveRequest}
+                  className="px-3.5 py-1.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>
+                    {deletingLeaveRequest ? 'Menghapus...' : 'Ya, Batalkan & Hapus Cuti'}
+                  </span>
                 </button>
               </div>
             </form>
