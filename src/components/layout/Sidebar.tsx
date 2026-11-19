@@ -103,6 +103,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   // Load authoritative attendance state from backend & keep synced across navigation/focus/events
   useEffect(() => {
+    if (!currentUser?.id) {
+      setAttendanceBundle(null);
+      return;
+    }
+
     let mounted = true;
     const fetchLatestBundle = () => {
       api

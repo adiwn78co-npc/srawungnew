@@ -74,6 +74,7 @@ import {
   buildHierarchyImportPlan,
   parseProgramHierarchyWorkbookBuffer,
 } from './src/lib/hierarchyExcelParser.ts';
+import { fetchMysqlCurrentTimestampIso } from './src/server/mysqlPool.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9985,8 +9986,11 @@ async function startServer() {
     return bundle!;
   }
 
-  app.get('/api/attendance-system', (req: Request, res: Response) => {
+  app.get('/api/attendance-system', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
+    if (db.isMysqlReady()) {
+      await db.refreshFromMysqlIfStale(0);
+    }
     res.json(buildAttendanceBundleForUser(currentUser));
   });
 
@@ -9995,7 +9999,7 @@ async function startServer() {
   // - Begitu Clock In berhasil, sesi aktif disimpan di backend/MySQL sebagai satu-satunya sumber kebenaran.
   // - Klik ganda / request duplikat / tab lain TIDAK BOLEH mereset, menghapus, atau memodifikasi sesi aktif (idempoten).
   // - Tidak pernah ada automatic Clock Out dalam kondisi apa pun.
-  app.post('/api/attendance-system/clock-in', (req: Request, res: Response) => {
+  app.post('/api/attendance-system/clock-in', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const {
       date,
@@ -10029,7 +10033,8 @@ async function startServer() {
       });
     }
 
-    const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
+    const serverNowIso = await fetchMysqlCurrentTimestampIso();
+    const targetDate = date && String(date).trim() ? String(date).trim() : serverNowIso.slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
     const accuracyMargin = Math.min(200, Math.max(0, Math.round(Number(req.body?.gpsAccuracy) || 0)));
@@ -10100,7 +10105,7 @@ async function startServer() {
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIso = serverNowIso;
       const activeFlex = sys.flextimeAssignments.find(
         (f) =>
           f.userId === currentUser.id &&
@@ -10190,6 +10195,7 @@ async function startServer() {
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
+    await db.commitPendingWrites('POST /api/attendance-system/clock-in');
     res.json({
       record: createdOrUpdated,
       bundle: buildAttendanceBundleForUser(currentUser),
@@ -10401,7 +10407,7 @@ async function startServer() {
   // - Sesi aktif HANYA dapat diakhiri melalui aksi CLOCK OUT eksplisit oleh user terautentikasi yang sama (currentUser.id).
   // - Mendukung penutupan sesi aktif lintas pergantian hari/zona waktu (midnight rollover).
   // - Idempoten apabila terjadi klik ganda pada tombol Clock Out (tidak menimpa clockOutTime yang sudah tercatat).
-  app.post('/api/attendance-system/clock-out', (req: Request, res: Response) => {
+  app.post('/api/attendance-system/clock-out', async (req: Request, res: Response) => {
     const currentUser = getCurrentUser(req);
     const {
       recordId,
@@ -10419,7 +10425,8 @@ async function startServer() {
       workItems?: { id?: string; category: WijnaWorkCategory; shortDescription: string }[];
     } = req.body || {};
 
-    const targetDate = date && String(date).trim() ? String(date).trim() : new Date().toISOString().slice(0, 10);
+    const serverNowIso = await fetchMysqlCurrentTimestampIso();
+    const targetDate = date && String(date).trim() ? String(date).trim() : serverNowIso.slice(0, 10);
     const lat = Number(latitude);
     const lon = Number(longitude);
     const accuracyMargin = Math.min(200, Math.max(0, Math.round(Number(req.body?.gpsAccuracy) || 0)));
@@ -10501,7 +10508,7 @@ async function startServer() {
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIso = serverNowIso;
       const computedHours = Math.max(
         0.1,
         calculateWorkHoursBetween(prev.clockInTime!, nowIso)
@@ -10572,6 +10579,7 @@ async function startServer() {
     if (errMsg) {
       return res.status(400).json({ error: errMsg });
     }
+    await db.commitPendingWrites('POST /api/attendance-system/clock-out');
     res.json({
       record: updatedRecord,
       bundle: buildAttendanceBundleForUser(currentUser),

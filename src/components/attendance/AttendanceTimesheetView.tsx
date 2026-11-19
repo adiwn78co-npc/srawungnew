@@ -2931,45 +2931,79 @@ export const AttendanceTimesheetView: React.FC<AttendanceTimesheetViewProps> = (
                     </div>
                   </div>
 
-                  {/* Tombol Besar Clock In & Clock Out (Tulisan tetap "Clock In" dan "Clock Out") */}
-                  <div className="grid grid-cols-2 gap-2.5 lg:w-[440px]">
-                    <button
-                      type="button"
-                      disabled={
-                        submittingAction ||
-                        hasClockedIn ||
-                        !hasCheckedLocation ||
-                        (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr')
-                      }
-                      onClick={handleClockIn}
-                      className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
-                        hasClockedIn
-                          ? 'bg-[#F0FAF6] text-[#16654E] border border-[#B8E6D4] cursor-default'
-                          : !hasCheckedLocation ||
-                            (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr')
-                          ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
-                          : 'bg-[#1F7A63] hover:bg-[#17614E] text-white shadow-xs cursor-pointer'
-                      }`}
-                    >
-                      <LogIn className="w-4 h-4 shrink-0" />
-                      <span>Clock In</span>
-                    </button>
+                  {/* Satu Tombol Dinamis: Belum Clock In -> CLOCK IN | Sudah Clock In -> CLOCK OUT | Sudah Clock Out -> COMPLETED */}
+                  {(() => {
+                    const clockState: 'CLOCK_IN' | 'CLOCK_OUT' | 'COMPLETED' = hasClockedOut
+                      ? 'COMPLETED'
+                      : hasClockedIn
+                      ? 'CLOCK_OUT'
+                      : 'CLOCK_IN';
 
+                    const isClockInBlocked =
+                      !hasCheckedLocation ||
+                      (!isMatchedWithOffice && outsideClockInChoice !== 'clock_in_with_hr');
+
+                    const isDisabled =
+                      clockState === 'COMPLETED' ||
+                      submittingAction ||
+                      (clockState === 'CLOCK_IN' && isClockInBlocked);
+
+                    return (
+                      <div className="lg:w-[240px] shrink-0">
+                        <button
+                          type="button"
+                          disabled={isDisabled}
+                          onClick={
+                            clockState === 'CLOCK_IN'
+                              ? handleClockIn
+                              : clockState === 'CLOCK_OUT'
+                              ? handleClockOut
+                              : undefined
+                          }
+                          className={`w-full h-11 sm:h-12 px-6 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
+                            clockState === 'COMPLETED'
+                              ? 'bg-[#F0FAF6] text-[#16654E] border border-[#B8E6D4] cursor-default'
+                              : submittingAction || (clockState === 'CLOCK_IN' && isClockInBlocked)
+                              ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
+                              : clockState === 'CLOCK_OUT'
+                              ? 'bg-[#2B5B84] hover:bg-[#214768] text-white shadow-xs cursor-pointer'
+                              : 'bg-[#1F7A63] hover:bg-[#17614E] text-white shadow-xs cursor-pointer'
+                          }`}
+                        >
+                          {clockState === 'COMPLETED' ? (
+                            <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          ) : clockState === 'CLOCK_OUT' ? (
+                            <LogOut className="w-4 h-4 shrink-0" />
+                          ) : (
+                            <LogIn className="w-4 h-4 shrink-0" />
+                          )}
+                          <span>
+                            {submittingAction
+                              ? 'Menyimpan...'
+                              : clockState === 'COMPLETED'
+                              ? 'COMPLETED'
+                              : clockState === 'CLOCK_OUT'
+                              ? 'CLOCK OUT'
+                              : 'CLOCK IN'}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {errorMsg && (
+                  <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                    <span>{errorMsg}</span>
                     <button
                       type="button"
-                      disabled={submittingAction || !hasClockedIn || hasClockedOut}
-                      onClick={handleClockOut}
-                      className={`h-11 sm:h-12 px-5 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all whitespace-nowrap ${
-                        !hasClockedIn || hasClockedOut
-                          ? 'bg-[#FAF9F6] text-[#94A3B8] border border-[#E5E4DE] cursor-not-allowed'
-                          : 'bg-[#2B5B84] hover:bg-[#214768] text-white shadow-xs cursor-pointer'
-                      }`}
+                      onClick={() => setErrorMsg(null)}
+                      className="text-red-500 hover:text-red-700 cursor-pointer shrink-0"
                     >
-                      <LogOut className="w-4 h-4 shrink-0" />
-                      <span>Clock Out</span>
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                </div>
+                )}
 
                 {/* BARIS 3 (DI BAWAH): OPSI & STATUS IZIN HR DENGAN TONE DESAIN YANG SERAGAM */}
                 {hasCheckedLocation && !isMatchedWithOffice && !hasClockedIn && (

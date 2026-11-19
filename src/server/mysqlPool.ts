@@ -1212,6 +1212,24 @@ async function safeSelectTableRows(
 /**
  * Membaca seluruh data aplikasi dari tabel-tabel MySQL menggunakan query SELECT secara non-destructive
  */
+export async function fetchMysqlCurrentTimestampIso(): Promise<string> {
+  const pool = await getMysqlPool();
+  if (!pool) return new Date().toISOString();
+  try {
+    const [rows]: any = await pool.query(
+      "SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ') AS utc_iso, CURRENT_TIMESTAMP AS cur_ts"
+    );
+    const rawIso = rows?.[0]?.utc_iso ? String(rows[0].utc_iso).trim() : '';
+    const cleanIso = rawIso.replace(/\.(\d{3})\d+Z$/, '.$1Z');
+    if (cleanIso && !Number.isNaN(new Date(cleanIso).getTime())) {
+      return cleanIso;
+    }
+  } catch {
+    // fallback ke waktu server Node jika query timestamp gagal
+  }
+  return new Date().toISOString();
+}
+
 export async function loadDatabaseFromMysql(
   pool: MysqlPoolLike,
   _fallbackSeed?: DatabaseSchema
